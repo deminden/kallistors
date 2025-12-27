@@ -1,19 +1,11 @@
-use std::fs::File;
-use std::io::{Cursor, Read};
-use std::path::PathBuf;
+use std::io::Cursor;
 
 use kallistors::io::FastqReader;
 use kallistors::pseudoalign::{
     Strand, build_bifrost_index, pseudoalign_single_end_bifrost_with_strand,
 };
 
-fn fixture_path(name: &str) -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tests");
-    path.push("fixtures");
-    path.push(name);
-    path
-}
+mod helpers;
 
 fn revcomp(seq: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(seq.len());
@@ -31,20 +23,12 @@ fn revcomp(seq: &[u8]) -> Vec<u8> {
 
 #[test]
 fn reverse_strand_aligns_only_with_revcomp() {
-    let index_path = fixture_path("synthetic.idx");
-    let fasta_path = fixture_path("synthetic_transcripts.fa");
-    if !index_path.exists() || !fasta_path.exists() {
-        return;
-    }
-
-    let index = build_bifrost_index(&index_path).expect("index");
-
-    let mut fasta = String::new();
-    File::open(&fasta_path)
-        .expect("fasta file")
-        .read_to_string(&mut fasta)
-        .expect("read fasta");
-    let transcripts = parse_fasta(&fasta);
+    let dataset = match helpers::build_synthetic_index() {
+        Some(dataset) => dataset,
+        None => return,
+    };
+    let index = build_bifrost_index(&dataset.index_path).expect("index");
+    let transcripts = dataset.transcripts;
     let read_len = index.k + 10;
     let mut read = None;
     'outer: for seq in &transcripts {
@@ -86,25 +70,6 @@ fn reverse_strand_aligns_only_with_revcomp() {
         pseudoalign_single_end_bifrost_with_strand(&index, &mut rc_reader, Strand::Unstranded)
             .expect("unstranded");
     assert_eq!(res_unstranded.reads_aligned, 1);
-}
-
-fn parse_fasta(input: &str) -> Vec<Vec<u8>> {
-    let mut seqs = Vec::new();
-    let mut current = Vec::new();
-    for line in input.lines() {
-        if line.starts_with('>') {
-            if !current.is_empty() {
-                seqs.push(current);
-                current = Vec::new();
-            }
-            continue;
-        }
-        current.extend_from_slice(line.trim().as_bytes());
-    }
-    if !current.is_empty() {
-        seqs.push(current);
-    }
-    seqs
 }
 
 fn contains_subseq(haystack: &[u8], needle: &[u8]) -> bool {

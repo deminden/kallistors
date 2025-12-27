@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use kallistors::io::FastqReader;
@@ -8,6 +8,8 @@ use kallistors::pseudoalign::{
     EcCounts, build_bifrost_index, build_kmer_ec_index, pseudoalign_single_end,
     pseudoalign_single_end_bifrost,
 };
+
+mod helpers;
 
 #[test]
 fn parity_on_synthetic_variants() {
@@ -17,13 +19,11 @@ fn parity_on_synthetic_variants() {
     let read1 = tmp.join("reads_1.fq");
     let read2 = tmp.join("reads_2.fq");
     let gc_reads = tmp.join("reads_gc.fq");
-    let index = fixture_path("synthetic.idx");
-    let fasta = fixture_path("synthetic_transcripts.fa");
-    if !index.exists() || !fasta.exists() {
-        return;
-    }
-
-    let transcripts = read_transcripts(&fasta);
+    let dataset = match helpers::build_synthetic_index() {
+        Some(dataset) => dataset,
+        None => return,
+    };
+    let transcripts = dataset.transcripts;
 
     let mut rng = SimpleRng::new(0xA5A5_1234_1111_2222);
     let pairs = synthesize_paired_reads(&mut rng, &transcripts, 40, 80, 12);
@@ -33,9 +33,9 @@ fn parity_on_synthetic_variants() {
     let gc = synthesize_reads_gc_biased(&mut rng, &transcripts, 40, 20, 0.6);
     write_fastq(&gc_reads, &gc.iter().collect::<Vec<_>>()).expect("write gc reads");
 
-    assert_parity(&index, &read1);
-    assert_parity(&index, &read2);
-    assert_parity(&index, &gc_reads);
+    assert_parity(&dataset.index_path, &read1);
+    assert_parity(&dataset.index_path, &read2);
+    assert_parity(&dataset.index_path, &gc_reads);
 
     let _ = fs::remove_dir_all(&tmp);
 }
@@ -80,14 +80,6 @@ fn temp_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{}-{}-{}", prefix, pid, now))
 }
 
-fn fixture_path(name: &str) -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tests");
-    path.push("fixtures");
-    path.push(name);
-    path
-}
-
 fn write_fastq(path: &Path, reads: &[&Vec<u8>]) -> std::io::Result<()> {
     let mut file = File::create(path)?;
     for (i, seq) in reads.iter().enumerate() {
@@ -99,25 +91,16 @@ fn write_fastq(path: &Path, reads: &[&Vec<u8>]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn read_transcripts(path: &Path) -> Vec<(String, Vec<u8>)> {
-    let mut fasta = String::new();
-    File::open(path)
-        .expect("fasta file")
-        .read_to_string(&mut fasta)
-        .expect("read fasta");
-    parse_fasta(&fasta)
-}
-
 fn synthesize_paired_reads(
     rng: &mut SimpleRng,
-    transcripts: &[(String, Vec<u8>)],
+    transcripts: &[Vec<u8>],
     read_len: usize,
     frag_len: usize,
     count: usize,
 ) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
-        let seq = &transcripts[rng.next_usize(transcripts.len())].1;
+        let seq = &transcripts[rng.next_usize(transcripts.len())];
         if seq.len() < frag_len {
             continue;
         }
@@ -132,7 +115,7 @@ fn synthesize_paired_reads(
 
 fn synthesize_reads_gc_biased(
     rng: &mut SimpleRng,
-    transcripts: &[(String, Vec<u8>)],
+    transcripts: &[Vec<u8>],
     read_len: usize,
     count: usize,
     gc_min: f64,
@@ -140,11 +123,10 @@ fn synthesize_reads_gc_biased(
     let mut out = Vec::with_capacity(count);
     let candidates: Vec<&Vec<u8>> = transcripts
         .iter()
-        .map(|t| &t.1)
         .filter(|seq| gc_fraction(seq) >= gc_min)
         .collect();
     let pool: Vec<&Vec<u8>> = if candidates.is_empty() {
-        transcripts.iter().map(|t| &t.1).collect()
+        transcripts.iter().collect()
     } else {
         candidates
     };
@@ -208,25 +190,4 @@ impl SimpleRng {
         }
         (self.next_u64() as usize) % bound
     }
-}
-
-fn parse_fasta(input: &str) -> Vec<(String, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut name = None;
-    let mut seq = Vec::new();
-    for line in input.lines() {
-        if let Some(rest) = line.strip_prefix('>') {
-            if let Some(n) = name.take() {
-                out.push((n, seq));
-                seq = Vec::new();
-            }
-            name = Some(rest.trim().to_string());
-            continue;
-        }
-        seq.extend_from_slice(line.trim().as_bytes());
-    }
-    if let Some(n) = name {
-        out.push((n, seq));
-    }
-    out
 }

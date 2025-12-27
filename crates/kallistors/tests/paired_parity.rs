@@ -1,26 +1,24 @@
-use std::io::Cursor;
-use std::path::PathBuf;
-
 use kallistors::io::FastqReader;
 use kallistors::pseudoalign::{
     Strand, build_bifrost_index, build_kmer_ec_index, pseudoalign_paired_bifrost_with_strand,
     pseudoalign_paired_naive,
 };
+use std::io::Cursor;
+
+mod helpers;
 
 #[test]
 fn paired_parity_naive_vs_bifrost() {
-    let index_path = fixture_path("synthetic.idx");
-    let fasta_path = fixture_path("synthetic_transcripts.fa");
-    if !index_path.exists() || !fasta_path.exists() {
-        return;
-    }
-
-    let transcripts = read_transcripts(&fasta_path);
+    let dataset = match helpers::build_synthetic_index() {
+        Some(dataset) => dataset,
+        None => return,
+    };
+    let transcripts = dataset.transcripts;
     let pairs = synthesize_paired_reads(&transcripts, 50, 90, 8);
     let (fq1, fq2) = to_fastq_pairs(&pairs);
 
-    let naive_index = build_kmer_ec_index(&index_path).expect("naive index");
-    let bifrost_index = build_bifrost_index(&index_path).expect("bifrost index");
+    let naive_index = build_kmer_ec_index(&dataset.index_path).expect("naive index");
+    let bifrost_index = build_bifrost_index(&dataset.index_path).expect("bifrost index");
 
     let mut r1 = FastqReader::new(Cursor::new(fq1.clone()));
     let mut r2 = FastqReader::new(Cursor::new(fq2.clone()));
@@ -39,34 +37,6 @@ fn paired_parity_naive_vs_bifrost() {
     assert_eq!(naive.reads_processed, bifrost.reads_processed);
     assert_eq!(naive.reads_aligned, bifrost.reads_aligned);
     assert_eq!(naive.ec_list.len(), bifrost.ec_list.len());
-}
-
-fn fixture_path(name: &str) -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("tests");
-    path.push("fixtures");
-    path.push(name);
-    path
-}
-
-fn read_transcripts(path: &PathBuf) -> Vec<Vec<u8>> {
-    let data = std::fs::read_to_string(path).expect("read fasta");
-    let mut seqs = Vec::new();
-    let mut current = Vec::new();
-    for line in data.lines() {
-        if line.starts_with('>') {
-            if !current.is_empty() {
-                seqs.push(current);
-                current = Vec::new();
-            }
-            continue;
-        }
-        current.extend_from_slice(line.trim().as_bytes());
-    }
-    if !current.is_empty() {
-        seqs.push(current);
-    }
-    seqs
 }
 
 fn synthesize_paired_reads(
