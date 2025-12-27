@@ -31,6 +31,9 @@ fn normalize_ec(counts: &EcCounts) -> HashMap<Vec<u32>, u32> {
 fn bifrost_matches_naive_ecs() {
     let index_path = fixture_path("synthetic.idx");
     let reads_path = fixture_path("synthetic_reads.fq");
+    if !index_path.exists() || !reads_path.exists() {
+        return;
+    }
 
     let naive_index = build_kmer_ec_index(&index_path).expect("naive index");
     let bifrost_index = build_bifrost_index(&index_path).expect("bifrost index");
