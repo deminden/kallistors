@@ -24,11 +24,6 @@ git clone https://github.com/deminden/kallistors
 cd kallistors
 cargo build --workspace --release
 
-# Version
-./target/release/kallistors-cli version
-
-# Inspect index
-./target/release/kallistors-cli index-info --index path/to/index.idx
 
 # Pseudoalign (single-end)
 ./target/release/kallistors-cli pseudoalign \
@@ -36,6 +31,9 @@ cargo build --workspace --release
     --reads reads.fq \
     --fragment-length 200 \
     --out ec_counts.tsv
+
+# Inspect index
+./target/release/kallistors-cli index-info --index path/to/index.idx
 
 # Quantify
 ./target/release/kallistors-cli quant \
