@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
 use crate::bias::{BiasCounts, hexamer_to_int, update_hexamer};
 use crate::ec::EcList;
+use crate::index::Index;
 use crate::pseudoalign::StrandSpecific;
 use crate::{Error, Result};
 
@@ -43,6 +44,68 @@ pub struct QuantResult {
     pub tpm: Vec<f64>,
     pub eff_lengths: Vec<f64>,
     pub post_bias: Option<Vec<f64>>,
+}
+
+/// Run metadata matching kallisto's `run_info.json` fields.
+pub struct RunInfo {
+    pub n_targets: usize,
+    pub n_bootstraps: usize,
+    pub n_processed: u64,
+    pub n_pseudoaligned: u64,
+    pub n_unique: u64,
+    pub p_pseudoaligned: f64,
+    pub p_unique: f64,
+    pub kallisto_version: String,
+    pub index_version: u64,
+    pub kmer_length: u32,
+    pub start_time: String,
+    pub call: String,
+}
+
+impl RunInfo {
+    pub fn write_json(&self, path: &Path) -> Result<()> {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        let entries = vec![
+            ("n_targets", self.n_targets.to_json()),
+            ("n_bootstraps", self.n_bootstraps.to_json()),
+            ("n_processed", self.n_processed.to_json()),
+            ("n_pseudoaligned", self.n_pseudoaligned.to_json()),
+            ("n_unique", self.n_unique.to_json()),
+            ("p_pseudoaligned", format!("{:.1}", self.p_pseudoaligned)),
+            ("p_unique", format!("{:.1}", self.p_unique)),
+            ("kallisto_version", self.kallisto_version.to_json()),
+            ("index_version", self.index_version.to_json()),
+            ("k-mer length", self.kmer_length.to_json()),
+            ("start_time", self.start_time.to_json()),
+            ("call", self.call.to_json()),
+        ];
+        writeln!(writer, "{{")?;
+        for (idx, (key, value)) in entries.iter().enumerate() {
+            let sep = if idx + 1 == entries.len() { "" } else { "," };
+            writeln!(writer, "\"{}\": {}{}", escape_json(key), value, sep)?;
+        }
+        writeln!(writer, "}}")?;
+        Ok(())
+    }
+}
+
+/// Write kallisto-compatible `abundance.tsv`.
+pub fn write_abundance_tsv(path: &Path, index: &Index, result: &QuantResult) -> Result<()> {
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    writeln!(writer, "target_id\tlength\teff_length\test_counts\ttpm")?;
+    for (i, tr) in index.transcripts.iter().enumerate() {
+        let eff_len = result.eff_lengths.get(i).copied().unwrap_or(0.0);
+        let est = result.est_counts.get(i).copied().unwrap_or(0.0);
+        let tpm = result.tpm.get(i).copied().unwrap_or(0.0);
+        writeln!(
+            writer,
+            "{}\t{}\t{}\t{}\t{}",
+            tr.name, tr.length, eff_len, est, tpm
+        )?;
+    }
+    Ok(())
 }
 
 pub struct EcCountsInput {
@@ -108,6 +171,69 @@ pub fn load_ec_counts(path: &Path) -> Result<EcCountsInput> {
         ec_list: EcList { classes },
         counts,
     })
+}
+
+trait JsonValue {
+    fn to_json(&self) -> String;
+}
+
+impl JsonValue for usize {
+    fn to_json(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl JsonValue for u64 {
+    fn to_json(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl JsonValue for u32 {
+    fn to_json(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl JsonValue for f64 {
+    fn to_json(&self) -> String {
+        if self.is_finite() {
+            self.to_string()
+        } else {
+            "0".to_string()
+        }
+    }
+}
+
+impl JsonValue for bool {
+    fn to_json(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl JsonValue for String {
+    fn to_json(&self) -> String {
+        format!("\"{}\"", escape_json(self))
+    }
+}
+
+fn escape_json(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str("\\u");
+                out.push_str(&format!("{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 pub fn load_transcript_sequences(fasta: &Path, names: &[String]) -> Result<Vec<Vec<u8>>> {

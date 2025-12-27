@@ -86,26 +86,36 @@ enum Commands {
         bias_out: Option<std::path::PathBuf>,
     },
     Quant {
-        #[arg(long)]
+        #[arg(short = 'i', long)]
         index: std::path::PathBuf,
+        #[arg(short = 'o', long = "output-dir", alias = "out")]
+        out_dir: std::path::PathBuf,
+        #[arg(short = 't', long, default_value_t = 1)]
+        threads: usize,
         #[arg(long)]
-        ec: std::path::PathBuf,
-        #[arg(long)]
-        out: std::path::PathBuf,
-        #[arg(long)]
-        bias: bool,
-        #[arg(long)]
-        bias_counts: Option<std::path::PathBuf>,
-        #[arg(long)]
-        transcripts: Option<std::path::PathBuf>,
-        #[arg(long)]
+        single: bool,
+        #[arg(short = 'l', long = "fragment-length")]
         fragment_length: Option<f64>,
-        #[arg(long)]
+        #[arg(short = 's', long = "fragment-length-sd")]
         fragment_length_sd: Option<f64>,
+        #[arg(long)]
+        single_overhang: bool,
         #[arg(long)]
         fr_stranded: bool,
         #[arg(long)]
         rf_stranded: bool,
+        #[arg(long)]
+        bias: bool,
+        #[arg(long)]
+        transcripts: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long)]
+        pseudobam: bool,
+        #[arg(long)]
+        genomebam: bool,
+        #[arg(required = true, num_args = 1..=2)]
+        reads: Vec<std::path::PathBuf>,
     },
 }
 
@@ -163,27 +173,37 @@ fn main() -> Result<()> {
         ),
         Commands::Quant {
             index,
-            ec,
-            out,
+            out_dir,
+            threads,
+            single,
             bias,
-            bias_counts,
             transcripts,
             fragment_length,
             fragment_length_sd,
+            single_overhang,
             fr_stranded,
             rf_stranded,
-        } => commands::quant::run(
-            &index,
-            &ec,
-            &out,
-            bias,
-            bias_counts.as_deref(),
-            transcripts.as_deref(),
+            seed,
+            pseudobam,
+            genomebam,
+            reads,
+        } => commands::quant::run(commands::quant::QuantArgs {
+            index,
+            out_dir,
+            reads,
+            single,
             fragment_length,
             fragment_length_sd,
+            single_overhang,
             fr_stranded,
             rf_stranded,
-        ),
+            bias,
+            transcripts,
+            seed,
+            threads,
+            pseudobam,
+            genomebam,
+        }),
     }
 }
 

@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 #[allow(clippy::too_many_arguments)]
@@ -9,7 +9,7 @@ pub fn run(
     reads: &Path,
     reads2: Option<&Path>,
     out: &Path,
-    _threads: usize,
+    threads: usize,
     debug_out: Option<&Path>,
     debug_max: usize,
     strand: kallistors::pseudoalign::Strand,
@@ -24,20 +24,15 @@ pub fn run(
     bias: bool,
     bias_out: Option<&Path>,
 ) -> Result<()> {
-    if reads.extension().and_then(|s| s.to_str()) == Some("gz") {
-        return Err(anyhow!("gzip FASTQ not supported yet"));
-    }
     if reads2.is_some() && fragment_length.is_some() {
         return Err(anyhow!(
             "--fragment-length is only supported for single-end reads"
         ));
     }
 
-    let file = File::open(reads)?;
-    let mut reader = kallistors::io::FastqReader::new(BufReader::new(file));
+    let mut reader = kallistors::io::open_fastq_reader(reads)?;
     let mut reader2 = if let Some(path) = reads2 {
-        let file = File::open(path)?;
-        Some(kallistors::io::FastqReader::new(BufReader::new(file)))
+        Some(kallistors::io::open_fastq_reader(path)?)
     } else {
         None
     };
@@ -93,12 +88,13 @@ pub fn run(
             (res, Some(report))
         } else {
             (
-                kallistors::pseudoalign::pseudoalign_paired_bifrost_with_options(
+                kallistors::pseudoalign::pseudoalign_paired_bifrost_with_options_threaded(
                     &index,
                     &mut reader,
                     reader2,
                     strand,
                     options,
+                    threads,
                 )
                 .map_err(|err| anyhow!("pseudoalign failed: {err}"))?,
                 None,
@@ -118,12 +114,13 @@ pub fn run(
         (res, Some(report))
     } else {
         (
-            kallistors::pseudoalign::pseudoalign_single_end_bifrost_with_options(
+            kallistors::pseudoalign::pseudoalign_single_end_bifrost_with_options_threaded(
                 &index,
                 &mut reader,
                 strand,
                 filter,
                 options,
+                threads,
             )
             .map_err(|err| anyhow!("pseudoalign failed: {err}"))?,
             None,

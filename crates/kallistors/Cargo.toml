@@ -1,6 +1,6 @@
 [package]
 name = "kallistors"
-version = "0.1.0"
+version = "0.1.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,6 +9,7 @@ repository.workspace = true
 thiserror = "2.0.17"
 croaring-sys = "4.4.1"
 boomphf = "0.6.0"
+flate2 = "1.1.2"
 
 [dev-dependencies]
 tempfile = "3.24.0"

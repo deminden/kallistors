@@ -1,6 +1,6 @@
 [package]
 name = "kallistors-cli"
-version = "0.1.0"
+version = "0.1.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,6 +9,10 @@ repository.workspace = true
 anyhow = "1.0.100"
 clap = { version = "4.5.53", features = ["derive"] }
 kallistors = { path = "../kallistors" }
+time = { version = "0.3.41", features = ["formatting", "local-offset"] }
+
+[dev-dependencies]
+tempfile = "3.24.0"
 
 [[bin]]
 name = "kallistors-cli"

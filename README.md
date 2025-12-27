@@ -6,11 +6,9 @@ kallistors: a Rust implementation of kallisto-style pseudoalignment and quantifi
 
 This is a minimal reimplementation (at current stage). Known differences vs kallisto today:
 - No index builder yet (load-only).
-- No bootstrap, H5 output, or full `run_info.json` parity.
+- No bootstrap or H5 output.
 - No long-read, UMI/BUS/technology modes, or fusion detection.
-- No gzip FASTQ support yet.
 - Minimal CLI surface; some kallisto options are missing.
-- No multi-threaded pseudoalign/quant paths yet.
 
 Sequence-specific bias correction is optional and enabled only with `--bias`.
 
@@ -28,20 +26,32 @@ cargo build --workspace --release
 # Pseudoalign (single-end)
 ./target/release/kallistors-cli pseudoalign \
     --index path/to/index.idx \
-    --reads reads.fq \
+    --reads reads.fq.gz \
     --fragment-length 200 \
     --out ec_counts.tsv
 
 # Inspect index
 ./target/release/kallistors-cli index-info --index path/to/index.idx
 
-# Quantify
+# Quantify (single-end)
 ./target/release/kallistors-cli quant \
-    --index path/to/index.idx \
-    --ec ec_counts.tsv \
-    --out abund.tsv \
-    --fragment-length 200 \
-    --fragment-length-sd 20
+    -i path/to/index.idx \
+    -o out_dir \
+    --single \
+    -l 200 \
+    -s 20 \
+    reads.fq.gz
+
+# Quantify (paired-end)
+./target/release/kallistors-cli quant \
+    -i path/to/index.idx \
+    -o out_dir \
+    reads_1.fq reads_2.fq
+
+Notes:
+- `--bias` requires `--transcripts` to provide the transcript FASTA.
+- Paired-end quant estimates fragment length mean/sd from pseudoaligned pairs.
+- Quant writes `abundance.tsv` and `run_info.json` in `out_dir` (matching kallisto field names).
 ```
 
 ### As a Crate

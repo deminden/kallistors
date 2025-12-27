@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
 
 use boomphf::Mphf;
 
@@ -14,7 +16,7 @@ use crate::index::bifrost::{
 
 use crate::bias::{BiasCounts, hexamer_to_int};
 use crate::index::{parse_graph_section, read_block_array_blocks};
-use crate::io::ReadSource;
+use crate::io::{FastqRecord, ReadSource, VecReadSource};
 use crate::{Error, Result};
 
 const KMER_BYTES_CANDIDATES: [usize; 4] = [8, 16, 24, 32];
@@ -24,6 +26,8 @@ const REP_HASH_VALS: [u64; 4] = [
     10060236952204337488,
     7783083932390163561,
 ];
+const BATCH_SIZE: usize = 10_000;
+const MAX_FRAG_LEN: i64 = 1000;
 
 /// A naive k-mer -> EC mapping built from a kallisto index.
 pub struct KmerEcIndex {
@@ -58,6 +62,101 @@ pub struct EcCounts {
     pub reads_processed: u64,
     pub reads_aligned: u64,
     pub bias: Option<BiasCounts>,
+    pub fragment_length_stats: Option<FragmentLengthStats>,
+    pub fragment_length_hist: Option<Vec<u32>>,
+}
+
+impl EcCounts {
+    fn new(with_bias: bool) -> Self {
+        Self {
+            ec_list: Vec::new(),
+            counts: Vec::new(),
+            reads_processed: 0,
+            reads_aligned: 0,
+            bias: with_bias.then(BiasCounts::new),
+            fragment_length_stats: None,
+            fragment_length_hist: None,
+        }
+    }
+}
+
+/// Running fragment length statistics for paired-end reads.
+#[derive(Debug, Clone, Copy)]
+pub struct FragmentLengthStats {
+    count: u64,
+    mean: f64,
+    m2: f64,
+}
+
+impl FragmentLengthStats {
+    pub fn new() -> Self {
+        Self {
+            count: 0,
+            mean: 0.0,
+            m2: 0.0,
+        }
+    }
+
+    pub fn add(&mut self, value: f64) {
+        self.count += 1;
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta2 = value - self.mean;
+        self.m2 += delta * delta2;
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        if other.count == 0 {
+            return;
+        }
+        if self.count == 0 {
+            *self = *other;
+            return;
+        }
+        let total = self.count + other.count;
+        let delta = other.mean - self.mean;
+        self.mean += delta * (other.count as f64 / total as f64);
+        self.m2 +=
+            other.m2 + delta * delta * (self.count as f64 * other.count as f64) / total as f64;
+        self.count = total;
+    }
+
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub fn mean(&self) -> Option<f64> {
+        if self.count == 0 {
+            None
+        } else {
+            Some(self.mean)
+        }
+    }
+
+    pub fn sd(&self) -> Option<f64> {
+        if self.count < 2 {
+            None
+        } else {
+            Some((self.m2 / (self.count as f64 - 1.0)).sqrt())
+        }
+    }
+}
+
+impl Default for FragmentLengthStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Count reads assigned to a unique transcript (EC size 1).
+pub fn unique_pseudoaligned_reads(counts: &EcCounts) -> u64 {
+    let mut total = 0u64;
+    for (idx, ec) in counts.ec_list.iter().enumerate() {
+        if ec.len() == 1 {
+            total = total.saturating_add(counts.counts.get(idx).copied().unwrap_or(0) as u64);
+        }
+    }
+    total
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -619,6 +718,8 @@ pub fn pseudoalign_single_end<R: ReadSource>(
         reads_processed,
         reads_aligned,
         bias: None,
+        fragment_length_stats: None,
+        fragment_length_hist: None,
     })
 }
 
@@ -677,6 +778,8 @@ pub fn pseudoalign_paired_naive<R1: ReadSource, R2: ReadSource>(
         reads_processed,
         reads_aligned,
         bias: None,
+        fragment_length_stats: None,
+        fragment_length_hist: None,
     })
 }
 
@@ -789,6 +892,118 @@ pub fn pseudoalign_single_end_bifrost_with_options<R: ReadSource>(
     pseudoalign_single_end_bifrost_inner(index, reader, strand, None, filter, options)
 }
 
+pub fn pseudoalign_single_end_bifrost_with_options_threaded<R: ReadSource>(
+    index: &BifrostIndex,
+    reader: &mut R,
+    strand: Strand,
+    filter: Option<FragmentFilter>,
+    options: PseudoalignOptions,
+    threads: usize,
+) -> Result<EcCounts> {
+    if threads <= 1 {
+        return pseudoalign_single_end_bifrost_inner(index, reader, strand, None, filter, options);
+    }
+
+    let threads = threads.max(1);
+    let mut merged = EcCounts::new(options.bias);
+    let mut merged_map: HashMap<Vec<u32>, usize> = HashMap::new();
+    let mut read_error: Option<Error> = None;
+
+    thread::scope(|scope| {
+        let (res_tx, res_rx) = mpsc::channel::<(usize, Result<EcCounts>)>();
+        let mut senders = Vec::with_capacity(threads);
+
+        for tid in 0..threads {
+            let (tx, rx) = mpsc::channel::<Vec<FastqRecord>>();
+            senders.push(tx);
+            let res_tx = res_tx.clone();
+            scope.spawn(move || {
+                let mut acc = EcCounts::new(options.bias);
+                let mut acc_map: HashMap<Vec<u32>, usize> = HashMap::new();
+                for batch in rx {
+                    let mut batch_reader = VecReadSource::new(batch);
+                    let res = pseudoalign_single_end_bifrost_inner(
+                        index,
+                        &mut batch_reader,
+                        strand,
+                        None,
+                        filter,
+                        options,
+                    );
+                    match res {
+                        Ok(counts) => merge_ec_counts(&mut acc, &mut acc_map, counts),
+                        Err(err) => {
+                            let _ = res_tx.send((tid, Err(err)));
+                            return;
+                        }
+                    }
+                }
+                let _ = res_tx.send((tid, Ok(acc)));
+            });
+        }
+
+        let mut batch = Vec::with_capacity(BATCH_SIZE);
+        let mut batch_idx = 0usize;
+        while let Some(record) = reader.next_record() {
+            match record {
+                Ok(record) => {
+                    batch.push(record);
+                    if batch.len() >= BATCH_SIZE {
+                        let to_send = std::mem::take(&mut batch);
+                        if senders[batch_idx % threads].send(to_send).is_err() {
+                            read_error = Some(Error::InvalidFormat("worker channel closed".into()));
+                            break;
+                        }
+                        batch = Vec::with_capacity(BATCH_SIZE);
+                        batch_idx += 1;
+                    }
+                }
+                Err(err) => {
+                    read_error = Some(err);
+                    break;
+                }
+            }
+        }
+        if read_error.is_none() && !batch.is_empty() {
+            let to_send = batch;
+            if senders[batch_idx % threads].send(to_send).is_err() {
+                read_error = Some(Error::InvalidFormat("worker channel closed".into()));
+            }
+        }
+        drop(senders);
+
+        let mut results: Vec<Option<Result<EcCounts>>> = (0..threads).map(|_| None).collect();
+        for _ in 0..threads {
+            if let Ok((tid, res)) = res_rx.recv() {
+                results[tid] = Some(res);
+            }
+        }
+
+        if read_error.is_none() && results.iter().any(|r| r.is_none()) {
+            read_error = Some(Error::InvalidFormat("worker thread failed".into()));
+        }
+
+        for res in results.iter_mut().take(threads) {
+            if let Some(res) = res.take() {
+                match res {
+                    Ok(counts) => merge_ec_counts(&mut merged, &mut merged_map, counts),
+                    Err(err) => {
+                        if read_error.is_none() {
+                            read_error = Some(err);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    if let Some(err) = read_error {
+        Err(err)
+    } else {
+        Ok(merged)
+    }
+}
+
 pub fn pseudoalign_single_end_bifrost_debug_with_options<R: ReadSource>(
     index: &BifrostIndex,
     reader: &mut R,
@@ -854,6 +1069,140 @@ pub fn pseudoalign_paired_bifrost_with_options<R1: ReadSource, R2: ReadSource>(
     pseudoalign_paired_bifrost_inner(index, reader1, reader2, strand, None, options)
 }
 
+pub fn pseudoalign_paired_bifrost_with_options_threaded<R1: ReadSource, R2: ReadSource>(
+    index: &BifrostIndex,
+    reader1: &mut R1,
+    reader2: &mut R2,
+    strand: Strand,
+    options: PseudoalignOptions,
+    threads: usize,
+) -> Result<EcCounts> {
+    if threads <= 1 {
+        return pseudoalign_paired_bifrost_inner(index, reader1, reader2, strand, None, options);
+    }
+
+    let threads = threads.max(1);
+    let mut merged = EcCounts::new(options.bias);
+    let mut merged_map: HashMap<Vec<u32>, usize> = HashMap::new();
+    let mut read_error: Option<Error> = None;
+
+    thread::scope(|scope| {
+        let (res_tx, res_rx) = mpsc::channel::<(usize, Result<EcCounts>)>();
+        let mut senders = Vec::with_capacity(threads);
+
+        for tid in 0..threads {
+            let (tx, rx) = mpsc::channel::<(Vec<FastqRecord>, Vec<FastqRecord>)>();
+            senders.push(tx);
+            let res_tx = res_tx.clone();
+            scope.spawn(move || {
+                let mut acc = EcCounts::new(options.bias);
+                let mut acc_map: HashMap<Vec<u32>, usize> = HashMap::new();
+                for (left, right) in rx {
+                    let mut left_reader = VecReadSource::new(left);
+                    let mut right_reader = VecReadSource::new(right);
+                    let res = pseudoalign_paired_bifrost_inner(
+                        index,
+                        &mut left_reader,
+                        &mut right_reader,
+                        strand,
+                        None,
+                        options,
+                    );
+                    match res {
+                        Ok(counts) => merge_ec_counts(&mut acc, &mut acc_map, counts),
+                        Err(err) => {
+                            let _ = res_tx.send((tid, Err(err)));
+                            return;
+                        }
+                    }
+                }
+                let _ = res_tx.send((tid, Ok(acc)));
+            });
+        }
+
+        let mut left_batch = Vec::with_capacity(BATCH_SIZE);
+        let mut right_batch = Vec::with_capacity(BATCH_SIZE);
+        let mut batch_idx = 0usize;
+        loop {
+            let r1 = reader1.next_record();
+            let r2 = reader2.next_record();
+            match (r1, r2) {
+                (None, None) => break,
+                (Some(_), None) | (None, Some(_)) => {
+                    read_error = Some(Error::InvalidFormat("paired FASTQ length mismatch".into()));
+                    break;
+                }
+                (Some(a), Some(b)) => match (a, b) {
+                    (Ok(a), Ok(b)) => {
+                        left_batch.push(a);
+                        right_batch.push(b);
+                        if left_batch.len() >= BATCH_SIZE {
+                            let left_send = std::mem::take(&mut left_batch);
+                            let right_send = std::mem::take(&mut right_batch);
+                            if senders[batch_idx % threads]
+                                .send((left_send, right_send))
+                                .is_err()
+                            {
+                                read_error =
+                                    Some(Error::InvalidFormat("worker channel closed".into()));
+                                break;
+                            }
+                            left_batch = Vec::with_capacity(BATCH_SIZE);
+                            right_batch = Vec::with_capacity(BATCH_SIZE);
+                            batch_idx += 1;
+                        }
+                    }
+                    (Err(err), _) | (_, Err(err)) => {
+                        read_error = Some(err);
+                        break;
+                    }
+                },
+            }
+        }
+        if read_error.is_none() && !left_batch.is_empty() {
+            let left_send = left_batch;
+            let right_send = right_batch;
+            if senders[batch_idx % threads]
+                .send((left_send, right_send))
+                .is_err()
+            {
+                read_error = Some(Error::InvalidFormat("worker channel closed".into()));
+            }
+        }
+        drop(senders);
+
+        let mut results: Vec<Option<Result<EcCounts>>> = (0..threads).map(|_| None).collect();
+        for _ in 0..threads {
+            if let Ok((tid, res)) = res_rx.recv() {
+                results[tid] = Some(res);
+            }
+        }
+
+        if read_error.is_none() && results.iter().any(|r| r.is_none()) {
+            read_error = Some(Error::InvalidFormat("worker thread failed".into()));
+        }
+
+        for res in results.iter_mut().take(threads) {
+            if let Some(res) = res.take() {
+                match res {
+                    Ok(counts) => merge_ec_counts(&mut merged, &mut merged_map, counts),
+                    Err(err) => {
+                        if read_error.is_none() {
+                            read_error = Some(err);
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    if let Some(err) = read_error {
+        Err(err)
+    } else {
+        Ok(merged)
+    }
+}
+
 pub fn pseudoalign_paired_bifrost_debug_with_options<R1: ReadSource, R2: ReadSource>(
     index: &BifrostIndex,
     reader1: &mut R1,
@@ -887,6 +1236,8 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
     let mut counts: Vec<u32> = Vec::new();
     let mut reads_processed = 0u64;
     let mut reads_aligned = 0u64;
+    let mut frag_stats = FragmentLengthStats::new();
+    let mut frag_hist = vec![0u32; MAX_FRAG_LEN as usize];
     let mut bias = if options.bias {
         Some(BiasCounts::new())
     } else {
@@ -1033,6 +1384,25 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                     }
                 }
 
+                if merged.len() == 1 {
+                    let tr = merged[0];
+                    let is_shade = index
+                        .shade_sequences
+                        .get(tr as usize)
+                        .copied()
+                        .unwrap_or(false);
+                    if !is_shade
+                        && let Some(frag_len) =
+                            estimate_fragment_length_for_pair(index, tr, &ec1, &ec2)
+                    {
+                        let idx = frag_len as usize;
+                        if idx < frag_hist.len() {
+                            frag_hist[idx] = frag_hist[idx].saturating_add(1);
+                            frag_stats.add(frag_len as f64);
+                        }
+                    }
+                }
+
                 if let Some(bias_counts) = bias.as_mut()
                     && bias_counts.total < options.max_bias as u64
                     && let Some(best_match) = ec1.best_match
@@ -1063,6 +1433,8 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
         reads_processed,
         reads_aligned,
         bias,
+        fragment_length_stats: (frag_stats.count() > 0).then_some(frag_stats),
+        fragment_length_hist: (frag_stats.count() > 0).then_some(frag_hist),
     })
 }
 
@@ -1235,7 +1607,118 @@ fn pseudoalign_single_end_bifrost_inner<R: ReadSource>(
         reads_processed,
         reads_aligned,
         bias,
+        fragment_length_stats: None,
+        fragment_length_hist: None,
     })
+}
+
+fn merge_ec_counts(
+    target: &mut EcCounts,
+    target_map: &mut HashMap<Vec<u32>, usize>,
+    other: EcCounts,
+) {
+    target.reads_processed = target.reads_processed.saturating_add(other.reads_processed);
+    target.reads_aligned = target.reads_aligned.saturating_add(other.reads_aligned);
+    for (idx, ec) in other.ec_list.into_iter().enumerate() {
+        let count = other.counts.get(idx).copied().unwrap_or(0);
+        if let Some(&id) = target_map.get(&ec) {
+            if let Some(slot) = target.counts.get_mut(id) {
+                *slot = slot.saturating_add(count);
+            }
+        } else {
+            let id = target.ec_list.len();
+            target_map.insert(ec.clone(), id);
+            target.ec_list.push(ec);
+            target.counts.push(count);
+        }
+    }
+    match (&mut target.bias, other.bias) {
+        (Some(target_bias), Some(other_bias)) => merge_bias_counts(target_bias, &other_bias),
+        (None, Some(other_bias)) => {
+            let mut bias = BiasCounts::new();
+            merge_bias_counts(&mut bias, &other_bias);
+            target.bias = Some(bias);
+        }
+        _ => {}
+    }
+    match (
+        &mut target.fragment_length_stats,
+        other.fragment_length_stats,
+    ) {
+        (Some(target_stats), Some(other_stats)) => target_stats.merge(&other_stats),
+        (None, Some(other_stats)) => target.fragment_length_stats = Some(other_stats),
+        _ => {}
+    }
+    match (&mut target.fragment_length_hist, other.fragment_length_hist) {
+        (Some(target_hist), Some(other_hist)) => merge_fragment_hist(target_hist, &other_hist),
+        (None, Some(other_hist)) => target.fragment_length_hist = Some(other_hist),
+        _ => {}
+    }
+}
+
+fn merge_bias_counts(target: &mut BiasCounts, other: &BiasCounts) {
+    let len = target.counts.len().min(other.counts.len());
+    for i in 0..len {
+        target.counts[i] = target.counts[i].saturating_add(other.counts[i]);
+    }
+    target.total = target.total.saturating_add(other.total);
+}
+
+fn merge_fragment_hist(target: &mut [u32], other: &[u32]) {
+    let len = target.len().min(other.len());
+    for i in 0..len {
+        target[i] = target[i].saturating_add(other[i]);
+    }
+}
+
+fn estimate_fragment_length_for_pair(
+    index: &BifrostIndex,
+    tr: u32,
+    left: &ReadEc,
+    right: &ReadEc,
+) -> Option<i64> {
+    let left_match = left.best_match?;
+    let right_match = right.best_match?;
+    if left_match.unitig_id != right_match.unitig_id {
+        return None;
+    }
+    let blocks = index.ec_blocks.get(left_match.unitig_id)?;
+    let block_left = block_index_for_position(blocks, left_match.unitig_pos)?;
+    let block_right = block_index_for_position(blocks, right_match.unitig_pos)?;
+    if block_left != block_right {
+        return None;
+    }
+    let (_, ub_left) = ec_block_at(blocks, left_match.unitig_pos as u32)?;
+    let (_, ub_right) = ec_block_at(blocks, right_match.unitig_pos as u32)?;
+    if ub_left != ub_right {
+        return None;
+    }
+    if left_match.used_revcomp == right_match.used_revcomp {
+        return None;
+    }
+    if !blocks
+        .get(block_left)
+        .map(|block| block.ec.binary_search(&tr).is_ok())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let k = index.k as i64;
+    let p1 = if left_match.used_revcomp {
+        left_match.unitig_pos as i64 + k + left_match.read_pos as i64
+    } else {
+        left_match.unitig_pos as i64 - left_match.read_pos as i64
+    };
+    let p2 = if right_match.used_revcomp {
+        right_match.unitig_pos as i64 + k + right_match.read_pos as i64
+    } else {
+        right_match.unitig_pos as i64 - right_match.read_pos as i64
+    };
+    let frag_len = (p1 - p2).abs();
+    if frag_len > 0 && frag_len < MAX_FRAG_LEN {
+        return Some(frag_len);
+    }
+    None
 }
 
 fn ec_for_read_naive(index: &KmerEcIndex, seq: &[u8]) -> Option<Vec<u32>> {
