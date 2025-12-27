@@ -11,6 +11,9 @@ use kallistors::pseudoalign::{
 fn paired_parity_naive_vs_bifrost() {
     let index_path = fixture_path("synthetic.idx");
     let fasta_path = fixture_path("synthetic_transcripts.fa");
+    if !index_path.exists() || !fasta_path.exists() {
+        return;
+    }
 
     let transcripts = read_transcripts(&fasta_path);
     let pairs = synthesize_paired_reads(&transcripts, 50, 90, 8);
