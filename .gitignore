@@ -1,0 +1,50 @@
+# Rust
+/target
+Cargo.lock
+
+# External references
+kallisto_src/
+
+# Data files
+*.gz
+*.tar.gz
+*.csv
+*.tsv
+*.txt
+data/
+outputs/
+**/*.fastq
+**/*.fq
+**/*.fastq.gz
+**/*.fq.gz
+**/*.bam
+**/*.sam
+**/*.idx
+**/*.bin
+
+# R files
+/r_libs
+.Rhistory
+.RData
+.Rproj.user
+*.Rproj
+
+# System files
+.DS_Store
+Thumbs.db
+*~
+.#*
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Log files
+*.log

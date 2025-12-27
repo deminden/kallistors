@@ -1,0 +1,15 @@
+[package]
+name = "kallistors-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.53", features = ["derive"] }
+kallistors = { path = "../kallistors" }
+
+[[bin]]
+name = "kallistors-cli"
+path = "src/main.rs"
