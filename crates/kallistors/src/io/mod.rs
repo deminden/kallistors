@@ -2,8 +2,8 @@
 
 use std::io::BufRead;
 
-use crate::error::Error;
 use crate::Result;
+use crate::error::Error;
 
 /// A FASTQ record (raw bytes, no validation).
 #[derive(Debug, Clone, PartialEq, Eq)]

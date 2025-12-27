@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use kallistors::io::FastqReader;
 use kallistors::pseudoalign::{
-    build_bifrost_index, pseudoalign_single_end_bifrost_with_strand, Strand,
+    Strand, build_bifrost_index, pseudoalign_single_end_bifrost_with_strand,
 };
 
 fn fixture_path(name: &str) -> PathBuf {

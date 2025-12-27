@@ -8,11 +8,11 @@ use std::path::Path;
 use boomphf::Mphf;
 
 use crate::index::bifrost::{
-    decode_pos_id, deserialize_roaring_to_vec, encode_minimizer_rep, read_bitcontainer_values,
-    wyhash, BooPhf,
+    BooPhf, decode_pos_id, deserialize_roaring_to_vec, encode_minimizer_rep,
+    read_bitcontainer_values, wyhash,
 };
 
-use crate::bias::{hexamer_to_int, BiasCounts};
+use crate::bias::{BiasCounts, hexamer_to_int};
 use crate::index::{parse_graph_section, read_block_array_blocks};
 use crate::io::ReadSource;
 use crate::{Error, Result};
@@ -639,7 +639,7 @@ pub fn pseudoalign_paired_naive<R1: ReadSource, R2: ReadSource>(
         match (r1, r2) {
             (None, None) => break,
             (Some(_), None) | (None, Some(_)) => {
-                return Err(Error::InvalidFormat("paired FASTQ length mismatch".into()))
+                return Err(Error::InvalidFormat("paired FASTQ length mismatch".into()));
             }
             (Some(a), Some(b)) => {
                 let a = a?;
@@ -899,7 +899,7 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
         match (r1, r2) {
             (None, None) => break,
             (Some(_), None) | (None, Some(_)) => {
-                return Err(Error::InvalidFormat("paired FASTQ length mismatch".into()))
+                return Err(Error::InvalidFormat("paired FASTQ length mismatch".into()));
             }
             (Some(a), Some(b)) => {
                 let a = a?;
@@ -1774,11 +1774,7 @@ fn jump_distance_for_match(
     } else {
         start - contig_start
     };
-    if dist >= 2 {
-        Some(dist as usize)
-    } else {
-        None
-    }
+    if dist >= 2 { Some(dist as usize) } else { None }
 }
 
 fn ec_has_offlist(ec: &[u32], onlist: &[bool]) -> bool {
@@ -1957,11 +1953,7 @@ fn minimizers_for_kmer(seq: &[u8], g: usize) -> Option<Vec<([u8; 8], usize)>> {
             _ => {}
         }
     }
-    if best.is_empty() {
-        None
-    } else {
-        Some(best)
-    }
+    if best.is_empty() { None } else { Some(best) }
 }
 
 fn rep_hash(seq: &[u8]) -> Option<u64> {
@@ -2051,7 +2043,7 @@ fn read_onlist_with_lengths<R: Read>(reader: &mut R) -> Result<OnlistData> {
                 shade_to_color: Vec::new(),
                 shade_sequences: Vec::new(),
                 use_shade: false,
-            })
+            });
         }
     };
     if num_trans < 0 {

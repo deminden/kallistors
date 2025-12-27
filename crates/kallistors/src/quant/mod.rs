@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use crate::bias::{hexamer_to_int, update_hexamer, BiasCounts};
+use crate::bias::{BiasCounts, hexamer_to_int, update_hexamer};
 use crate::ec::EcList;
 use crate::pseudoalign::StrandSpecific;
 use crate::{Error, Result};

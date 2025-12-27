@@ -5,8 +5,8 @@ use std::process::Command;
 
 use kallistors::io::FastqReader;
 use kallistors::pseudoalign::{
-    build_bifrost_index_with_positions, pseudoalign_single_end_bifrost_with_options,
-    FragmentFilter, PseudoalignOptions, Strand, StrandSpecific,
+    FragmentFilter, PseudoalignOptions, Strand, StrandSpecific, build_bifrost_index_with_positions,
+    pseudoalign_single_end_bifrost_with_options,
 };
 
 fn kallisto_available() -> bool {

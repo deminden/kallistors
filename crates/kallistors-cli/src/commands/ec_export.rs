@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::path::Path;
 
 pub fn run(ec_path: &Path, out_path: &Path) -> Result<()> {

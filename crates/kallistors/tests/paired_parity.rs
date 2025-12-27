@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use kallistors::io::FastqReader;
 use kallistors::pseudoalign::{
-    build_bifrost_index, build_kmer_ec_index, pseudoalign_paired_bifrost_with_strand,
-    pseudoalign_paired_naive, Strand,
+    Strand, build_bifrost_index, build_kmer_ec_index, pseudoalign_paired_bifrost_with_strand,
+    pseudoalign_paired_naive,
 };
 
 #[test]

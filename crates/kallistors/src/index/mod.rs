@@ -618,11 +618,7 @@ pub(crate) fn read_sparse_vector_with_positions<R: Read>(
         let min_sense = (min & 0x7fff_ffff) == min;
         let max_sense = (max & 0x7fff_ffff) == max;
         let strand = if min_sense == max_sense {
-            if min_sense {
-                1
-            } else {
-                0
-            }
+            if min_sense { 1 } else { 0 }
         } else {
             2
         };

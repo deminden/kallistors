@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use kallistors::io::FastqReader;
 use kallistors::pseudoalign::{
-    build_bifrost_index, build_kmer_ec_index, pseudoalign_single_end,
-    pseudoalign_single_end_bifrost, EcCounts,
+    EcCounts, build_bifrost_index, build_kmer_ec_index, pseudoalign_single_end,
+    pseudoalign_single_end_bifrost,
 };
 
 #[test]

@@ -3,8 +3,8 @@ use std::path::Path;
 use std::process::Command;
 
 use kallistors::pseudoalign::{
-    build_bifrost_index_with_positions, pseudoalign_single_end_bifrost_with_strand_and_filter,
-    FragmentFilter, Strand,
+    FragmentFilter, Strand, build_bifrost_index_with_positions,
+    pseudoalign_single_end_bifrost_with_strand_and_filter,
 };
 
 fn find_n_pseudoaligned(run_info: &str) -> Option<u64> {
