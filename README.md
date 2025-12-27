@@ -9,6 +9,7 @@ This is a minimal reimplementation (at current stage). Known differences vs kall
 - No bootstrap or H5 output.
 - No long-read, UMI/BUS/technology modes, or fusion detection.
 - Minimal CLI surface; some kallisto options are missing.
+- Not a drop-in replacement yet; use for experimentation and validation, not as a production substitute.
 
 Sequence-specific bias correction is optional and enabled only with `--bias`.
 
@@ -119,14 +120,42 @@ let result = em_quantify(
 )?;
 ```
 
-## Development
 
-Recommended checks:
-- cargo fmt --check
-- cargo clippy --all-targets -- -D warnings
-- cargo test --workspace
 
-Regen note: synthetic datasets and local outputs can be regenerated via `scripts/generate_simple_dataset.py` and `scripts/compare_kallisto_simple.py`.
+### Real-data parity and benchmarks
+
+Dataset + index (already in `data/` in this repo):
+- Reads: `data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed.fastq.gz`
+- Reference transcripts: `data/Homo_sapiens.GRCh38.cdna.all.fa.gz`
+- Index: `data/Human_kallisto_index` (built from the reference transcript FASTA)
+
+Generate a ~1/100 subset (single-end; deterministic sampling):
+```bash
+scripts/sample_fastq.py \
+  --input1 data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed.fastq.gz \
+  --output1 data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz \
+  --fraction 0.01 \
+  --seed 42
+```
+
+Run the real-data parity test (skips if files or `kallisto` are missing):
+```bash
+cargo test -p kallistors-cli --test real_kallisto_parity -- --nocapture
+```
+
+Run benchmarks vs kallisto and write a report:
+```bash
+scripts/bench_real_kallisto.py \
+  --index data/Human_kallisto_index \
+  --reads data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz \
+  --threads 8
+```
+
+Latest benchmark output is stored in `bench_latest.md`.
+Latest benchmark summary (2025-12-27, macOS arm64, 8 threads, ~43k reads):
+- kallisto wall 11.106s / cpu 30.802s; kallistors wall 36.013s / cpu 36.408s
+- run_info: n_pseudoaligned 41444 vs 41113; n_unique 2420 vs 2111
+- abundance parity: p99 rel error tpm 0.00882; est_counts 1.43e-07
 
 ## Contributing
 
