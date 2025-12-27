@@ -174,22 +174,22 @@ pub fn em_quantify(
 
     let mut final_round = false;
     for iter in 0..options.max_iter {
-        if options.bias && (iter == options.min_rounds || iter == options.min_rounds + 500) {
-            if let (Some(bias_counts), Some(transcript_sequences)) =
+        if options.bias
+            && (iter == options.min_rounds || iter == options.min_rounds + 500)
+            && let (Some(bias_counts), Some(transcript_sequences)) =
                 (bias_counts, transcript_sequences)
-            {
-                let (updated_eff, bias_model) = update_eff_lens(
-                    &means,
-                    bias_counts,
-                    transcript_sequences,
-                    &alpha,
-                    &eff_lens,
-                    options.strand_specific,
-                );
-                eff_lens = updated_eff;
-                post_bias = Some(bias_model);
-                weights = calc_weights(&input.ec_list, &input.counts, &eff_lens);
-            }
+        {
+            let (updated_eff, bias_model) = update_eff_lens(
+                &means,
+                bias_counts,
+                transcript_sequences,
+                &alpha,
+                &eff_lens,
+                options.strand_specific,
+            );
+            eff_lens = updated_eff;
+            post_bias = Some(bias_model);
+            weights = calc_weights(&input.ec_list, &input.counts, &eff_lens);
         }
 
         for (ec_id, ec) in input.ec_list.classes.iter().enumerate() {
@@ -374,16 +374,16 @@ fn update_eff_lens(
         }
         let seqlen = seq.len() as isize;
 
-        if strand_specific.is_none() || strand_specific == Some(StrandSpecific::FR) {
-            if let Some(mut hex) = hexamer_to_int(seq, false) {
-                let fwlimit = (seqlen as f64 - mean - 6.0).max(0.0) as isize;
-                for j in 0..fwlimit {
-                    dbias5[hex] += contrib;
-                    if let Some(next) = update_hexamer(hex, seq[(j + 6) as usize], false) {
-                        hex = next;
-                    } else {
-                        break;
-                    }
+        if (strand_specific.is_none() || strand_specific == Some(StrandSpecific::FR))
+            && let Some(mut hex) = hexamer_to_int(seq, false)
+        {
+            let fwlimit = (seqlen as f64 - mean - 6.0).max(0.0) as isize;
+            for j in 0..fwlimit {
+                dbias5[hex] += contrib;
+                if let Some(next) = update_hexamer(hex, seq[(j + 6) as usize], false) {
+                    hex = next;
+                } else {
+                    break;
                 }
             }
         }
@@ -391,16 +391,16 @@ fn update_eff_lens(
         if strand_specific.is_none() || strand_specific == Some(StrandSpecific::RF) {
             let bwlimit = (mean - 6.0).max(0.0) as isize;
             let start = bwlimit as usize;
-            if start + 6 <= seq.len() {
-                if let Some(mut hex) = hexamer_to_int(&seq[start..], true) {
-                    for j in bwlimit..(seqlen - 6) {
-                        dbias5[hex] += contrib;
-                        if (j as usize) < seq.len() - 6 {
-                            if let Some(next) = update_hexamer(hex, seq[(j + 6) as usize], true) {
-                                hex = next;
-                            } else {
-                                break;
-                            }
+            if start + 6 <= seq.len()
+                && let Some(mut hex) = hexamer_to_int(&seq[start..], true)
+            {
+                for j in bwlimit..(seqlen - 6) {
+                    dbias5[hex] += contrib;
+                    if (j as usize) < seq.len() - 6 {
+                        if let Some(next) = update_hexamer(hex, seq[(j + 6) as usize], true) {
+                            hex = next;
+                        } else {
+                            break;
                         }
                     }
                 }
@@ -429,19 +429,19 @@ fn update_eff_lens(
         let seqlen = seq.len() as isize;
         let mut efflen = 0.0;
 
-        if strand_specific.is_none() || strand_specific == Some(StrandSpecific::FR) {
-            if let Some(mut hex) = hexamer_to_int(seq, false) {
-                let fwlimit = (seqlen as f64 - mean - 6.0).max(0.0) as isize;
-                for j in 0..fwlimit {
-                    let denom = dbias5[hex];
-                    if denom > 0.0 {
-                        efflen += bias_counts.counts[hex] as f64 / denom;
-                    }
-                    if let Some(next) = update_hexamer(hex, seq[(j + 6) as usize], false) {
-                        hex = next;
-                    } else {
-                        break;
-                    }
+        if (strand_specific.is_none() || strand_specific == Some(StrandSpecific::FR))
+            && let Some(mut hex) = hexamer_to_int(seq, false)
+        {
+            let fwlimit = (seqlen as f64 - mean - 6.0).max(0.0) as isize;
+            for j in 0..fwlimit {
+                let denom = dbias5[hex];
+                if denom > 0.0 {
+                    efflen += bias_counts.counts[hex] as f64 / denom;
+                }
+                if let Some(next) = update_hexamer(hex, seq[(j + 6) as usize], false) {
+                    hex = next;
+                } else {
+                    break;
                 }
             }
         }
@@ -449,19 +449,19 @@ fn update_eff_lens(
         if strand_specific.is_none() || strand_specific == Some(StrandSpecific::RF) {
             let bwlimit = (mean - 6.0).max(0.0) as isize;
             let start = bwlimit as usize;
-            if start + 6 <= seq.len() {
-                if let Some(mut hex) = hexamer_to_int(&seq[start..], true) {
-                    for j in bwlimit..(seqlen - 6) {
-                        let denom = dbias5[hex];
-                        if denom > 0.0 {
-                            efflen += bias_counts.counts[hex] as f64 / denom;
-                        }
-                        if (j as usize) < seq.len() - 6 {
-                            if let Some(next) = update_hexamer(hex, seq[(j + 6) as usize], true) {
-                                hex = next;
-                            } else {
-                                break;
-                            }
+            if start + 6 <= seq.len()
+                && let Some(mut hex) = hexamer_to_int(&seq[start..], true)
+            {
+                for j in bwlimit..(seqlen - 6) {
+                    let denom = dbias5[hex];
+                    if denom > 0.0 {
+                        efflen += bias_counts.counts[hex] as f64 / denom;
+                    }
+                    if (j as usize) < seq.len() - 6 {
+                        if let Some(next) = update_hexamer(hex, seq[(j + 6) as usize], true) {
+                            hex = next;
+                        } else {
+                            break;
                         }
                     }
                 }

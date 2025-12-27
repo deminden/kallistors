@@ -152,10 +152,10 @@ pub fn run(
         res.ec_list.len()
     );
 
-    if let Some(path) = debug_out {
-        if let Some(report) = report {
-            write_debug_report(path, &res, &report)?;
-        }
+    if let Some(path) = debug_out
+        && let Some(report) = report
+    {
+        write_debug_report(path, &res, &report)?;
     }
     if bias {
         let path = bias_out

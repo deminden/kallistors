@@ -285,11 +285,11 @@ fn parse_after_dlist<R: Read + Seek>(
                 continue;
             }
         };
-        if onlist_size > 0 {
-            if let Err(e) = reader.seek(SeekFrom::Current(onlist_size as i64)) {
-                last_err = Some(e.into());
-                continue;
-            }
+        if onlist_size > 0
+            && let Err(e) = reader.seek(SeekFrom::Current(onlist_size as i64))
+        {
+            last_err = Some(e.into());
+            continue;
         }
 
         return Ok(ParseResult {
@@ -639,24 +639,28 @@ pub(crate) fn read_sparse_vector_with_positions<R: Read>(
 }
 
 unsafe fn deserialize_roaring_to_vec(buf: &[u8]) -> Option<Vec<u32>> {
-    let ptr = roaring_bitmap_deserialize(buf.as_ptr().cast());
+    let ptr = unsafe { roaring_bitmap_deserialize(buf.as_ptr().cast()) };
     if ptr.is_null() {
         return None;
     }
-    let card = roaring_bitmap_get_cardinality(ptr);
+    let card = unsafe { roaring_bitmap_get_cardinality(ptr) };
     let mut out = vec![0u32; card as usize];
-    roaring_bitmap_to_uint32_array(ptr, out.as_mut_ptr());
-    roaring_bitmap_free(ptr);
+    unsafe {
+        roaring_bitmap_to_uint32_array(ptr, out.as_mut_ptr());
+        roaring_bitmap_free(ptr);
+    }
     Some(out)
 }
 
 unsafe fn deserialize_roaring_minmax(buf: &[u8]) -> Option<(u32, u32)> {
-    let ptr = roaring_bitmap_deserialize(buf.as_ptr().cast());
+    let ptr = unsafe { roaring_bitmap_deserialize(buf.as_ptr().cast()) };
     if ptr.is_null() {
         return None;
     }
-    let min = croaring_sys::roaring_bitmap_minimum(ptr);
-    let max = croaring_sys::roaring_bitmap_maximum(ptr);
-    roaring_bitmap_free(ptr);
+    let min = unsafe { croaring_sys::roaring_bitmap_minimum(ptr) };
+    let max = unsafe { croaring_sys::roaring_bitmap_maximum(ptr) };
+    unsafe {
+        roaring_bitmap_free(ptr);
+    }
     Some((min, max))
 }

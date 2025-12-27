@@ -407,19 +407,21 @@ fn wyr3(p: &[u8], k: usize) -> u64 {
 }
 
 pub(crate) unsafe fn deserialize_roaring_to_vec(buf: &[u8]) -> Option<Vec<u32>> {
-    let ptr = roaring_bitmap_portable_deserialize_safe(buf.as_ptr().cast(), buf.len());
+    let ptr = unsafe { roaring_bitmap_portable_deserialize_safe(buf.as_ptr().cast(), buf.len()) };
     let ptr = if ptr.is_null() {
-        roaring_bitmap_deserialize(buf.as_ptr().cast())
+        unsafe { roaring_bitmap_deserialize(buf.as_ptr().cast()) }
     } else {
         ptr
     };
     if ptr.is_null() {
         return None;
     }
-    let card = roaring_bitmap_get_cardinality(ptr);
+    let card = unsafe { roaring_bitmap_get_cardinality(ptr) };
     let mut out = vec![0u32; card as usize];
-    roaring_bitmap_to_uint32_array(ptr, out.as_mut_ptr());
-    roaring_bitmap_free(ptr);
+    unsafe {
+        roaring_bitmap_to_uint32_array(ptr, out.as_mut_ptr());
+        roaring_bitmap_free(ptr);
+    }
     Some(out)
 }
 

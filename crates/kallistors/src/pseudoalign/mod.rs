@@ -486,10 +486,10 @@ pub fn build_bifrost_index_with_positions(
                 prefix[unitig_id - 1]
             };
             let rel = (pos - prev) as usize;
-            if let Some(bytes) = encode_minimizer_rep(&unitigs[unitig_id][rel..rel + g]) {
-                if let Some(idx) = mphf.lookup(&bytes) {
-                    minz_positions[idx as usize].push(((unitig_id as u64) << 32) | rel as u64);
-                }
+            if let Some(bytes) = encode_minimizer_rep(&unitigs[unitig_id][rel..rel + g])
+                && let Some(idx) = mphf.lookup(&bytes)
+            {
+                minz_positions[idx as usize].push(((unitig_id as u64) << 32) | rel as u64);
             }
         }
     }
@@ -504,11 +504,11 @@ pub fn build_bifrost_index_with_positions(
             if km_id >= km_unitigs.len() || km_pos + g > k {
                 continue;
             }
-            if let Some(bytes) = encode_minimizer_rep(&km_unitigs[km_id][km_pos..km_pos + g]) {
-                if let Some(idx) = mphf.lookup(&bytes) {
-                    let pos_id = ((km_id as u64) << 32) | 0x8000_0000 | (km_pos as u64);
-                    minz_positions[idx as usize].push(pos_id);
-                }
+            if let Some(bytes) = encode_minimizer_rep(&km_unitigs[km_id][km_pos..km_pos + g])
+                && let Some(idx) = mphf.lookup(&bytes)
+            {
+                let pos_id = ((km_id as u64) << 32) | 0x8000_0000 | (km_pos as u64);
+                minz_positions[idx as usize].push(pos_id);
             }
         }
     }
@@ -578,18 +578,18 @@ pub fn pseudoalign_single_end<R: ReadSource>(
         current.clear();
 
         for pos in 0..=record.seq.len() - index.k {
-            if let Some((fwd, rev)) = encode_kmer_pair(&record.seq[pos..pos + index.k]) {
-                if let Some(ec) = lookup_ec(index, fwd).or_else(|| lookup_ec(index, rev)) {
-                    if !has_hit {
-                        current.extend_from_slice(ec);
-                        has_hit = true;
-                    } else {
-                        next.clear();
-                        intersect_sorted(&current, ec, &mut next);
-                        std::mem::swap(&mut current, &mut next);
-                        if current.is_empty() {
-                            break;
-                        }
+            if let Some((fwd, rev)) = encode_kmer_pair(&record.seq[pos..pos + index.k])
+                && let Some(ec) = lookup_ec(index, fwd).or_else(|| lookup_ec(index, rev))
+            {
+                if !has_hit {
+                    current.extend_from_slice(ec);
+                    has_hit = true;
+                } else {
+                    next.clear();
+                    intersect_sorted(&current, ec, &mut next);
+                    std::mem::swap(&mut current, &mut next);
+                    if current.is_empty() {
+                        break;
                     }
                 }
             }
@@ -981,13 +981,14 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
 
                 let mut merged = Vec::new();
                 intersect_sorted(&ec1.ec, &ec2.ec, &mut merged);
-                if options.dfk_onlist && (ec1.had_offlist || ec2.had_offlist) && !merged.is_empty()
+                if options.dfk_onlist
+                    && (ec1.had_offlist || ec2.had_offlist)
+                    && !merged.is_empty()
+                    && let Some(onlist) = index.onlist.as_deref()
                 {
-                    if let Some(onlist) = index.onlist.as_deref() {
-                        let dummy = onlist.len() as u32;
-                        if merged.last().copied() != Some(dummy) {
-                            merged.push(dummy);
-                        }
+                    let dummy = onlist.len() as u32;
+                    if merged.last().copied() != Some(dummy) {
+                        merged.push(dummy);
                     }
                 }
                 if merged.is_empty() {
@@ -1032,14 +1033,12 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                     }
                 }
 
-                if let Some(bias_counts) = bias.as_mut() {
-                    if bias_counts.total < options.max_bias as u64 {
-                        if let Some(best_match) = ec1.best_match {
-                            if let Some(hex) = bias_hexamer_for_match(index, best_match) {
-                                bias_counts.record(hex);
-                            }
-                        }
-                    }
+                if let Some(bias_counts) = bias.as_mut()
+                    && bias_counts.total < options.max_bias as u64
+                    && let Some(best_match) = ec1.best_match
+                    && let Some(hex) = bias_hexamer_for_match(index, best_match)
+                {
+                    bias_counts.record(hex);
                 }
 
                 reads_aligned += 1;
@@ -1150,17 +1149,17 @@ fn pseudoalign_single_end_bifrost_inner<R: ReadSource>(
             }
             continue;
         };
-        if let Some(filter) = filter {
-            if !filter.single_overhang && filter.fragment_length > 0 {
-                if let Some(best_match) = read_ec.best_match {
-                    read_ec.ec = filter_ec_by_fragment(
-                        index,
-                        &read_ec.ec,
-                        best_match,
-                        filter.fragment_length as i64,
-                    );
-                }
-            }
+        if let Some(filter) = filter
+            && !filter.single_overhang
+            && filter.fragment_length > 0
+            && let Some(best_match) = read_ec.best_match
+        {
+            read_ec.ec = filter_ec_by_fragment(
+                index,
+                &read_ec.ec,
+                best_match,
+                filter.fragment_length as i64,
+            );
         }
         if let Some(mode) = options.strand_specific {
             let comprehensive = options.do_union || options.no_jump || index.use_shade;
@@ -1208,14 +1207,12 @@ fn pseudoalign_single_end_bifrost_inner<R: ReadSource>(
             continue;
         }
 
-        if let Some(bias_counts) = bias.as_mut() {
-            if bias_counts.total < options.max_bias as u64 {
-                if let Some(best_match) = read_ec.best_match {
-                    if let Some(hex) = bias_hexamer_for_match(index, best_match) {
-                        bias_counts.record(hex);
-                    }
-                }
-            }
+        if let Some(bias_counts) = bias.as_mut()
+            && bias_counts.total < options.max_bias as u64
+            && let Some(best_match) = read_ec.best_match
+            && let Some(hex) = bias_hexamer_for_match(index, best_match)
+        {
+            bias_counts.record(hex);
         }
 
         reads_aligned += 1;
@@ -1249,18 +1246,18 @@ fn ec_for_read_naive(index: &KmerEcIndex, seq: &[u8]) -> Option<Vec<u32>> {
     let mut next: Vec<u32> = Vec::new();
     let mut has_hit = false;
     for pos in 0..=seq.len() - index.k {
-        if let Some((fwd, rev)) = encode_kmer_pair(&seq[pos..pos + index.k]) {
-            if let Some(ec) = lookup_ec(index, fwd).or_else(|| lookup_ec(index, rev)) {
-                if !has_hit {
-                    current.extend_from_slice(ec);
-                    has_hit = true;
-                } else {
-                    next.clear();
-                    intersect_sorted(&current, ec, &mut next);
-                    std::mem::swap(&mut current, &mut next);
-                    if current.is_empty() {
-                        break;
-                    }
+        if let Some((fwd, rev)) = encode_kmer_pair(&seq[pos..pos + index.k])
+            && let Some(ec) = lookup_ec(index, fwd).or_else(|| lookup_ec(index, rev))
+        {
+            if !has_hit {
+                current.extend_from_slice(ec);
+                has_hit = true;
+            } else {
+                next.clear();
+                intersect_sorted(&current, ec, &mut next);
+                std::mem::swap(&mut current, &mut next);
+                if current.is_empty() {
+                    break;
                 }
             }
         }
@@ -1323,33 +1320,33 @@ fn ec_for_read_bifrost(
         let mut any_positions = false;
         for (min_bytes, min_pos) in min_candidates {
             let Some(min_idx) = index.mphf.lookup(&min_bytes) else {
-                if let Some(state) = dbg.as_deref_mut() {
-                    if state.first_mphf_miss.is_none() {
-                        state.first_mphf_miss = Some((pos, min_pos));
-                    }
+                if let Some(state) = dbg.as_deref_mut()
+                    && state.first_mphf_miss.is_none()
+                {
+                    state.first_mphf_miss = Some((pos, min_pos));
                 }
                 continue;
             };
             any_mphf = true;
             let positions = &index.minz_positions[min_idx as usize];
             if positions.is_empty() {
-                if let Some(state) = dbg.as_deref_mut() {
-                    if state.first_no_positions.is_none() {
-                        state.first_no_positions = Some((pos, min_pos));
-                    }
+                if let Some(state) = dbg.as_deref_mut()
+                    && state.first_no_positions.is_none()
+                {
+                    state.first_no_positions = Some((pos, min_pos));
                 }
                 continue;
             }
             any_positions = true;
-            if let Some(state) = dbg.as_deref_mut() {
-                if state.first_no_match_positions.is_none() {
-                    state.first_no_match_positions = Some((
-                        pos,
-                        min_pos,
-                        positions.len(),
-                        format_positions_sample(positions),
-                    ));
-                }
+            if let Some(state) = dbg.as_deref_mut()
+                && state.first_no_match_positions.is_none()
+            {
+                state.first_no_match_positions = Some((
+                    pos,
+                    min_pos,
+                    positions.len(),
+                    format_positions_sample(positions),
+                ));
             }
             let mut local_match = None;
             for &pos_id in positions {
@@ -1378,10 +1375,8 @@ fn ec_for_read_bifrost(
                     if index.km_unitigs[uid] == canonical {
                         local_match =
                             Some((index.unitigs.len() + uid, 0usize, pos, min_pos, rev_match));
-                        if rev_match {
-                            if let Some(state) = dbg.as_deref_mut() {
-                                state.used_revcomp = true;
-                            }
+                        if rev_match && let Some(state) = dbg.as_deref_mut() {
+                            state.used_revcomp = true;
                         }
                         break;
                     }
@@ -1424,10 +1419,10 @@ fn ec_for_read_bifrost(
                 matched = Some(hit);
                 break;
             }
-            if let Some(state) = dbg.as_deref_mut() {
-                if state.first_no_match.is_none() {
-                    state.first_no_match = Some((pos, min_pos));
-                }
+            if let Some(state) = dbg.as_deref_mut()
+                && state.first_no_match.is_none()
+            {
+                state.first_no_match = Some((pos, min_pos));
             }
         }
         if let Some(state) = dbg.as_deref_mut() {
@@ -1460,10 +1455,10 @@ fn ec_for_read_bifrost(
         };
         let ec = &index.ec_blocks[uid][block_idx].ec;
         if ec.is_empty() {
-            if let Some(state) = dbg.as_deref_mut() {
-                if state.first_empty_ec.is_none() {
-                    state.first_empty_ec = Some((kmer_pos, min_pos));
-                }
+            if let Some(state) = dbg.as_deref_mut()
+                && state.first_empty_ec.is_none()
+            {
+                state.first_empty_ec = Some((kmer_pos, min_pos));
             }
         } else if let Some(state) = dbg.as_deref_mut() {
             state.saw_ec = true;
@@ -1487,31 +1482,27 @@ fn ec_for_read_bifrost(
             });
         }
         has_hit = true;
-        if !options.no_jump {
-            if let Some(dist) = jump_distance_for_match(index, uid, block_idx, start, used_revcomp)
-            {
-                let mut next_pos = pos + dist;
-                if next_pos > last_pos {
-                    next_pos = last_pos;
-                }
-                if next_pos > pos {
-                    let kmer_next = &seq[next_pos..next_pos + index.k];
-                    if let Some((uid2, _start2, _rev2, block_idx2)) = match_kmer_at_pos(
-                        index,
-                        kmer_next,
-                        allow_forward,
-                        allow_rev,
-                        diff,
-                        &mut rev_buf,
-                    ) {
-                        if uid2 == uid
-                            && index.ec_blocks[uid][block_idx].ec
-                                == index.ec_blocks[uid2][block_idx2].ec
-                        {
-                            pos = next_pos;
-                            continue;
-                        }
-                    }
+        if !options.no_jump
+            && let Some(dist) = jump_distance_for_match(index, uid, block_idx, start, used_revcomp)
+        {
+            let mut next_pos = pos + dist;
+            if next_pos > last_pos {
+                next_pos = last_pos;
+            }
+            if next_pos > pos {
+                let kmer_next = &seq[next_pos..next_pos + index.k];
+                if let Some((uid2, _start2, _rev2, block_idx2)) = match_kmer_at_pos(
+                    index,
+                    kmer_next,
+                    allow_forward,
+                    allow_rev,
+                    diff,
+                    &mut rev_buf,
+                ) && uid2 == uid
+                    && index.ec_blocks[uid][block_idx].ec == index.ec_blocks[uid2][block_idx2].ec
+                {
+                    pos = next_pos;
+                    continue;
                 }
             }
         }
@@ -1575,13 +1566,12 @@ fn ec_for_read_bifrost(
             continue;
         }
         if options.do_union {
-            if options.dfk_onlist && (current_offlist || ec_offlist) {
-                let dummy = index.onlist.as_ref().map(|v| v.len() as u32);
-                if let Some(dummy) = dummy {
-                    if current.last().copied() != Some(dummy) {
-                        current.push(dummy);
-                    }
-                }
+            if options.dfk_onlist
+                && (current_offlist || ec_offlist)
+                && let Some(dummy) = index.onlist.as_ref().map(|v| v.len() as u32)
+                && current.last().copied() != Some(dummy)
+            {
+                current.push(dummy);
             }
             merge_sorted_unique_vec(&mut current, ec);
             current_offlist = current_offlist || ec_offlist;
@@ -2234,10 +2224,10 @@ fn apply_strand_filter(
     if comprehensive {
         let mut union = Vec::new();
         for hit in &read_ec.hits {
-            if let Some(filtered) = filter_ec_for_hit(index, ec, hit, target) {
-                if !filtered.is_empty() {
-                    merge_sorted_unique_vec(&mut union, &filtered);
-                }
+            if let Some(filtered) = filter_ec_for_hit(index, ec, hit, target)
+                && !filtered.is_empty()
+            {
+                merge_sorted_unique_vec(&mut union, &filtered);
             }
         }
         return Some(union);
@@ -2245,24 +2235,24 @@ fn apply_strand_filter(
 
     let hit = read_ec.first_hit.as_ref()?;
     let filtered = filter_ec_for_hit(index, ec, hit, target)?;
-    if filtered.len() < ec.len() {
-        if let Some(r) = report.as_deref_mut() {
-            r.record(
-                header,
-                DebugFailReason::Unknown,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                read_ec
-                    .best_match
-                    .as_ref()
-                    .map(|m| m.used_revcomp)
-                    .unwrap_or(false),
-            );
-        }
+    if filtered.len() < ec.len()
+        && let Some(r) = report.as_deref_mut()
+    {
+        r.record(
+            header,
+            DebugFailReason::Unknown,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            read_ec
+                .best_match
+                .as_ref()
+                .map(|m| m.used_revcomp)
+                .unwrap_or(false),
+        );
     }
     Some(filtered)
 }
