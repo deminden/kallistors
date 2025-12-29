@@ -41,6 +41,16 @@ pub struct BooPhf {
     final_hash: HashMap<[u8; 8], u64>,
 }
 
+#[derive(Clone, Debug)]
+pub struct MphfDebugInfo {
+    pub level: u32,
+    pub hash_raw: u64,
+    pub hash_domain: u64,
+    pub bucket: Option<u64>,
+    pub rank: Option<u64>,
+    pub final_hash_hit: bool,
+}
+
 #[derive(Clone)]
 struct BooLevel {
     bitset: BitVector,
@@ -183,8 +193,67 @@ impl BooPhf {
         Some(self.levels[level].bitset.rank(non_min))
     }
 
+    pub fn debug_lookup(&self, key: &[u8; 8]) -> (Option<u64>, MphfDebugInfo) {
+        let mut s0 = 0u64;
+        let mut s1 = 0u64;
+        let mut level = 0;
+        let mut hash_raw = 0u64;
+        let max_level = self.nb_levels.saturating_sub(1);
+        for i in 0..max_level {
+            if i == 0 {
+                s0 = minimizer_hash(key, 0xAAAAAAAA55555555);
+                hash_raw = s0;
+            } else if i == 1 {
+                s1 = minimizer_hash(key, 0x33333333CCCCCCCC);
+                hash_raw = s1;
+            } else {
+                let next = xorshift_next(&mut s0, &mut s1);
+                hash_raw = next;
+            }
+            if self.levels[i as usize]
+                .bitset
+                .get(hash_raw % self.levels[i as usize].hash_domain)
+            {
+                break;
+            }
+            level += 1;
+        }
+
+        if level == (self.nb_levels - 1) {
+            let final_hash_hit = self.final_hash.get(key).copied();
+            let rank = final_hash_hit.map(|v| v + self.lastbitsetrank);
+            let info = MphfDebugInfo {
+                level: level as u32,
+                hash_raw,
+                hash_domain: 0,
+                bucket: None,
+                rank,
+                final_hash_hit: final_hash_hit.is_some(),
+            };
+            return (rank, info);
+        }
+
+        let level_usize = level as usize;
+        let hash_domain = self.levels[level_usize].hash_domain;
+        let bucket = hash_raw % hash_domain;
+        let rank = self.levels[level_usize].bitset.rank(bucket);
+        let info = MphfDebugInfo {
+            level: level as u32,
+            hash_raw,
+            hash_domain,
+            bucket: Some(bucket),
+            rank: Some(rank),
+            final_hash_hit: false,
+        };
+        (Some(rank), info)
+    }
+
     pub fn size(&self) -> u64 {
         self.nelem
+    }
+
+    pub fn final_hash_entries(&self) -> Vec<([u8; 8], u64)> {
+        self.final_hash.iter().map(|(k, v)| (*k, *v)).collect()
     }
 }
 

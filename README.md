@@ -55,6 +55,50 @@ Notes:
 - `--bias` requires `--transcripts` to provide the transcript FASTA.
 ```
 
+### Kallisto alignment parity (recent changes)
+- Bifrost path mirrors kallisto minimizer traversal with minhash candidates and canonicalized minimizers.
+- Orientation-aware minimizer offsets (forward/rev) and relaxed window checks around minimizer positions.
+- Online intersection tracking with `intersection_empty` skip parity.
+- Jump logic records a hit before skipping to match kallisto’s jump behavior.
+- Special/overcrowded minimizers handled via D-list / special unitig checks.
+
+### Debugging tools
+- `trace-reads` supports EC traces, per-hit dumps, intersection dumps, and positions visited.
+- Minimizer debug includes MPH lookup info, unitig match decisions, and special/D-list flags.
+- Debug helpers: `minimizer-lookup`, `minimizer-bitmap-scan`, `minimizer-unitig-mphf-check`,
+  and `minimizer-mphf-keys` for inspecting MPHF/index consistency.
+
+Debug flags (CLI)
+- Pseudoalign/quant parity switches: `--kallisto-enum`, `--kallisto-strict`, `--kallisto-local-fallback`,
+  `--kallisto-fallback`, `--kallisto-direct-kmer`, `--kallisto-bifrost-find`,
+  `--discard-special-only`, `--skip-overcrowded-minimizer`, `--no-jump`, `--union`,
+  `--min-range`, `--dfk-onlist`.
+- Trace reads: `--hits-out`, `--hits-intersection-out`, `--positions-visited-out`,
+  `--minimizer-positions`, `--minimizer-out`, `--local-kmer-out`, `--gene-map`,
+  plus the parity switches above and strand/fragment options (`--strand`, `--fragment-length`,
+  `--single-overhang`, `--fr-stranded`, `--rf-stranded`).
+
+### Real-data benchmark (no debug)
+- Dataset: `data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz`
+- Mean read length: 168.90 (used `-l 169 -s 20`)
+- Accuracy summary uses TPM filter `max(kallisto_tpm, kallistors_tpm) > 1` (n = 7824).
+
+Rebuilt index (`data/kallisto_index`)
+- Speed: kallisto real 19.26s; kallistors real 36.38s
+- n_pseudoaligned: kallisto 41626 / 43817; kallistors 41666 / 43817
+- TPM Pearson 0.974175, TPM MAE 11.206
+- est_counts Pearson 0.998049, est_counts MAE 0.303
+
+Original index (`data/Human_kallisto_index`)
+- Speed: kallisto real 19.50s; kallistors real 39.48s
+- n_pseudoaligned: kallisto 41626 / 43817; kallistors 41665 / 43817
+- TPM Pearson 0.974031, TPM MAE 11.614
+- est_counts Pearson 0.997615, est_counts MAE 0.325
+
+### Parity tests
+- Synthetic parity: `variants_parity` allows a 1-read drift in aligned count; EC sets must match when aligned.
+- Other parity tests keep strict equality on aligned counts and EC sets.
+
 ### As a Crate
 
 Add to `Cargo.toml`:
@@ -157,12 +201,33 @@ Latest benchmark summary (2025-12-27, macOS arm64, 8 threads, ~43k reads):
 - run_info: n_pseudoaligned 41444 vs 41113; n_unique 2420 vs 2111
 - abundance parity: p99 rel error tpm 0.00882; est_counts 1.43e-07
 
+### Debugging abundance diffs
+
+Compare `abundance.tsv` outputs and rank transcripts by relative error:
+```bash
+scripts/compare_abundance.py \
+  --kallisto /path/to/kallisto/abundance.tsv \
+  --kallistors /path/to/kallistors/abundance.tsv \
+  --top 50
+```
+
+Trace per-read EC decisions for a small set of reads (single-end):
+```bash
+printf "READ_ID_1\nREAD_ID_2\n" > read_list.txt
+target/release/kallistors-cli trace-reads \
+  --index data/Human_kallisto_index \
+  --reads data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz \
+  --read-list read_list.txt \
+  --out read_traces.tsv \
+  --fragment-length 200
+```
+
 ## Contributing
 
 Contributions are very welcome! 
 If you’d like to help improve `kallistors`, feel free to open an issue to discuss ideas, report bugs, or request features.
 
-Pull requests are encouraged — especially for:
+Pull requests are encouraged, especially for:
 - performance improvements
 - correctness / numerical stability fixes
 - additional tests (including cross-validation vs original)
@@ -173,7 +238,7 @@ Pull requests are encouraged — especially for:
 - Please run formatting and linting before submitting:
   ```bash
   cargo fmt --all
-  cargo clippy --workspace --all-targets --all-features
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
   cargo test --workspace --all-features
   ```
 

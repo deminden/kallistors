@@ -8,6 +8,8 @@ pub enum DebugFailReason {
     NoKmerMatch,
     EmptyEc,
     IntersectionEmpty,
+    SpecialOnly,
+    OvercrowdedJumpSkip,
     Unknown,
 }
 
@@ -20,6 +22,8 @@ impl std::fmt::Display for DebugFailReason {
             DebugFailReason::NoKmerMatch => "no_kmer_match",
             DebugFailReason::EmptyEc => "empty_ec",
             DebugFailReason::IntersectionEmpty => "intersection_empty",
+            DebugFailReason::SpecialOnly => "special_only",
+            DebugFailReason::OvercrowdedJumpSkip => "overcrowded_jump_skip",
             DebugFailReason::Unknown => "unknown",
         };
         f.write_str(s)
@@ -94,12 +98,15 @@ pub(crate) struct ReadDebugState {
     pub(crate) saw_match: bool,
     pub(crate) saw_ec: bool,
     pub(crate) intersection_empty: bool,
+    pub(crate) special_only: bool,
+    pub(crate) overcrowded_jump_skip: bool,
     pub(crate) first_mphf_miss: Option<(usize, usize)>,
     pub(crate) first_no_positions: Option<(usize, usize)>,
     pub(crate) first_no_match: Option<(usize, usize)>,
     pub(crate) first_empty_ec: Option<(usize, usize)>,
     pub(crate) first_no_match_positions: Option<(usize, usize, usize, String)>,
     pub(crate) used_revcomp: bool,
+    pub(crate) visited_positions: Vec<usize>,
 }
 
 pub(crate) fn debug_reason(
@@ -135,6 +142,12 @@ pub(crate) fn debug_reason(
     }
     if state.intersection_empty {
         return (DebugFailReason::IntersectionEmpty, None, None);
+    }
+    if state.special_only {
+        return (DebugFailReason::SpecialOnly, None, None);
+    }
+    if state.overcrowded_jump_skip {
+        return (DebugFailReason::OvercrowdedJumpSkip, None, None);
     }
     (DebugFailReason::Unknown, None, None)
 }

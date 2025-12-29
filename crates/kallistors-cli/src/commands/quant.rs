@@ -16,6 +16,14 @@ pub struct QuantArgs {
     pub bias: bool,
     pub transcripts: Option<PathBuf>,
     pub seed: u64,
+    pub kallisto_enum: bool,
+    pub kallisto_strict: bool,
+    pub kallisto_local_fallback: bool,
+    pub kallisto_fallback: bool,
+    pub discard_special_only: bool,
+    pub skip_overcrowded_minimizer: bool,
+    pub kallisto_direct_kmer: bool,
+    pub kallisto_bifrost_find: bool,
     pub threads: usize,
     pub pseudobam: bool,
     pub genomebam: bool,
@@ -82,7 +90,17 @@ pub fn run(args: QuantArgs) -> Result<()> {
         .map(|v| !v.single_overhang && v.fragment_length > 0)
         .unwrap_or(false);
     let index = if load_positional_info || !single {
-        kallistors::pseudoalign::build_bifrost_index_with_positions(&args.index, true)
+        if args.kallisto_direct_kmer {
+            kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(&args.index, true)
+        } else if args.kallisto_fallback {
+            kallistors::pseudoalign::build_bifrost_index_with_positions_and_kmer(&args.index, true)
+        } else {
+            kallistors::pseudoalign::build_bifrost_index_with_positions(&args.index, true)
+        }
+    } else if args.kallisto_direct_kmer {
+        kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(&args.index, false)
+    } else if args.kallisto_fallback {
+        kallistors::pseudoalign::build_bifrost_index_with_kmer(&args.index)
     } else {
         kallistors::pseudoalign::build_bifrost_index(&args.index)
     }
@@ -101,6 +119,14 @@ pub fn run(args: QuantArgs) -> Result<()> {
         dfk_onlist: false,
         strand_specific,
         no_jump: false,
+        kallisto_enum: args.kallisto_enum,
+        kallisto_strict: args.kallisto_strict,
+        kallisto_local_fallback: args.kallisto_local_fallback,
+        kallisto_fallback: args.kallisto_fallback,
+        discard_special_only: args.discard_special_only,
+        skip_overcrowded_minimizer: args.skip_overcrowded_minimizer,
+        kallisto_direct_kmer: args.kallisto_direct_kmer,
+        kallisto_bifrost_find: args.kallisto_bifrost_find,
         bias: args.bias,
         max_bias: 1_000_000,
     };

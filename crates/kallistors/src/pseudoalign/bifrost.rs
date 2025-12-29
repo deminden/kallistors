@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -7,8 +7,11 @@ use crate::index::bifrost::{BooPhf, encode_minimizer_rep, read_bitcontainer_valu
 use crate::index::{parse_graph_section, read_block_array_blocks};
 use crate::{Error, Result};
 
+use super::ec::encode_kmer_pair;
 use super::io::{read_i32_le, read_u32_le, read_u64_le};
-use super::{KMER_BYTES_CANDIDATES, read_onlist_with_lengths};
+use super::{KMER_BYTES_CANDIDATES, KmerEcIndex, read_onlist_with_lengths};
+
+pub type KmerPosIndex = HashMap<u64, Vec<(usize, usize, bool)>>;
 
 pub struct BifrostIndex {
     pub k: usize,
@@ -16,6 +19,10 @@ pub struct BifrostIndex {
     pub unitigs: Vec<Vec<u8>>,
     pub km_unitigs: Vec<Vec<u8>>,
     pub h_kmers: Vec<Vec<u8>>,
+    pub h_kmer_map: Option<HashMap<u64, usize>>,
+    pub dlist: Option<HashSet<u64>>,
+    pub kmer_pos_index: Option<KmerPosIndex>,
+    pub kmer_index: Option<KmerEcIndex>,
     pub(crate) ec_blocks: Vec<Vec<crate::index::EcBlock>>,
     pub minz_positions: Vec<Vec<u64>>,
     pub mphf: BooPhf,
@@ -29,6 +36,15 @@ pub struct BifrostIndex {
 
 pub fn build_bifrost_index(path: &Path) -> Result<BifrostIndex> {
     build_bifrost_index_with_positions(path, false)
+}
+
+pub fn build_bifrost_index_with_kmer_pos(
+    path: &Path,
+    load_positional_info: bool,
+) -> Result<BifrostIndex> {
+    let mut index = build_bifrost_index_with_positions(path, load_positional_info)?;
+    index.kmer_pos_index = Some(build_kmer_pos_index(&index));
+    Ok(index)
 }
 
 pub fn build_bifrost_index_with_positions(
@@ -84,6 +100,19 @@ pub fn build_bifrost_index_with_positions(
         reader.read_exact(&mut buf)?;
         h_kmers.push(decode_kmer(&buf, k));
     }
+    let h_kmer_map = if h_kmers.is_empty() {
+        None
+    } else {
+        let mut map = HashMap::with_capacity(h_kmers.len());
+        let base = unitigs.len() + km_unitigs.len();
+        for (idx, seq) in h_kmers.iter().enumerate() {
+            if let Some((fwd, rev)) = encode_kmer_pair(seq) {
+                let code = fwd.min(rev);
+                map.insert(code, base + idx);
+            }
+        }
+        Some(map)
+    };
 
     let _bfg_header = read_u64_le(&mut reader)?;
     let _checksum = read_u64_le(&mut reader)?;
@@ -147,10 +176,20 @@ pub fn build_bifrost_index_with_positions(
 
     let dlist_size = read_u64_le(&mut reader)?;
     let _dlist_overhang = read_u64_le(&mut reader)?;
-    let dlist_skip = dlist_size
-        .checked_mul(kmer_bytes as u64)
-        .ok_or_else(|| Error::InvalidFormat("d-list size overflow".into()))?;
-    reader.seek(SeekFrom::Current(dlist_skip as i64))?;
+    let mut dlist = if dlist_size > 0 {
+        HashSet::with_capacity(dlist_size as usize)
+    } else {
+        HashSet::new()
+    };
+    for _ in 0..dlist_size {
+        let mut buf = vec![0u8; kmer_bytes];
+        reader.read_exact(&mut buf)?;
+        let seq = decode_kmer(&buf, k);
+        if let Some((fwd, rev)) = encode_kmer_pair(&seq) {
+            dlist.insert(fwd.min(rev));
+        }
+    }
+    let dlist = if dlist.is_empty() { None } else { Some(dlist) };
 
     let node_count = read_u64_le(&mut reader)? as usize;
     let mut ec_blocks = Vec::with_capacity(node_count);
@@ -235,6 +274,10 @@ pub fn build_bifrost_index_with_positions(
         unitigs,
         km_unitigs,
         h_kmers,
+        h_kmer_map,
+        dlist,
+        kmer_pos_index: None,
+        kmer_index: None,
         ec_blocks,
         minz_positions,
         mphf,
@@ -245,6 +288,51 @@ pub fn build_bifrost_index_with_positions(
         shade_sequences: onlist.shade_sequences,
         use_shade: onlist.use_shade,
     })
+}
+
+fn build_kmer_pos_index(index: &BifrostIndex) -> KmerPosIndex {
+    let mut map: KmerPosIndex = HashMap::new();
+    let k = index.k;
+    for (unitig_id, seq) in index.unitigs.iter().enumerate() {
+        if seq.len() < k {
+            continue;
+        }
+        for pos in 0..=seq.len() - k {
+            if let Some((fwd, rev)) = encode_kmer_pair(&seq[pos..pos + k]) {
+                map.entry(fwd).or_default().push((unitig_id, pos, false));
+                if rev != fwd {
+                    map.entry(rev).or_default().push((unitig_id, pos, true));
+                }
+            }
+        }
+    }
+    let base_km = index.unitigs.len();
+    for (km_id, seq) in index.km_unitigs.iter().enumerate() {
+        if seq.len() != k {
+            continue;
+        }
+        if let Some((fwd, rev)) = encode_kmer_pair(seq) {
+            let unitig_id = base_km + km_id;
+            map.entry(fwd).or_default().push((unitig_id, 0, false));
+            if rev != fwd {
+                map.entry(rev).or_default().push((unitig_id, 0, true));
+            }
+        }
+    }
+    let base_h = index.unitigs.len() + index.km_unitigs.len();
+    for (hk_id, seq) in index.h_kmers.iter().enumerate() {
+        if seq.len() != k {
+            continue;
+        }
+        if let Some((fwd, rev)) = encode_kmer_pair(seq) {
+            let unitig_id = base_h + hk_id;
+            map.entry(fwd).or_default().push((unitig_id, 0, false));
+            if rev != fwd {
+                map.entry(rev).or_default().push((unitig_id, 0, true));
+            }
+        }
+    }
+    map
 }
 
 fn detect_kmer_bytes(path: &Path) -> Result<usize> {

@@ -23,6 +23,14 @@ pub fn run(
     rf_stranded: bool,
     bias: bool,
     bias_out: Option<&Path>,
+    kallisto_enum: bool,
+    kallisto_strict: bool,
+    kallisto_local_fallback: bool,
+    kallisto_fallback: bool,
+    discard_special_only: bool,
+    skip_overcrowded_minimizer: bool,
+    kallisto_direct_kmer: bool,
+    kallisto_bifrost_find: bool,
 ) -> Result<()> {
     if reads2.is_some() && fragment_length.is_some() {
         return Err(anyhow!(
@@ -54,6 +62,14 @@ pub fn run(
         dfk_onlist,
         strand_specific,
         no_jump,
+        kallisto_enum,
+        kallisto_strict,
+        kallisto_local_fallback,
+        kallisto_fallback,
+        discard_special_only,
+        skip_overcrowded_minimizer,
+        kallisto_direct_kmer,
+        kallisto_bifrost_find,
         bias,
         max_bias: 1_000_000,
     };
@@ -68,7 +84,17 @@ pub fn run(
         .map(|v| !v.single_overhang && v.fragment_length > 0)
         .unwrap_or(false);
     let index = if load_positional_info {
-        kallistors::pseudoalign::build_bifrost_index_with_positions(index, true)
+        if kallisto_direct_kmer {
+            kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(index, true)
+        } else if kallisto_fallback {
+            kallistors::pseudoalign::build_bifrost_index_with_positions_and_kmer(index, true)
+        } else {
+            kallistors::pseudoalign::build_bifrost_index_with_positions(index, true)
+        }
+    } else if kallisto_direct_kmer {
+        kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(index, false)
+    } else if kallisto_fallback {
+        kallistors::pseudoalign::build_bifrost_index_with_kmer(index)
     } else {
         kallistors::pseudoalign::build_bifrost_index(index)
     }

@@ -7,39 +7,52 @@ Generated: 2025-12-27T20:01:07.370567
 - Processor: arm
 - CPU cores: 8
 
-## Inputs
-- Index: data/Human_kallisto_index
+## 2025-12-29 benchmark
+Inputs:
 - Reads: data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
-- Fragment length: 200 +- 20
-- Threads: 8
+- Mean read length: 168.90 (used -l 169 -s 20)
 
-## Commands
+Commands:
 ```bash
-kallisto quant --single -l 200 -s 20 -i data/Human_kallisto_index -o /var/folders/vh/5r90mw8d7y99ysqy4r6hd0gr0000gn/T/kallistors-bench-htnonw32/kallisto -t 8 data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
-target/release/kallistors-cli quant --single -l 200 -s 20 -i data/Human_kallisto_index -o /var/folders/vh/5r90mw8d7y99ysqy4r6hd0gr0000gn/T/kallistors-bench-htnonw32/kallistors -t 8 data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
+kallisto_src/build/src/kallisto quant \
+  -i data/kallisto_index -o data/kallisto_bench_run \
+  --single -l 169 -s 20 \
+  data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
+
+./target/release/kallistors-cli quant \
+  -i data/kallisto_index -o data/kallistors_bench_run \
+  --single -l 169 -s 20 \
+  data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
 ```
+Timings:
+- kallisto real 19.26s, user 17.41s, sys 1.47s
+- kallistors real 36.38s, user 28.25s, sys 7.13s
+run_info:
+- kallisto n_pseudoaligned 41626 / 43817
+- kallistors n_pseudoaligned 41666 / 43817
+Accuracy (TPM filter max(k_tpm, o_tpm) > 1; n = 7824):
+- TPM Pearson 0.974175, TPM MAE 11.206
+- est_counts Pearson 0.998049, est_counts MAE 0.303
 
-## Timings
-- kallisto wall: 11.106s, cpu: 30.802s
-- kallistors wall: 36.013s, cpu: 36.408s
+### Original index (data/Human_kallisto_index)
+Commands:
+```bash
+kallisto_src/build/src/kallisto quant \
+  -i data/Human_kallisto_index -o data/kallisto_bench_run_old \
+  --single -l 169 -s 20 \
+  data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
 
-## run_info parity
-| field | kallisto | kallistors |
-| --- | --- | --- |
-| n_targets | 328868 | 328868 |
-| n_processed | 43817 | 43817 |
-| n_pseudoaligned | 41444 | 41113 |
-| n_unique | 2420 | 2111 |
-| p_pseudoaligned | 94.6 | 93.8 |
-| p_unique | 5.5 | 4.8 |
-
-## abundance.tsv parity
-- Missing transcripts: 0
-- Max eff_length abs diff: 4.94999e-05
-
-Percentiles for relative error (abs(a-b)/max(1,a,b)):
-
-| metric | p50 | p90 | p99 | max |
-| --- | --- | --- | --- | --- |
-| est_counts | 0 | 0 | 1.43e-07 | 1 |
-| tpm | 0 | 0 | 0.00882 | 1 |
+./target/release/kallistors-cli quant \
+  -i data/Human_kallisto_index -o data/kallistors_bench_run_old \
+  --single -l 169 -s 20 \
+  data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
+```
+Timings:
+- kallisto real 19.50s, user 17.50s, sys 1.50s
+- kallistors real 39.48s, user 29.00s, sys 8.80s
+run_info:
+- kallisto n_pseudoaligned 41626 / 43817
+- kallistors n_pseudoaligned 41665 / 43817
+Accuracy (TPM filter max(k_tpm, o_tpm) > 1; n = 7840):
+- TPM Pearson 0.974031, TPM MAE 11.614
+- est_counts Pearson 0.997615, est_counts MAE 0.325
