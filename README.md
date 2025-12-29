@@ -78,22 +78,33 @@ Debug flags (CLI)
   plus the parity switches above and strand/fragment options (`--strand`, `--fragment-length`,
   `--single-overhang`, `--fr-stranded`, `--rf-stranded`).
 
-### Real-data benchmark (no debug)
-- Dataset: `data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz`
+### Real-data benchmark (latest, no debug)
+Dataset + index (in `data/` in this repo):
+- Reads trimmed with fastp and 1/100 selected: `data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz`
+- Reference transcripts: `data/Homo_sapiens.GRCh38.cdna.all.fa.gz`
+- Index (rebuilt): `data/kallisto_index`
 - Mean read length: 168.90 (used `-l 169 -s 20`)
-- Accuracy summary uses TPM filter `max(kallisto_tpm, kallistors_tpm) > 1` (n = 7824).
 
-Rebuilt index (`data/kallisto_index`)
+```bash
+
+# Run kallisto (no debug)
+kallisto quant \
+  -i data/kallisto_index -o data/kallisto_bench_run \
+  --single -l 169 -s 20 \
+  data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
+
+# Run kallistors (no debug)
+./target/release/kallistors-cli quant \
+  -i data/kallisto_index -o data/kallistors_bench_run \
+  --single -l 169 -s 20 \
+  data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
+```
+
+Latest results (2025-12-29, macOS arm64, no debug):
 - Speed: kallisto real 19.26s; kallistors real 36.38s
 - n_pseudoaligned: kallisto 41626 / 43817; kallistors 41666 / 43817
-- TPM Pearson 0.974175, TPM MAE 11.206
+- TPM Pearson 0.974175, TPM MAE 11.206 (TPM filter max(k_tpm, o_tpm) > 1; n = 7824)
 - est_counts Pearson 0.998049, est_counts MAE 0.303
-
-Original index (`data/Human_kallisto_index`)
-- Speed: kallisto real 19.50s; kallistors real 39.48s
-- n_pseudoaligned: kallisto 41626 / 43817; kallistors 41665 / 43817
-- TPM Pearson 0.974031, TPM MAE 11.614
-- est_counts Pearson 0.997615, est_counts MAE 0.325
 
 ### Parity tests
 - Synthetic parity: `variants_parity` allows a 1-read drift in aligned count; EC sets must match when aligned.
@@ -165,41 +176,6 @@ let result = em_quantify(
 ```
 
 
-
-### Real-data parity and benchmarks
-
-Dataset + index (already in `data/` in this repo):
-- Reads: `data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed.fastq.gz`
-- Reference transcripts: `data/Homo_sapiens.GRCh38.cdna.all.fa.gz`
-- Index: `data/Human_kallisto_index` (built from the reference transcript FASTA)
-
-Generate a ~1/100 subset (single-end; deterministic sampling):
-```bash
-scripts/sample_fastq.py \
-  --input1 data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed.fastq.gz \
-  --output1 data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz \
-  --fraction 0.01 \
-  --seed 42
-```
-
-Run the real-data parity test (skips if files or `kallisto` are missing):
-```bash
-cargo test -p kallistors-cli --test real_kallisto_parity -- --nocapture
-```
-
-Run benchmarks vs kallisto and write a report:
-```bash
-scripts/bench_real_kallisto.py \
-  --index data/Human_kallisto_index \
-  --reads data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz \
-  --threads 8
-```
-
-Latest benchmark output is stored in `bench_latest.md`.
-Latest benchmark summary (2025-12-27, macOS arm64, 8 threads, ~43k reads):
-- kallisto wall 11.106s / cpu 30.802s; kallistors wall 36.013s / cpu 36.408s
-- run_info: n_pseudoaligned 41444 vs 41113; n_unique 2420 vs 2111
-- abundance parity: p99 rel error tpm 0.00882; est_counts 1.43e-07
 
 ### Debugging abundance diffs
 
