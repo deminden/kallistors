@@ -5,7 +5,7 @@ use super::debug::{
 use super::ec::encode_kmer_pair;
 use super::minimizers::{
     fill_revcomp, minhash_next_after_hash, minhash_primary_for_kmer, minimizer_for_kmer_strict,
-    minimizers_for_kmer, minimizers_ranked_for_kmer,
+    minimizer_tail_for_kmer, minimizers_for_kmer, minimizers_ranked_for_kmer,
 };
 use super::{BifrostIndex, KmerEcIndex, PseudoalignOptions};
 use super::{DebugFailReason, DebugReport, Hit, MatchInfo, ReadEc, Strand, StrandSpecific};
@@ -22,6 +22,11 @@ fn minimizer_hex(bytes: [u8; 8]) -> String {
     out
 }
 
+#[inline]
+fn onlist_cardinality(onlist: &[bool]) -> u32 {
+    onlist.iter().filter(|&&v| v).count() as u32
+}
+
 #[allow(clippy::too_many_arguments)]
 fn match_unitig_candidate(
     unitig: &[u8],
@@ -34,7 +39,8 @@ fn match_unitig_candidate(
     rev_kmer: &[u8],
     allow_forward: bool,
     allow_rev: bool,
-) -> Option<(usize, bool, bool)> {
+    allow_relaxed: bool,
+) -> Option<(usize, bool, bool, bool)> {
     if unitig.len() < k {
         return None;
     }
@@ -44,7 +50,7 @@ fn match_unitig_candidate(
     if allow_forward && start_fwd >= 0 {
         let start = start_fwd as usize;
         if start + k <= unitig.len() && &unitig[start..start + k] == kmer {
-            return Some((start, false, false));
+            return Some((start, false, false, true));
         }
     }
 
@@ -52,12 +58,16 @@ fn match_unitig_candidate(
     if allow_rev && start_rev >= 0 {
         let start = start_rev as usize;
         if start + k <= unitig.len() && &unitig[start..start + k] == rev_kmer {
-            return Some((start, true, false));
+            return Some((start, true, false, false));
         }
     }
 
-    // If exact anchoring fails, search all k-mer starts that can contain
-    // this minimizer occurrence (rel_pos - diff .. rel_pos).
+    if !allow_relaxed {
+        return None;
+    }
+
+    // Relaxed fallback: allow any k-mer start whose window can contain
+    // the selected minimizer occurrence (rel_pos - (k-g) .. rel_pos).
     let max_start = unitig.len() - k;
     let start_lo = rel_pos.saturating_sub(diff).min(max_start);
     let start_hi = rel_pos.min(max_start);
@@ -65,14 +75,14 @@ fn match_unitig_candidate(
         return None;
     }
     for start in start_lo..=start_hi {
-        let slice = &unitig[start..start + k];
-        if allow_forward && slice == kmer {
-            return Some((start, false, true));
+        if allow_forward && &unitig[start..start + k] == kmer {
+            return Some((start, false, true, true));
         }
-        if allow_rev && slice == rev_kmer {
-            return Some((start, true, true));
+        if allow_rev && &unitig[start..start + k] == rev_kmer {
+            return Some((start, true, true, false));
         }
     }
+
     None
 }
 
@@ -104,6 +114,10 @@ pub(super) fn ec_for_read_bifrost(
     let mut online_intersection: Option<Vec<u32>> = None;
     let mut saw_special_hit = false;
     let mut saw_non_special_hit = false;
+    let dlist_dummy = index.onlist.as_deref().map(onlist_cardinality);
+    let mut any_dlist_kmer = false;
+    let mut dlist_early_return = false;
+    let mut extra_ec_hits: Vec<Vec<u32>> = Vec::new();
     // Kallisto falls back to incremental scanning after a failed jump; track that window.
     let mut backoff_until: Option<usize> = None;
 
@@ -124,6 +138,12 @@ pub(super) fn ec_for_read_bifrost(
             }
         }
         let kmer = &seq[pos..pos + index.k];
+        let kmer_in_dlist = index.dlist.as_ref().is_some_and(|dlist| {
+            encode_kmer_pair(kmer).is_some_and(|(fwd, rev)| dlist.contains(&fwd.min(rev)))
+        });
+        if kmer_in_dlist {
+            any_dlist_kmer = true;
+        }
         let mut matched = None;
         let mut any_mphf = false;
         let mut any_positions = false;
@@ -151,7 +171,17 @@ pub(super) fn ec_for_read_bifrost(
             if let Some((uid, start, used_revcomp)) =
                 match_kmer_direct(index, kmer, allow_forward_base, allow_rev_base)
             {
-                matched = Some((uid, start, pos, 0, used_revcomp, false, false, false));
+                matched = Some((
+                    uid,
+                    start,
+                    pos,
+                    0,
+                    used_revcomp,
+                    false,
+                    false,
+                    false,
+                    !used_revcomp,
+                ));
             }
             if matched.is_none() {
                 pos += 1;
@@ -184,6 +214,8 @@ pub(super) fn ec_for_read_bifrost(
         if let Some(state) = dbg.as_deref_mut() {
             state.saw_valid_kmer = true;
         }
+        let mut tried_tail_minimizer = false;
+        let mut saw_special_overcrowded_unresolved = false;
         'min_outer: loop {
             let mut request_next_min = false;
             for (min_bytes, min_pos) in min_candidates.iter().copied() {
@@ -196,6 +228,7 @@ pub(super) fn ec_for_read_bifrost(
                     minimizer: minimizer_hex(min_bytes),
                     mphf_hit: false,
                     positions_len: 0,
+                    sample_positions: "-".to_string(),
                     has_special: false,
                     overcrowded: false,
                     matched: false,
@@ -250,6 +283,7 @@ pub(super) fn ec_for_read_bifrost(
                     }
                 }
                 candidate.positions_len = positions.len();
+                candidate.sample_positions = format_positions_sample(positions);
                 candidate.overcrowded = minimizer_overcrowded;
                 any_positions = true;
                 if let Some(state) = dbg.as_deref_mut()
@@ -295,8 +329,12 @@ pub(super) fn ec_for_read_bifrost(
                                 true,
                                 minimizer_overcrowded,
                                 false,
+                                !used_revcomp,
                             ));
                             break;
+                        }
+                        if overcrowded {
+                            saw_special_overcrowded_unresolved = true;
                         }
                         if options.kallisto_bifrost_find && overcrowded {
                             request_next_min = true;
@@ -343,6 +381,7 @@ pub(super) fn ec_for_read_bifrost(
                                 false,
                                 minimizer_overcrowded,
                                 false,
+                                !used_revcomp,
                             ));
                             if used_revcomp && let Some(state) = dbg.as_deref_mut() {
                                 state.used_revcomp = true;
@@ -354,18 +393,21 @@ pub(super) fn ec_for_read_bifrost(
                         if uid >= index.unitigs.len() {
                             continue;
                         }
-                        if let Some((start, used_revcomp, matched_relaxed)) = match_unitig_candidate(
-                            index.unitigs[uid].as_slice(),
-                            index.k,
-                            rel_pos as usize,
-                            diff,
-                            min_pos_fwd,
-                            min_pos_rev,
-                            kmer,
-                            rev_buf.as_slice(),
-                            allow_forward_base,
-                            allow_rev_base,
-                        ) {
+                        if let Some((start, used_revcomp, matched_relaxed, forward_strand)) =
+                            match_unitig_candidate(
+                                index.unitigs[uid].as_slice(),
+                                index.k,
+                                rel_pos as usize,
+                                diff,
+                                min_pos_fwd,
+                                min_pos_rev,
+                                kmer,
+                                rev_buf.as_slice(),
+                                allow_forward_base,
+                                allow_rev_base,
+                                true,
+                            )
+                        {
                             candidate.matched = true;
                             local_match = Some((
                                 uid,
@@ -376,6 +418,7 @@ pub(super) fn ec_for_read_bifrost(
                                 false,
                                 minimizer_overcrowded,
                                 matched_relaxed,
+                                forward_strand,
                             ));
                             if used_revcomp && let Some(state) = dbg.as_deref_mut() {
                                 state.used_revcomp = true;
@@ -404,7 +447,75 @@ pub(super) fn ec_for_read_bifrost(
                     state.minimizer_candidates.push(candidate);
                 }
             }
-            if matched.is_some() || !options.kallisto_bifrost_find {
+            if matched.is_some() {
+                break;
+            }
+            if !options.kallisto_bifrost_find
+                && !options.kallisto_strict
+                && saw_special_overcrowded_unresolved
+            {
+                // Narrow gate: only use the special-overcrowded rescue when it
+                // reproduces kallisto's collapse behavior (existing intersection
+                // becomes empty at this position), preventing broad overmapping.
+                let mut probe_rev_buf: Vec<u8> = Vec::new();
+                if let Some((uid, start, used_revcomp, block_idx, matched_relaxed)) =
+                    match_kmer_at_pos(
+                        index,
+                        kmer,
+                        allow_forward_base,
+                        allow_rev_base,
+                        diff,
+                        &mut probe_rev_buf,
+                        options.kallisto_direct_kmer,
+                        options.kallisto_enum,
+                        options.kallisto_strict,
+                        options.skip_overcrowded_minimizer,
+                        true,
+                        true,
+                    )
+                    && !options.do_union
+                    && let Some(current) = online_intersection.as_ref()
+                {
+                    let ec_full = &index.ec_blocks[uid][block_idx].ec;
+                    let ec = if use_shade {
+                        filter_shades(ec_full, &index.shade_sequences, &mut shade_scratch);
+                        shade_scratch.as_slice()
+                    } else {
+                        ec_full.as_slice()
+                    };
+                    let mut probe_next = Vec::new();
+                    intersect_sorted(current, ec, &mut probe_next);
+                    if probe_next.is_empty() {
+                        matched = Some((
+                            uid,
+                            start,
+                            pos,
+                            0usize,
+                            used_revcomp,
+                            false,
+                            false,
+                            matched_relaxed,
+                            !used_revcomp,
+                        ));
+                        break;
+                    }
+                }
+            }
+            if !options.kallisto_bifrost_find
+                && !options.kallisto_strict
+                && !options.kallisto_enum
+                && !in_backoff
+                && !tried_tail_minimizer
+                && let Some((tail_bytes, tail_pos)) = minimizer_tail_for_kmer(min_input, index.g)
+                && !min_candidates
+                    .iter()
+                    .any(|&(min_bytes, min_pos)| min_bytes == tail_bytes && min_pos == tail_pos)
+            {
+                tried_tail_minimizer = true;
+                min_candidates = vec![(tail_bytes, tail_pos)];
+                continue 'min_outer;
+            }
+            if !options.kallisto_bifrost_find {
                 break;
             }
             if request_next_min
@@ -436,6 +547,7 @@ pub(super) fn ec_for_read_bifrost(
             is_special,
             _minimizer_overcrowded,
             matched_relaxed,
+            forward_strand,
         )) = matched
         else {
             pos += 1;
@@ -564,7 +676,8 @@ pub(super) fn ec_for_read_bifrost(
         let mut next_pos;
         if !options.no_jump
             && !in_backoff
-            && let Some(dist) = jump_distance_for_match(index, uid, block_idx, start, used_revcomp)
+            && let Some(dist) =
+                jump_distance_for_match(index, uid, block_idx, start, forward_strand)
         {
             next_pos = pos + dist;
             if next_pos > last_pos {
@@ -579,10 +692,12 @@ pub(super) fn ec_for_read_bifrost(
                     allow_rev_base,
                     diff,
                     &mut rev_buf,
+                    options.kallisto_direct_kmer,
                     options.kallisto_enum,
                     options.kallisto_strict,
                     options.skip_overcrowded_minimizer,
                     options.kallisto_bifrost_find,
+                    true,
                 );
                 let current_ec = &index.ec_blocks[uid][block_idx].ec;
                 let mut jump_reason = "no_jump";
@@ -632,10 +747,12 @@ pub(super) fn ec_for_read_bifrost(
                                     allow_rev_base,
                                     diff,
                                     &mut rev_buf,
+                                    options.kallisto_direct_kmer,
                                     options.kallisto_enum,
                                     options.kallisto_strict,
                                     options.skip_overcrowded_minimizer,
                                     options.kallisto_bifrost_find,
+                                    true,
                                 )
                             {
                                 mid_hit_found = true;
@@ -698,6 +815,18 @@ pub(super) fn ec_for_read_bifrost(
                 } else {
                     // Kallisto jumps even when the next k-mer is missing.
                     jump_reason = "next_missing";
+                    let next_in_dlist = !options.do_union
+                        && index.dlist.as_ref().is_some_and(|dlist| {
+                            encode_kmer_pair(kmer_next)
+                                .is_some_and(|(fwd, rev)| dlist.contains(&fwd.min(rev)))
+                        });
+                    if next_in_dlist {
+                        dlist_early_return = true;
+                        jump_reason = "next_missing_dlist_early_return";
+                        if let Some(dummy) = dlist_dummy {
+                            extra_ec_hits.push(vec![dummy]);
+                        }
+                    }
                     if next_pos >= last_pos {
                         synthetic_hit = Some(Hit {
                             unitig_id: uid,
@@ -715,6 +844,10 @@ pub(super) fn ec_for_read_bifrost(
                             used_revcomp,
                         });
                         jump_to = Some(next_pos);
+                    }
+                    if dlist_early_return {
+                        force_break = true;
+                        jump_to = None;
                     }
                 }
                 if jump_to.is_none() && !force_break {
@@ -760,6 +893,15 @@ pub(super) fn ec_for_read_bifrost(
             continue;
         }
         pos += 1;
+    }
+
+    // Mirror kallisto's post-loop D-list dummy append in partial mode.
+    if !dlist_early_return
+        && any_dlist_kmer
+        && (has_hit || options.do_union)
+        && let Some(dummy) = dlist_dummy
+    {
+        extra_ec_hits.push(vec![dummy]);
     }
 
     if options.discard_special_only && saw_special_hit && !saw_non_special_hit {
@@ -878,7 +1020,7 @@ pub(super) fn ec_for_read_bifrost(
         if options.do_union {
             if options.dfk_onlist
                 && (current_offlist || ec_offlist)
-                && let Some(dummy) = index.onlist.as_ref().map(|v| v.len() as u32)
+                && let Some(dummy) = index.onlist.as_ref().map(|v| onlist_cardinality(v))
                 && current.last().copied() != Some(dummy)
             {
                 current.push(dummy);
@@ -895,7 +1037,7 @@ pub(super) fn ec_for_read_bifrost(
             }
             let ec_slice = if options.dfk_onlist && (current_offlist || ec_offlist) {
                 if let Some(onlist) = index.onlist.as_deref() {
-                    let dummy = onlist.len() as u32;
+                    let dummy = onlist_cardinality(onlist);
                     ec_scratch.clear();
                     ec_scratch.extend_from_slice(ec);
                     if ec_scratch.last().copied() != Some(dummy) {
@@ -928,6 +1070,33 @@ pub(super) fn ec_for_read_bifrost(
         }
     }
 
+    // Apply synthetic D-list dummy hits (kallisto um_dummy behavior).
+    for ec in &extra_ec_hits {
+        if ec.is_empty() {
+            continue;
+        }
+        if options.do_union {
+            merge_sorted_unique_vec(&mut current, ec);
+            current_offlist = true;
+            continue;
+        }
+        if current.is_empty() {
+            current.extend_from_slice(ec);
+            current_offlist = true;
+            continue;
+        }
+        next.clear();
+        intersect_sorted(&current, ec, &mut next);
+        std::mem::swap(&mut current, &mut next);
+        if current.is_empty() {
+            if let Some(state) = dbg.as_deref_mut() {
+                state.intersection_empty = true;
+            }
+            return None;
+        }
+        current_offlist = true;
+    }
+
     if current.is_empty() {
         return None;
     }
@@ -938,7 +1107,7 @@ pub(super) fn ec_for_read_bifrost(
     if let Some(onlist) = index.onlist.as_deref() {
         current.retain(|&t| (t as usize) < onlist.len() && onlist[t as usize]);
         if options.dfk_onlist && current_offlist && !current.is_empty() {
-            let dummy = onlist.len() as u32;
+            let dummy = onlist_cardinality(onlist);
             if current.last().copied() != Some(dummy) {
                 current.push(dummy);
             }
@@ -980,10 +1149,12 @@ fn match_kmer_at_pos(
     allow_rev: bool,
     _diff: usize,
     rev_buf: &mut Vec<u8>,
+    kallisto_direct_kmer: bool,
     kallisto_enum: bool,
     kallisto_strict: bool,
     skip_overcrowded_minimizer: bool,
     kallisto_bifrost_find: bool,
+    allow_relaxed: bool,
 ) -> Option<(usize, usize, bool, usize, bool)> {
     if !fill_revcomp(kmer, rev_buf) {
         return None;
@@ -999,6 +1170,13 @@ fn match_kmer_at_pos(
     } else {
         kmer
     };
+    if kallisto_direct_kmer
+        && let Some((uid, start, used_revcomp)) =
+            match_kmer_direct(index, kmer, allow_forward, allow_rev)
+    {
+        let block_idx = block_index_for_position(&index.ec_blocks[uid], start)?;
+        return Some((uid, start, used_revcomp, block_idx, false));
+    }
     let (mut min_candidates, mut min_hash_current) = if kallisto_bifrost_find {
         let (min_hash, candidates) = minhash_primary_for_kmer(min_input, index.g)?;
         (candidates, Some(min_hash))
@@ -1012,6 +1190,7 @@ fn match_kmer_at_pos(
         };
         (candidates, None)
     };
+    let mut tried_tail_minimizer = false;
     'min_outer: loop {
         let mut request_next_min = false;
         for (min_bytes, min_pos) in min_candidates.iter().copied() {
@@ -1090,23 +1269,39 @@ fn match_kmer_at_pos(
                     if uid >= index.unitigs.len() {
                         continue;
                     }
-                    if let Some((start, used_revcomp, matched_relaxed)) = match_unitig_candidate(
-                        index.unitigs[uid].as_slice(),
-                        index.k,
-                        rel_pos as usize,
-                        _diff,
-                        min_pos_fwd,
-                        min_pos_rev,
-                        kmer,
-                        rev_buf.as_slice(),
-                        allow_forward,
-                        allow_rev,
-                    ) {
+                    if let Some((start, used_revcomp, matched_relaxed, _forward_strand)) =
+                        match_unitig_candidate(
+                            index.unitigs[uid].as_slice(),
+                            index.k,
+                            rel_pos as usize,
+                            _diff,
+                            min_pos_fwd,
+                            min_pos_rev,
+                            kmer,
+                            rev_buf.as_slice(),
+                            allow_forward,
+                            allow_rev,
+                            allow_relaxed,
+                        )
+                    {
                         let block_idx = block_index_for_position(&index.ec_blocks[uid], start)?;
                         return Some((uid, start, used_revcomp, block_idx, matched_relaxed));
                     }
                 }
             }
+        }
+        if !kallisto_bifrost_find
+            && !kallisto_strict
+            && !kallisto_enum
+            && !tried_tail_minimizer
+            && let Some((tail_bytes, tail_pos)) = minimizer_tail_for_kmer(min_input, index.g)
+            && !min_candidates
+                .iter()
+                .any(|&(min_bytes, min_pos)| min_bytes == tail_bytes && min_pos == tail_pos)
+        {
+            tried_tail_minimizer = true;
+            min_candidates = vec![(tail_bytes, tail_pos)];
+            continue 'min_outer;
         }
         if !kallisto_bifrost_find {
             break;
@@ -1364,11 +1559,6 @@ pub(super) fn special_unitig_for_kmer(index: &BifrostIndex, kmer: &[u8]) -> Opti
     let map = index.h_kmer_map.as_ref()?;
     let (fwd, rev) = encode_kmer_pair(kmer)?;
     let code = fwd.min(rev);
-    if let Some(dlist) = index.dlist.as_ref()
-        && !dlist.contains(&code)
-    {
-        return None;
-    }
     map.get(&code).copied()
 }
 
@@ -1492,7 +1682,7 @@ fn jump_distance_for_match(
     unitig_id: usize,
     block_idx: usize,
     start: usize,
-    used_revcomp: bool,
+    forward_strand: bool,
 ) -> Option<usize> {
     let blocks = index.ec_blocks.get(unitig_id)?;
     let block = blocks.get(block_idx)?;
@@ -1502,8 +1692,7 @@ fn jump_distance_for_match(
     let contig_start = block.lb as isize;
     let contig_len = (block.ub - block.lb) as isize;
     let start = start as isize;
-    let forward = !used_revcomp;
-    let dist = if forward {
+    let dist = if forward_strand {
         contig_len - 1 - (start - contig_start)
     } else {
         start - contig_start

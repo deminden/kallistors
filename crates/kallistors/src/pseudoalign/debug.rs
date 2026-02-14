@@ -62,6 +62,7 @@ pub struct MinimizerCandidateTrace {
     pub minimizer: String,
     pub mphf_hit: bool,
     pub positions_len: usize,
+    pub sample_positions: String,
     pub has_special: bool,
     pub overcrowded: bool,
     pub matched: bool,

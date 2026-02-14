@@ -90,25 +90,25 @@ Dataset + index (in `data/` in this repo):
 ```bash
 
 # Run kallisto (no debug)
-kallisto quant \
-  -i data/Human_kallisto_index -o data/kallisto_bench_run_20260214_human \
+kallisto_src/build/src/kallisto quant \
+  -i data/Human_kallisto_index -o data/kallisto_bench_run_20260214_rerun1 \
   --single -l 169 -s 20 -t 8 \
   data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
 
 # Run kallistors (no debug)
 ./target/release/kallistors-cli quant \
-  -i data/Human_kallisto_index -o data/kallistors_bench_run_20260214_human \
+  -i data/Human_kallisto_index -o data/kallistors_bench_run_20260214_rerun1 \
   --single -l 169 -s 20 -t 8 \
   data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
 ```
 
 Latest results (2026-02-14, macOS arm64, no debug):
-- Speed: kallisto real 9.49s; kallistors real 30.77s
-- n_pseudoaligned: kallisto 41626 / 43817; kallistors 41632 / 43817
-- TPM Pearson 0.999961, TPM MAE 0.724 (TPM filter `max(k_tpm, o_tpm) > 1`; n = 7721)
-- est_counts Pearson 0.999996, est_counts MAE 0.017
+- Speed: kallisto real 10.32s; kallistors real 41.01s
+- n_pseudoaligned: kallisto 41626 / 43817; kallistors 41620 / 43817
+- TPM Pearson 0.999999, TPM MAE 0.071 (TPM filter `max(k_tpm, o_tpm) > 1`; n = 7699)
+- est_counts Pearson 1.000000, est_counts MAE 0.0019
 - Read-level parity (25k sample, original index):
-  - mismatch count dropped from 79 to 13 (`40/39` -> `7/6` for `no_hits_ok`/`ok_no_hits`)
+  - mismatch count dropped from 79 to 4 (`40/39` -> `4/0` for `no_hits_ok`/`ok_no_hits`)
 
 ### Parity tests
 - Synthetic parity: `variants_parity` allows a 1-read drift in aligned count; EC sets must match when aligned.

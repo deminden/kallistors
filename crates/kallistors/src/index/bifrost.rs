@@ -33,7 +33,7 @@ const WYHASH_SECRET: [u64; 4] = [
 
 #[derive(Clone)]
 pub struct BooPhf {
-    gamma: f64,
+    _gamma: f64,
     nb_levels: i32,
     lastbitsetrank: u64,
     nelem: u64,
@@ -92,6 +92,10 @@ impl BitVector {
         ((self.bit_array[idx] >> bit) & 1) != 0
     }
 
+    fn domain(&self) -> u64 {
+        self._size
+    }
+
     fn rank(&self, pos: u64) -> u64 {
         let word_idx = pos / 64;
         let word_offset = pos % 64;
@@ -118,9 +122,10 @@ impl BooPhf {
         let mut levels = Vec::with_capacity(nb_levels as usize);
         for _ in 0..nb_levels {
             let bitset = BitVector::load(reader)?;
+            let hash_domain = bitset.domain();
             levels.push(BooLevel {
                 bitset,
-                hash_domain: 0,
+                hash_domain,
             });
         }
         let final_hash_size = read_u64_le(reader)? as usize;
@@ -130,31 +135,15 @@ impl BooPhf {
             let val = read_u64_le(reader)?;
             final_hash.insert(key.to_le_bytes(), val);
         }
-        let mut phf = Self {
-            gamma,
+        let phf = Self {
+            _gamma: gamma,
             nb_levels,
             lastbitsetrank,
             nelem,
             levels,
             final_hash,
         };
-        phf.recompute_hash_domains();
         Ok(phf)
-    }
-
-    fn recompute_hash_domains(&mut self) {
-        let nelem = self.nelem as f64;
-        let gamma = self.gamma;
-        let proba_collision = 1.0 - (((gamma * nelem - 1.0) / (gamma * nelem)).powf(nelem - 1.0));
-        let hash_domain = (gamma * nelem).ceil() as u64;
-        for (i, level) in self.levels.iter_mut().enumerate() {
-            let raw = (hash_domain as f64 * proba_collision.powi(i as i32)).ceil() as u64;
-            let mut domain = raw.div_ceil(64) * 64;
-            if domain == 0 {
-                domain = 64;
-            }
-            level.hash_domain = domain;
-        }
     }
 
     pub fn lookup(&self, key: &[u8; 8]) -> Option<u64> {

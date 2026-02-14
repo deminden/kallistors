@@ -350,7 +350,7 @@ pub fn run(
     if let Some(writer) = minimizer_candidates_writer.as_mut() {
         writeln!(
             writer,
-            "read\tread_pos\tmin_pos\tminimizer\tmphf_hit\tpositions_len\thas_special\tovercrowded\tmatched"
+            "read\tread_pos\tmin_pos\tminimizer\tmphf_hit\tpositions_len\tsample_positions\thas_special\tovercrowded\tmatched"
         )?;
     }
     if let Some(writer) = jump_decisions_writer.as_mut() {
@@ -443,13 +443,14 @@ pub fn run(
             for entry in candidates {
                 writeln!(
                     writer,
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                     header,
                     entry.read_pos,
                     entry.min_pos,
                     entry.minimizer,
                     if entry.mphf_hit { 1 } else { 0 },
                     entry.positions_len,
+                    entry.sample_positions,
                     if entry.has_special { 1 } else { 0 },
                     if entry.overcrowded { 1 } else { 0 },
                     if entry.matched { 1 } else { 0 },

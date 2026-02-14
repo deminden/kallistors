@@ -188,6 +188,13 @@ pub(super) fn minhash_candidates_for_kmer(seq: &[u8], g: usize) -> Option<Minhas
     Some((min_positions, next_min))
 }
 
+pub(super) fn minimizer_tail_for_kmer(seq: &[u8], g: usize) -> Option<([u8; 8], usize)> {
+    let (_, end) = bifrost_neighbor_bounds(seq.len(), g)?;
+    let slice = &seq[end..end + g];
+    let bytes = encode_minimizer_rep(slice)?;
+    Some((bytes, end))
+}
+
 pub(super) fn minimizer_for_kmer_strict(seq: &[u8], g: usize) -> Option<([u8; 8], usize)> {
     let (start, end) = strict_bounds(seq.len(), g)?;
     let mut best_hash: Option<u64> = None;
