@@ -122,6 +122,8 @@ enum Commands {
         kallisto_direct_kmer: bool,
         #[arg(long)]
         kallisto_bifrost_find: bool,
+        #[arg(long)]
+        kallisto_sparse_hits: bool,
     },
     Quant {
         #[arg(short = 'i', long)]
@@ -165,6 +167,8 @@ enum Commands {
         #[arg(long)]
         kallisto_bifrost_find: bool,
         #[arg(long)]
+        kallisto_sparse_hits: bool,
+        #[arg(long)]
         pseudobam: bool,
         #[arg(long)]
         genomebam: bool,
@@ -205,6 +209,12 @@ enum Commands {
         #[arg(long)]
         positions_visited_out: Option<std::path::PathBuf>,
         #[arg(long)]
+        dropped_hits_out: Option<std::path::PathBuf>,
+        #[arg(long)]
+        minimizer_candidates_out: Option<std::path::PathBuf>,
+        #[arg(long)]
+        jump_decisions_out: Option<std::path::PathBuf>,
+        #[arg(long)]
         local_kmer_out: Option<std::path::PathBuf>,
         #[arg(long)]
         kallisto_enum: bool,
@@ -222,6 +232,8 @@ enum Commands {
         kallisto_direct_kmer: bool,
         #[arg(long)]
         kallisto_bifrost_find: bool,
+        #[arg(long)]
+        kallisto_sparse_hits: bool,
         #[arg(long, value_enum, default_value_t = Strand::Unstranded)]
         strand: Strand,
         #[arg(long)]
@@ -342,6 +354,7 @@ fn main() -> Result<()> {
             skip_overcrowded_minimizer,
             kallisto_direct_kmer,
             kallisto_bifrost_find,
+            kallisto_sparse_hits,
         } => commands::pseudoalign::run(
             &index,
             &reads,
@@ -373,6 +386,7 @@ fn main() -> Result<()> {
             skip_overcrowded_minimizer,
             kallisto_direct_kmer,
             kallisto_bifrost_find,
+            kallisto_sparse_hits,
         ),
         Commands::Quant {
             index,
@@ -395,6 +409,7 @@ fn main() -> Result<()> {
             skip_overcrowded_minimizer,
             kallisto_direct_kmer,
             kallisto_bifrost_find,
+            kallisto_sparse_hits,
             pseudobam,
             genomebam,
             reads,
@@ -419,6 +434,7 @@ fn main() -> Result<()> {
             skip_overcrowded_minimizer,
             kallisto_direct_kmer,
             kallisto_bifrost_find,
+            kallisto_sparse_hits,
             threads,
             pseudobam,
             genomebam,
@@ -445,6 +461,9 @@ fn main() -> Result<()> {
             minimizer_positions,
             minimizer_out,
             positions_visited_out,
+            dropped_hits_out,
+            minimizer_candidates_out,
+            jump_decisions_out,
             local_kmer_out,
             kallisto_enum,
             kallisto_strict,
@@ -454,6 +473,7 @@ fn main() -> Result<()> {
             skip_overcrowded_minimizer,
             kallisto_direct_kmer,
             kallisto_bifrost_find,
+            kallisto_sparse_hits,
             strand,
             fragment_length,
             single_overhang,
@@ -474,6 +494,9 @@ fn main() -> Result<()> {
             minimizer_positions.as_deref(),
             minimizer_out.as_deref(),
             positions_visited_out.as_deref(),
+            dropped_hits_out.as_deref(),
+            minimizer_candidates_out.as_deref(),
+            jump_decisions_out.as_deref(),
             local_kmer_out.as_deref(),
             kallisto_enum,
             kallisto_strict,
@@ -483,6 +506,7 @@ fn main() -> Result<()> {
             skip_overcrowded_minimizer,
             kallisto_direct_kmer,
             kallisto_bifrost_find,
+            kallisto_sparse_hits,
             match strand {
                 Strand::Unstranded => kallistors::pseudoalign::Strand::Unstranded,
                 Strand::Forward => kallistors::pseudoalign::Strand::Forward,

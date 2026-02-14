@@ -7,17 +7,39 @@ const REP_HASH_VALS: [u64; 4] = [
     7783083932390163561,
 ];
 
-pub(super) fn minimizers_for_kmer(seq: &[u8], g: usize) -> Option<Vec<([u8; 8], usize)>> {
-    if seq.len() < g + 2 {
+#[inline]
+fn bifrost_neighbor_bounds(k: usize, g: usize) -> Option<(usize, usize)> {
+    // Bifrost minHashKmer(..., neighbor_hash=true) scans [shift, k-g-shift] inclusive.
+    // With shift=1 this is [1, k-g-1].
+    let shift = 1usize;
+    if k < g + shift + 1 {
         return None;
     }
-    let mut best_hash: Option<u64> = None;
-    let mut best: Vec<([u8; 8], usize)> = Vec::new();
+    let end = k.checked_sub(g + shift)?;
+    if end < shift {
+        None
+    } else {
+        Some((shift, end))
+    }
+}
+
+#[inline]
+fn strict_bounds(k: usize, g: usize) -> Option<(usize, usize)> {
+    if k < g + 2 {
+        return None;
+    }
     let start = 1usize;
-    let mut end = seq.len().saturating_sub(g + 2);
+    let mut end = k.saturating_sub(g + 2);
     if end < start {
         end = start;
     }
+    Some((start, end))
+}
+
+pub(super) fn minimizers_for_kmer(seq: &[u8], g: usize) -> Option<Vec<([u8; 8], usize)>> {
+    let (start, end) = strict_bounds(seq.len(), g)?;
+    let mut best_hash: Option<u64> = None;
+    let mut best: Vec<([u8; 8], usize)> = Vec::new();
     for pos in start..=end {
         let slice = &seq[pos..pos + g];
         let h = rep_hash(slice)?;
@@ -46,14 +68,10 @@ pub(super) fn minimizers_ranked_for_kmer(
     g: usize,
     max_hashes: usize,
 ) -> Option<Vec<([u8; 8], usize)>> {
-    if max_hashes == 0 || seq.len() < g + 2 {
+    if max_hashes == 0 {
         return None;
     }
-    let start = 1usize;
-    let mut end = seq.len().saturating_sub(g + 2);
-    if end < start {
-        end = start;
-    }
+    let (start, end) = strict_bounds(seq.len(), g)?;
     let mut all: Vec<(u64, [u8; 8], usize)> = Vec::new();
     for pos in start..=end {
         let slice = &seq[pos..pos + g];
@@ -81,93 +99,97 @@ pub(super) fn minimizers_ranked_for_kmer(
     if out.is_empty() { None } else { Some(out) }
 }
 
-pub(super) fn minimizers_sorted_for_kmer(
-    seq: &[u8],
-    g: usize,
-) -> Option<Vec<(u64, [u8; 8], usize)>> {
-    if seq.len() < g + 2 {
-        return None;
-    }
-    let start = 1usize;
-    let mut end = seq.len().saturating_sub(g + 2);
-    if end < start {
-        end = start;
-    }
-    let mut all: Vec<(u64, [u8; 8], usize)> = Vec::new();
+type MinimizerCandidates = Vec<([u8; 8], usize)>;
+type MinhashCandidates = (MinimizerCandidates, Option<([u8; 8], usize)>);
+
+pub(super) fn minhash_primary_for_kmer(seq: &[u8], g: usize) -> Option<(u64, MinimizerCandidates)> {
+    let (start, end) = bifrost_neighbor_bounds(seq.len(), g)?;
+    let mut best_hash: Option<u64> = None;
+    let mut best: Vec<([u8; 8], usize)> = Vec::new();
+
     for pos in start..=end {
         let slice = &seq[pos..pos + g];
         let h = rep_hash(slice)?;
         let bytes = encode_minimizer_rep(slice)?;
-        all.push((h, bytes, pos));
+        match best_hash {
+            None => {
+                best_hash = Some(h);
+                best.push((bytes, pos));
+            }
+            Some(min) if h < min => {
+                best_hash = Some(h);
+                best.clear();
+                best.push((bytes, pos));
+            }
+            Some(min) if h == min => {
+                best.push((bytes, pos));
+            }
+            _ => {}
+        }
     }
-    if all.is_empty() {
-        return None;
-    }
-    all.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
-    Some(all)
+
+    best_hash.map(|h| (h, best))
 }
 
-type MinimizerCandidates = Vec<([u8; 8], usize)>;
-type MinhashCandidates = (MinimizerCandidates, Option<([u8; 8], usize)>);
+pub(super) fn minhash_next_after_hash(
+    seq: &[u8],
+    g: usize,
+    min_hash: u64,
+) -> Option<(u64, ([u8; 8], usize))> {
+    let (start, end) = bifrost_neighbor_bounds(seq.len(), g)?;
+    let mut best_hash: Option<u64> = None;
+    let mut best_rep: Option<u64> = None;
+    let mut best_bytes: [u8; 8] = [0; 8];
+    let mut best_pos: usize = 0;
 
-pub(super) fn minhash_candidates_for_kmer(seq: &[u8], g: usize) -> Option<MinhashCandidates> {
-    if seq.len() < g + 2 {
-        return None;
-    }
-    let k = seq.len();
-    let shift = 1usize;
-    let max_pos = k.saturating_sub(g + shift);
-    if max_pos < shift {
-        return None;
-    }
-    let mut all: Vec<(u64, [u8; 8], usize)> = Vec::new();
-    for pos in shift..=max_pos {
+    for pos in start..=end {
         let slice = &seq[pos..pos + g];
         let h = rep_hash(slice)?;
-        let bytes = encode_minimizer_rep(slice)?;
-        all.push((h, bytes, pos));
-    }
-    if all.is_empty() {
-        return None;
-    }
-    let min_hash = all.iter().map(|v| v.0).min()?;
-    let mut min_positions: Vec<([u8; 8], usize)> = all
-        .iter()
-        .filter(|v| v.0 == min_hash)
-        .map(|v| (v.1, v.2))
-        .collect();
-    min_positions.sort_by(|a, b| a.1.cmp(&b.1));
-
-    let mut next_min: Option<(u64, [u8; 8], usize)> = None;
-    for (h, bytes, pos) in all.into_iter() {
         if h <= min_hash {
             continue;
         }
-        match next_min {
-            None => next_min = Some((h, bytes, pos)),
-            Some((best_h, best_bytes, best_pos)) => {
-                if h < best_h
-                    || (h == best_h
-                        && (bytes < best_bytes || (bytes == best_bytes && pos < best_pos)))
+        let bytes = encode_minimizer_rep(slice)?;
+        let rep = u64::from_le_bytes(bytes);
+        match best_hash {
+            None => {
+                best_hash = Some(h);
+                best_rep = Some(rep);
+                best_bytes = bytes;
+                best_pos = pos;
+            }
+            Some(curr_h) if h < curr_h => {
+                best_hash = Some(h);
+                best_rep = Some(rep);
+                best_bytes = bytes;
+                best_pos = pos;
+            }
+            Some(curr_h) if h == curr_h => {
+                // Match Bifrost minHashKmer::compute_min(min_v): on equal hash,
+                // choose lexicographically smaller canonical minimizer rep.
+                // If rep is identical, keep the first position encountered.
+                if let Some(curr_rep) = best_rep
+                    && rep < curr_rep
                 {
-                    next_min = Some((h, bytes, pos));
+                    best_rep = Some(rep);
+                    best_bytes = bytes;
+                    best_pos = pos;
                 }
             }
+            _ => {}
         }
     }
-    let next_min = next_min.map(|v| (v.1, v.2));
+
+    best_hash.map(|h| (h, (best_bytes, best_pos)))
+}
+
+pub(super) fn minhash_candidates_for_kmer(seq: &[u8], g: usize) -> Option<MinhashCandidates> {
+    let (min_hash, min_positions) = minhash_primary_for_kmer(seq, g)?;
+    let next_min = minhash_next_after_hash(seq, g, min_hash).map(|(_, v)| v);
     Some((min_positions, next_min))
 }
 
 pub(super) fn minimizer_for_kmer_strict(seq: &[u8], g: usize) -> Option<([u8; 8], usize)> {
-    if seq.len() < g + 2 {
-        return None;
-    }
-    let start = 1usize;
-    let mut end = seq.len().saturating_sub(g + 2);
-    if end < start {
-        end = start;
-    }
+    let (start, end) = strict_bounds(seq.len(), g)?;
     let mut best_hash: Option<u64> = None;
     let mut best: Option<([u8; 8], usize)> = None;
     for pos in start..=end {

@@ -163,6 +163,9 @@ pub fn run(
     minimizer_positions: Option<&Path>,
     minimizer_out: Option<&Path>,
     positions_visited_out: Option<&Path>,
+    dropped_hits_out: Option<&Path>,
+    minimizer_candidates_out: Option<&Path>,
+    jump_decisions_out: Option<&Path>,
     local_kmer_out: Option<&Path>,
     kallisto_enum: bool,
     kallisto_strict: bool,
@@ -172,6 +175,7 @@ pub fn run(
     skip_overcrowded_minimizer: bool,
     kallisto_direct_kmer: bool,
     kallisto_bifrost_find: bool,
+    kallisto_sparse_hits: bool,
     strand: kallistors::pseudoalign::Strand,
     fragment_length: Option<f64>,
     single_overhang: bool,
@@ -208,6 +212,7 @@ pub fn run(
         skip_overcrowded_minimizer,
         kallisto_direct_kmer,
         kallisto_bifrost_find,
+        kallisto_sparse_hits,
         bias: false,
         max_bias: 0,
     };
@@ -274,6 +279,18 @@ pub fn run(
         Some(path) => Some(Box::new(BufWriter::new(File::create(path)?))),
         None => None,
     };
+    let mut dropped_hits_writer: Option<Box<dyn Write>> = match dropped_hits_out {
+        Some(path) => Some(Box::new(BufWriter::new(File::create(path)?))),
+        None => None,
+    };
+    let mut minimizer_candidates_writer: Option<Box<dyn Write>> = match minimizer_candidates_out {
+        Some(path) => Some(Box::new(BufWriter::new(File::create(path)?))),
+        None => None,
+    };
+    let mut jump_decisions_writer: Option<Box<dyn Write>> = match jump_decisions_out {
+        Some(path) => Some(Box::new(BufWriter::new(File::create(path)?))),
+        None => None,
+    };
     let mut local_kmer_writer: Option<Box<dyn Write>> = match local_kmer_out {
         Some(path) => Some(Box::new(BufWriter::new(File::create(path)?))),
         None => None,
@@ -323,6 +340,24 @@ pub fn run(
     }
     if let Some(writer) = positions_visited_writer.as_mut() {
         writeln!(writer, "read\tpositions_visited")?;
+    }
+    if let Some(writer) = dropped_hits_writer.as_mut() {
+        writeln!(
+            writer,
+            "read\tread_pos\tmin_pos\tunitig_id\tunitig_pos\tblock_idx\treason\tused_revcomp\tis_special"
+        )?;
+    }
+    if let Some(writer) = minimizer_candidates_writer.as_mut() {
+        writeln!(
+            writer,
+            "read\tread_pos\tmin_pos\tminimizer\tmphf_hit\tpositions_len\thas_special\tovercrowded\tmatched"
+        )?;
+    }
+    if let Some(writer) = jump_decisions_writer.as_mut() {
+        writeln!(
+            writer,
+            "read\tread_pos\tmatched_unitig_id\tmatched_block_idx\tjump_distance\tnext_pos\tin_backoff\tnext_hit_found\tnext_hit_relaxed\tnext_hit_same_unitig\tnext_hit_same_ec\tmid_hit_found\tmid_hit_relaxed\tmid_hit_matches_either\tjumped\treason"
+        )?;
     }
     if let Some(local_kmer_writer) = local_kmer_writer.as_mut() {
         writeln!(
@@ -378,6 +413,73 @@ pub fn run(
                 writeln!(writer, "{}\t{}", header, joined)?;
             } else {
                 writeln!(writer, "{}\t-", header)?;
+            }
+        }
+        if let Some(writer) = dropped_hits_writer.as_mut()
+            && let Some(dropped) = trace.dropped_hits.as_ref()
+        {
+            for entry in dropped {
+                writeln!(
+                    writer,
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    header,
+                    entry.read_pos,
+                    entry.min_pos,
+                    entry.unitig_id,
+                    entry.unitig_pos,
+                    entry
+                        .block_idx
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    entry.reason,
+                    if entry.used_revcomp { 1 } else { 0 },
+                    if entry.is_special { 1 } else { 0 },
+                )?;
+            }
+        }
+        if let Some(writer) = minimizer_candidates_writer.as_mut()
+            && let Some(candidates) = trace.minimizer_candidates.as_ref()
+        {
+            for entry in candidates {
+                writeln!(
+                    writer,
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    header,
+                    entry.read_pos,
+                    entry.min_pos,
+                    entry.minimizer,
+                    if entry.mphf_hit { 1 } else { 0 },
+                    entry.positions_len,
+                    if entry.has_special { 1 } else { 0 },
+                    if entry.overcrowded { 1 } else { 0 },
+                    if entry.matched { 1 } else { 0 },
+                )?;
+            }
+        }
+        if let Some(writer) = jump_decisions_writer.as_mut()
+            && let Some(decisions) = trace.jump_decisions.as_ref()
+        {
+            for entry in decisions {
+                writeln!(
+                    writer,
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    header,
+                    entry.read_pos,
+                    entry.matched_unitig_id,
+                    entry.matched_block_idx,
+                    entry.jump_distance,
+                    entry.next_pos,
+                    if entry.in_backoff { 1 } else { 0 },
+                    if entry.next_hit_found { 1 } else { 0 },
+                    if entry.next_hit_relaxed { 1 } else { 0 },
+                    if entry.next_hit_same_unitig { 1 } else { 0 },
+                    if entry.next_hit_same_ec { 1 } else { 0 },
+                    if entry.mid_hit_found { 1 } else { 0 },
+                    if entry.mid_hit_relaxed { 1 } else { 0 },
+                    if entry.mid_hit_matches_either { 1 } else { 0 },
+                    if entry.jumped { 1 } else { 0 },
+                    entry.reason
+                )?;
             }
         }
         let aligned = trace.reason.is_none();

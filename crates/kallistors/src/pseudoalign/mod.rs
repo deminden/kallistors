@@ -208,6 +208,9 @@ pub struct ReadTraceResult {
     pub sample_positions: Option<String>,
     pub used_revcomp: bool,
     pub positions_visited: Option<Vec<usize>>,
+    pub dropped_hits: Option<Vec<debug::DroppedHitTrace>>,
+    pub minimizer_candidates: Option<Vec<debug::MinimizerCandidateTrace>>,
+    pub jump_decisions: Option<Vec<debug::JumpDecisionTrace>>,
 }
 
 #[derive(Debug, Clone)]
@@ -484,7 +487,6 @@ pub fn debug_minimizer_lookup(
         };
 
         let mut fallback_active = false;
-        let mut special_seen = false;
         'min_loop: loop {
             let mut skip_minimizer = false;
             for (min_bytes, min_pos) in min_candidates.iter().copied() {
@@ -581,7 +583,6 @@ pub fn debug_minimizer_lookup(
                 for &pos_id in positions {
                     let unitig_id_raw = (pos_id >> 32) as u32;
                     if unitig_id_raw == u32::MAX {
-                        special_seen = true;
                         if kallisto_strict {
                             special_note = Some("special_strict_skip");
                             continue;
@@ -655,68 +656,73 @@ pub fn debug_minimizer_lookup(
                         if uid >= index.unitigs.len() {
                             continue;
                         }
-                        let rel_pos = rel_pos as isize;
-                        let start_fwd = rel_pos - min_pos_fwd as isize;
+                        let unitig = &index.unitigs[uid];
+                        if unitig.len() < index.k {
+                            continue;
+                        }
+                        let rel_pos = rel_pos as usize;
+                        let mut found = false;
+
+                        let start_fwd = rel_pos as isize - min_pos_fwd as isize;
                         if allow_forward_base && start_fwd >= 0 {
                             let start = start_fwd as usize;
-                            if start + index.k <= index.unitigs[uid].len()
-                                && &index.unitigs[uid][start..start + index.k] == kmer
+                            if start + index.k <= unitig.len()
+                                && &unitig[start..start + index.k] == kmer
                             {
                                 let block_idx = block_index_for_position(
                                     index.ec_blocks[uid].as_slice(),
                                     start,
                                 );
                                 matched = Some((uid, start, block_idx, Some(false), false));
-                                break;
+                                found = true;
                             }
                         }
-                        let start_rev = rel_pos - diff as isize + min_pos_rev as isize;
-                        if allow_rev_base && start_rev >= 0 {
-                            let start = start_rev as usize;
-                            if start + index.k <= index.unitigs[uid].len()
-                                && &index.unitigs[uid][start..start + index.k] == rev_buf.as_slice()
-                            {
-                                let block_idx = block_index_for_position(
-                                    index.ec_blocks[uid].as_slice(),
-                                    start,
-                                );
-                                matched = Some((uid, start, block_idx, Some(false), true));
-                                break;
-                            }
-                        }
-                        if kallisto_bifrost_find && special_seen {
-                            let unitig = &index.unitigs[uid];
-                            if unitig.len() >= index.k {
-                                let rel_pos = rel_pos as usize;
-                                let start_low = rel_pos.saturating_sub(diff);
-                                let start_high = rel_pos.min(unitig.len().saturating_sub(index.k));
-                                for start in start_low..=start_high {
-                                    if allow_forward_base && &unitig[start..start + index.k] == kmer
-                                    {
-                                        let block_idx = block_index_for_position(
-                                            index.ec_blocks[uid].as_slice(),
-                                            start,
-                                        );
-                                        matched = Some((uid, start, block_idx, Some(false), false));
-                                        special_note = Some("match_relaxed");
-                                        break;
-                                    }
-                                    if allow_rev_base
-                                        && &unitig[start..start + index.k] == rev_buf.as_slice()
-                                    {
-                                        let block_idx = block_index_for_position(
-                                            index.ec_blocks[uid].as_slice(),
-                                            start,
-                                        );
-                                        matched = Some((uid, start, block_idx, Some(false), true));
-                                        special_note = Some("match_relaxed");
-                                        break;
-                                    }
+                        if !found {
+                            let start_rev = rel_pos as isize - diff as isize + min_pos_rev as isize;
+                            if allow_rev_base && start_rev >= 0 {
+                                let start = start_rev as usize;
+                                if start + index.k <= unitig.len()
+                                    && &unitig[start..start + index.k] == rev_buf.as_slice()
+                                {
+                                    let block_idx = block_index_for_position(
+                                        index.ec_blocks[uid].as_slice(),
+                                        start,
+                                    );
+                                    matched = Some((uid, start, block_idx, Some(false), true));
+                                    found = true;
                                 }
                             }
-                            if matched.is_some() {
-                                break;
+                        }
+                        if !found {
+                            let start_low = rel_pos.saturating_sub(diff);
+                            let start_high = rel_pos.min(unitig.len().saturating_sub(index.k));
+                            for start in start_low..=start_high {
+                                if allow_forward_base && &unitig[start..start + index.k] == kmer {
+                                    let block_idx = block_index_for_position(
+                                        index.ec_blocks[uid].as_slice(),
+                                        start,
+                                    );
+                                    matched = Some((uid, start, block_idx, Some(false), false));
+                                    special_note = Some("match_relaxed");
+                                    found = true;
+                                    break;
+                                }
+                                if allow_rev_base
+                                    && &unitig[start..start + index.k] == rev_buf.as_slice()
+                                {
+                                    let block_idx = block_index_for_position(
+                                        index.ec_blocks[uid].as_slice(),
+                                        start,
+                                    );
+                                    matched = Some((uid, start, block_idx, Some(false), true));
+                                    special_note = Some("match_relaxed");
+                                    found = true;
+                                    break;
+                                }
                             }
+                        }
+                        if found {
+                            break;
                         }
                     }
                 }
@@ -911,6 +917,9 @@ fn trace_read_bifrost_inner(
                 sample_positions: None,
                 used_revcomp: dbg.used_revcomp,
                 positions_visited: Some(dbg.visited_positions.clone()),
+                dropped_hits: Some(dbg.dropped_hits.clone()),
+                minimizer_candidates: Some(dbg.minimizer_candidates.clone()),
+                jump_decisions: Some(dbg.jump_decisions.clone()),
             },
         );
     }
@@ -955,6 +964,9 @@ fn trace_read_bifrost_inner(
             sample_positions,
             used_revcomp: dbg.used_revcomp,
             positions_visited: Some(dbg.visited_positions.clone()),
+            dropped_hits: Some(dbg.dropped_hits.clone()),
+            minimizer_candidates: Some(dbg.minimizer_candidates.clone()),
+            jump_decisions: Some(dbg.jump_decisions.clone()),
         },
     )
 }
@@ -1059,6 +1071,7 @@ pub struct PseudoalignOptions {
     pub skip_overcrowded_minimizer: bool,
     pub kallisto_direct_kmer: bool,
     pub kallisto_bifrost_find: bool,
+    pub kallisto_sparse_hits: bool,
     pub bias: bool,
     pub max_bias: usize,
 }
@@ -1079,6 +1092,7 @@ impl Default for PseudoalignOptions {
             skip_overcrowded_minimizer: false,
             kallisto_direct_kmer: false,
             kallisto_bifrost_find: false,
+            kallisto_sparse_hits: false,
             bias: false,
             max_bias: 1_000_000,
         }

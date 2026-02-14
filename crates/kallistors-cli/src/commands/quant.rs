@@ -24,6 +24,7 @@ pub struct QuantArgs {
     pub skip_overcrowded_minimizer: bool,
     pub kallisto_direct_kmer: bool,
     pub kallisto_bifrost_find: bool,
+    pub kallisto_sparse_hits: bool,
     pub threads: usize,
     pub pseudobam: bool,
     pub genomebam: bool,
@@ -127,6 +128,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
         skip_overcrowded_minimizer: args.skip_overcrowded_minimizer,
         kallisto_direct_kmer: args.kallisto_direct_kmer,
         kallisto_bifrost_find: args.kallisto_bifrost_find,
+        kallisto_sparse_hits: args.kallisto_sparse_hits,
         bias: args.bias,
         max_bias: 1_000_000,
     };

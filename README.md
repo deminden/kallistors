@@ -58,6 +58,8 @@ Notes:
 ### Kallisto alignment parity (recent changes)
 - Bifrost path mirrors kallisto minimizer traversal with minhash candidates and canonicalized minimizers.
 - Orientation-aware minimizer offsets (forward/rev) and relaxed window checks around minimizer positions.
+- If exact minimizer anchoring fails, match candidates are scanned across the valid minimizer window
+  (`rel_pos - (k-g) .. rel_pos`) before rejection.
 - Online intersection tracking with `intersection_empty` skip parity.
 - Jump logic records a hit before skipping to match kallisto’s jump behavior.
 - Special/overcrowded minimizers handled via D-list / special unitig checks.
@@ -82,29 +84,31 @@ Debug flags (CLI)
 Dataset + index (in `data/` in this repo):
 - Reads trimmed with fastp and 1/100 selected: `data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz`
 - Reference transcripts: `data/Homo_sapiens.GRCh38.cdna.all.fa.gz`
-- Index (rebuilt): `data/kallisto_index`
+- Index: `data/Human_kallisto_index`
 - Mean read length: 168.90 (used `-l 169 -s 20`)
 
 ```bash
 
 # Run kallisto (no debug)
 kallisto quant \
-  -i data/kallisto_index -o data/kallisto_bench_run \
-  --single -l 169 -s 20 \
+  -i data/Human_kallisto_index -o data/kallisto_bench_run_20260214_human \
+  --single -l 169 -s 20 -t 8 \
   data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
 
 # Run kallistors (no debug)
 ./target/release/kallistors-cli quant \
-  -i data/kallisto_index -o data/kallistors_bench_run \
-  --single -l 169 -s 20 \
+  -i data/Human_kallisto_index -o data/kallistors_bench_run_20260214_human \
+  --single -l 169 -s 20 -t 8 \
   data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
 ```
 
-Latest results (2025-12-29, macOS arm64, no debug):
-- Speed: kallisto real 19.26s; kallistors real 36.38s
-- n_pseudoaligned: kallisto 41626 / 43817; kallistors 41666 / 43817
-- TPM Pearson 0.974175, TPM MAE 11.206 (TPM filter max(k_tpm, o_tpm) > 1; n = 7824)
-- est_counts Pearson 0.998049, est_counts MAE 0.303
+Latest results (2026-02-14, macOS arm64, no debug):
+- Speed: kallisto real 9.49s; kallistors real 30.77s
+- n_pseudoaligned: kallisto 41626 / 43817; kallistors 41632 / 43817
+- TPM Pearson 0.999961, TPM MAE 0.724 (TPM filter `max(k_tpm, o_tpm) > 1`; n = 7721)
+- est_counts Pearson 0.999996, est_counts MAE 0.017
+- Read-level parity (25k sample, original index):
+  - mismatch count dropped from 79 to 13 (`40/39` -> `7/6` for `no_hits_ok`/`ok_no_hits`)
 
 ### Parity tests
 - Synthetic parity: `variants_parity` allows a 1-read drift in aligned count; EC sets must match when aligned.

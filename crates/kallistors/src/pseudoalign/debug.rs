@@ -43,6 +43,49 @@ pub struct ReadTrace {
     pub used_revcomp: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct DroppedHitTrace {
+    pub read_pos: usize,
+    pub min_pos: usize,
+    pub unitig_id: usize,
+    pub unitig_pos: usize,
+    pub block_idx: Option<usize>,
+    pub reason: &'static str,
+    pub used_revcomp: bool,
+    pub is_special: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct MinimizerCandidateTrace {
+    pub read_pos: usize,
+    pub min_pos: usize,
+    pub minimizer: String,
+    pub mphf_hit: bool,
+    pub positions_len: usize,
+    pub has_special: bool,
+    pub overcrowded: bool,
+    pub matched: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct JumpDecisionTrace {
+    pub read_pos: usize,
+    pub matched_unitig_id: usize,
+    pub matched_block_idx: usize,
+    pub jump_distance: usize,
+    pub next_pos: usize,
+    pub in_backoff: bool,
+    pub next_hit_found: bool,
+    pub next_hit_relaxed: bool,
+    pub next_hit_same_unitig: bool,
+    pub next_hit_same_ec: bool,
+    pub mid_hit_found: bool,
+    pub mid_hit_relaxed: bool,
+    pub mid_hit_matches_either: bool,
+    pub jumped: bool,
+    pub reason: &'static str,
+}
+
 #[derive(Debug)]
 pub struct DebugReport {
     pub counts: HashMap<DebugFailReason, u64>,
@@ -107,6 +150,9 @@ pub(crate) struct ReadDebugState {
     pub(crate) first_no_match_positions: Option<(usize, usize, usize, String)>,
     pub(crate) used_revcomp: bool,
     pub(crate) visited_positions: Vec<usize>,
+    pub(crate) dropped_hits: Vec<DroppedHitTrace>,
+    pub(crate) minimizer_candidates: Vec<MinimizerCandidateTrace>,
+    pub(crate) jump_decisions: Vec<JumpDecisionTrace>,
 }
 
 pub(crate) fn debug_reason(

@@ -31,6 +31,7 @@ pub fn run(
     skip_overcrowded_minimizer: bool,
     kallisto_direct_kmer: bool,
     kallisto_bifrost_find: bool,
+    kallisto_sparse_hits: bool,
 ) -> Result<()> {
     if reads2.is_some() && fragment_length.is_some() {
         return Err(anyhow!(
@@ -70,6 +71,7 @@ pub fn run(
         skip_overcrowded_minimizer,
         kallisto_direct_kmer,
         kallisto_bifrost_find,
+        kallisto_sparse_hits,
         bias,
         max_bias: 1_000_000,
     };
