@@ -120,6 +120,8 @@ pub(super) fn ec_for_read_bifrost(
     let mut extra_ec_hits: Vec<Vec<u32>> = Vec::new();
     // Kallisto falls back to incremental scanning after a failed jump; track that window.
     let mut backoff_until: Option<usize> = None;
+    // Legacy parity switch kept for CLI compatibility.
+    let _kallisto_sparse_hits = options.kallisto_sparse_hits;
 
     let mut pos = 0usize;
     let last_pos = seq.len() - index.k;
@@ -553,23 +555,33 @@ pub(super) fn ec_for_read_bifrost(
             pos += 1;
             continue;
         };
-        if options.kallisto_sparse_hits && has_hit && matched_relaxed {
-            if let Some(state) = dbg.as_deref_mut()
-                && state.dropped_hits.len() < 256
-            {
-                state.dropped_hits.push(DroppedHitTrace {
-                    read_pos: kmer_pos,
-                    min_pos,
-                    unitig_id: uid,
-                    unitig_pos: start,
-                    block_idx: block_index_for_position(&index.ec_blocks[uid], start),
-                    reason: "sparse_relaxed_after_hit",
-                    used_revcomp,
-                    is_special,
-                });
-            }
-            pos += 1;
-            continue;
+        // Keep EC intersection on kallisto-like accepted hits only.
+        // Relaxed/fallback matches are treated as probes and should not
+        // enter the accepted hit stream used for intersection.
+        let mut accept_for_stream = true;
+        let mut stream_drop_reason = "";
+        if matched_relaxed && has_hit {
+            accept_for_stream = false;
+            stream_drop_reason = if in_backoff {
+                "backoff_relaxed_probe"
+            } else {
+                "relaxed_probe"
+            };
+        }
+        if !accept_for_stream
+            && let Some(state) = dbg.as_deref_mut()
+            && state.dropped_hits.len() < 256
+        {
+            state.dropped_hits.push(DroppedHitTrace {
+                read_pos: kmer_pos,
+                min_pos,
+                unitig_id: uid,
+                unitig_pos: start,
+                block_idx: block_index_for_position(&index.ec_blocks[uid], start),
+                reason: stream_drop_reason,
+                used_revcomp,
+                is_special,
+            });
         }
         let Some(block_idx) = block_index_for_position(&index.ec_blocks[uid], start) else {
             if let Some(state) = dbg.as_deref_mut()
@@ -598,7 +610,7 @@ pub(super) fn ec_for_read_bifrost(
         };
         // Match kallisto's partial intersection behavior: maintain a live running
         // intersection and stop the read as soon as it collapses.
-        if !options.do_union && !ec.is_empty() {
+        if accept_for_stream && !options.do_union && !ec.is_empty() {
             if let Some(current) = online_intersection.as_ref() {
                 let mut next = Vec::new();
                 intersect_sorted(current, ec, &mut next);
@@ -675,7 +687,6 @@ pub(super) fn ec_for_read_bifrost(
         let mut synthetic_hit: Option<Hit> = None;
         let mut next_pos;
         if !options.no_jump
-            && !in_backoff
             && let Some(dist) =
                 jump_distance_for_match(index, uid, block_idx, start, forward_strand)
         {
@@ -763,7 +774,8 @@ pub(super) fn ec_for_read_bifrost(
                                 mid_hit_matches_either = mid_matches_current || mid_matches_next;
                                 if (mid_matches_current || mid_matches_next) && !mid_relaxed {
                                     // Kallisto accepts this middle hit before final jump decision.
-                                    if !options.do_union && !mid_ec.is_empty() {
+                                    if accept_for_stream && !options.do_union && !mid_ec.is_empty()
+                                    {
                                         if let Some(current) = online_intersection.as_ref() {
                                             let mut next = Vec::new();
                                             intersect_sorted(current, mid_ec, &mut next);
