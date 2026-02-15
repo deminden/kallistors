@@ -64,21 +64,6 @@ Notes:
 - Jump logic records a hit before skipping to match kallisto’s jump behavior.
 - Special/overcrowded minimizers handled via D-list / special unitig checks.
 
-### Debugging tools
-- `trace-reads` supports EC traces, per-hit dumps, intersection dumps, and positions visited.
-- Minimizer debug includes MPH lookup info, unitig match decisions, and special/D-list flags.
-- Debug helpers: `minimizer-lookup`, `minimizer-bitmap-scan`, `minimizer-unitig-mphf-check`,
-  and `minimizer-mphf-keys` for inspecting MPHF/index consistency.
-
-Debug flags (CLI)
-- Pseudoalign/quant parity switches: `--kallisto-enum`, `--kallisto-strict`, `--kallisto-local-fallback`,
-  `--kallisto-fallback`, `--kallisto-direct-kmer`, `--kallisto-bifrost-find`,
-  `--discard-special-only`, `--skip-overcrowded-minimizer`, `--no-jump`, `--union`,
-  `--min-range`, `--dfk-onlist`.
-- Trace reads: `--hits-out`, `--hits-intersection-out`, `--positions-visited-out`,
-  `--minimizer-positions`, `--minimizer-out`, `--local-kmer-out`, `--gene-map`,
-  plus the parity switches above and strand/fragment options (`--strand`, `--fragment-length`,
-  `--single-overhang`, `--fr-stranded`, `--rf-stranded`).
 
 ### Real-data benchmark (latest, no debug)
 Dataset + index (in `data/` in this repo):
@@ -122,63 +107,63 @@ Add to `Cargo.toml`:
 kallistors = { git = "https://github.com/deminden/kallistors" }
 ```
 
-Use in code (simpler, CLI-like flow):
+Use in code:
 ```rust
 use kallistors::index::Index;
 use kallistors::io::open_fastq_reader;
 use kallistors::pseudoalign::{
-    build_bifrost_index, PseudoalignOptions, Strand, pseudoalign_paired_bifrost_with_options,
+    build_bifrost_index, pseudoalign_paired_bifrost_with_options, PseudoalignOptions, Strand,
 };
-use kallistors::quant::{em_quantify, QuantOptions};
+use kallistors::quant::{em_quantify, EcCountsInput, QuantOptions};
 
 let index_path = "path/to/index.idx";
+let mut reads_1 = open_fastq_reader("reads_1.fq.gz".as_ref())?;
+let mut reads_2 = open_fastq_reader("reads_2.fq.gz".as_ref())?;
 let index = build_bifrost_index(index_path)?;
-let mut r1 = open_fastq_reader("reads_1.fq.gz".as_ref())?;
-let mut r2 = open_fastq_reader("reads_2.fq.gz".as_ref())?;
-
-let ec_counts = pseudoalign_paired_bifrost_with_options(
+let ec = pseudoalign_paired_bifrost_with_options(
     &index,
-    &mut r1,
-    &mut r2,
+    &mut reads_1,
+    &mut reads_2,
     Strand::Unstranded,
     PseudoalignOptions::default(),
 )?;
 
 let meta = Index::load(index_path)?;
-let lengths = meta.transcripts.iter().map(|t| t.length).collect::<Vec<_>>();
-
-let result = em_quantify(
-    &kallistors::quant::EcCountsInput {
-        ec_list: kallistors::ec::EcList {
-            classes: ec_counts.ec_list,
-        },
-        counts: ec_counts.counts,
+let input = EcCountsInput {
+    ec_list: kallistors::ec::EcList {
+        classes: ec.ec_list,
     },
+    counts: ec.counts,
+};
+let lengths: Vec<u32> = meta.transcripts.iter().map(|t| t.length).collect();
+let quant = em_quantify(
+    &input,
     &lengths,
     None,
     None,
     QuantOptions::default(),
 )?;
+
+println!("reads processed: {}", ec.reads_processed);
+println!("reads aligned: {}", ec.reads_aligned);
+println!("targets: {}", quant.est_counts.len());
 ```
 
-Use in code (explicit EC counts, lower-level flow):
-```rust
-use kallistors::index::Index;
-use kallistors::quant::{em_quantify, load_ec_counts, QuantOptions};
+### Debugging tools
+- `trace-reads` supports EC traces, per-hit dumps, intersection dumps, and positions visited.
+- Minimizer debug includes MPH lookup info, unitig match decisions, and special/D-list flags.
+- Debug helpers: `minimizer-lookup`, `minimizer-bitmap-scan`, `minimizer-unitig-mphf-check`,
+  and `minimizer-mphf-keys` for inspecting MPHF/index consistency.
 
-let index = Index::load("path/to/index.idx")?;
-let ec_input = load_ec_counts("path/to/ec_counts.tsv")?;
-let lengths = index.transcripts.iter().map(|t| t.length).collect::<Vec<_>>();
-
-let result = em_quantify(
-    &ec_input,
-    &lengths,
-    None,
-    None,
-    QuantOptions::default(),
-)?;
-```
-
+Debug flags (CLI)
+- Pseudoalign/quant parity switches: `--kallisto-enum`, `--kallisto-strict`, `--kallisto-local-fallback`,
+  `--kallisto-fallback`, `--kallisto-direct-kmer`, `--kallisto-bifrost-find`,
+  `--discard-special-only`, `--skip-overcrowded-minimizer`, `--no-jump`, `--union`,
+  `--min-range`, `--dfk-onlist`.
+- Trace reads: `--hits-out`, `--hits-intersection-out`, `--positions-visited-out`,
+  `--minimizer-positions`, `--minimizer-out`, `--local-kmer-out`, `--gene-map`,
+  plus the parity switches above and strand/fragment options (`--strand`, `--fragment-length`,
+  `--single-overhang`, `--fr-stranded`, `--rf-stranded`).
 
 
 ### Debugging abundance diffs
