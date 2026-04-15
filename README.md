@@ -2,7 +2,7 @@
 
 kallistors: a Rust implementation of kallisto-style pseudoalignment and quantification.
 
-## Compatibility notes (current gaps)
+## Compatibility notes (v0.2.1)
 
 This is a minimal reimplementation (at current stage). Known differences vs kallisto today:
 - No index builder yet (load-only).
@@ -10,6 +10,11 @@ This is a minimal reimplementation (at current stage). Known differences vs kall
 - No long-read, UMI/BUS/technology modes, or fusion detection.
 - Minimal CLI surface; some kallisto options are missing.
 - Not a drop-in replacement yet; use for experimentation and validation, not as a production substitute.
+
+Current real-data status:
+- Paired-end parity is exact on deterministic prefixes through `262144` pairs from the checked-in real dataset under `data/`.
+- Full-file paired-end quant is still slightly off from `kallisto` on the same index and reads.
+- Full-file startup/runtime is still materially slower than `kallisto`; the remaining gap is mostly in index loading/materialization.
 
 Sequence-specific bias correction is optional and enabled only with `--bias`.
 
@@ -62,38 +67,41 @@ Notes:
   (`rel_pos - (k-g) .. rel_pos`) before rejection.
 - Online intersection tracking with `intersection_empty` skip parity.
 - Jump logic records a hit before skipping to match kallisto’s jump behavior.
-- Special/overcrowded minimizers handled via D-list / special unitig checks.
+- Special/overcrowded minimizers handled via D-list / special unitig checks, with upstream-style
+  Bifrost fallback for overcrowded minimizers instead of a global exact-kmer fallback.
 
 
-### Real-data benchmark (latest, no debug)
+### Real-data benchmark (current checked-in dataset)
 Dataset + index (in `data/` in this repo):
-- Reads trimmed with fastp and 1/100 selected: `data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz`
-- Reference transcripts: `data/Homo_sapiens.GRCh38.cdna.all.fa.gz`
-- Index: `data/Human_kallisto_index`
-- Mean read length: 168.90 (used `-l 169 -s 20`)
+- Paired FASTQs:
+  `data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade.gz`
+  `data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade (2).gz`
+- Reference transcripts: `data/gencode.v49.transcripts.fa.gz`
+- Index: `data/gencode.v49_kallisto.idx`
 
 ```bash
-
-# Run kallisto (no debug)
+# Run kallisto
 kallisto_src/build/src/kallisto quant \
-  -i data/Human_kallisto_index -o data/kallisto_bench_run_step17_seq \
-  --single -l 169 -s 20 -t 8 \
-  data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
+  -i data/gencode.v49_kallisto.idx -o /tmp/kallisto_full -t 32 \
+  data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade.gz \
+  "data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade (2).gz"
 
-# Run kallistors (no debug)
+# Run kallistors
 ./target/release/kallistors-cli quant \
-  -i data/Human_kallisto_index -o data/kallistors_bench_run_step17_seq \
-  --single -l 169 -s 20 -t 8 \
-  data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
+  -i data/gencode.v49_kallisto.idx -o /tmp/kallistors_full -t 32 \
+  data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade.gz \
+  "data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade (2).gz"
 ```
 
-Latest results (2026-02-15, macOS arm64, no debug):
-- Speed: kallisto real 15.62s; kallistors real 51.32s
-- n_pseudoaligned: kallisto 41626 / 43817; kallistors 41626 / 43817
-- TPM Pearson 0.999999, TPM MAE 0.045 (TPM filter `max(k_tpm, o_tpm) > 1`; n = 7697)
-- est_counts Pearson 1.000000, est_counts MAE 0.00084
-- Read-level parity (25k sample, original index):
-  - mismatch count dropped from 79 to 0 (`40/39` -> `0/0` for `no_hits_ok`/`ok_no_hits`)
+Latest results (2026-04-15, Linux x86_64, `7950X3D`, `-t 32`):
+- Full-file paired quant:
+  `kallisto` wall `59.21s`
+  `kallistors` wall `190.76s`
+- Full-file `run_info.json`:
+  `kallisto` `n_pseudoaligned = 4244771`, `n_unique = 276251`
+  `kallistors` `n_pseudoaligned = 4244773`, `n_unique = 276251`
+- Deterministic paired-prefix parity:
+  exact through `262144` pairs on `data/subsets/`
 
 ### Parity tests
 - Synthetic parity: `variants_parity` allows a 1-read drift in aligned count; EC sets must match when aligned.
@@ -180,8 +188,8 @@ Trace per-read EC decisions for a small set of reads (single-end):
 ```bash
 printf "READ_ID_1\nREAD_ID_2\n" > read_list.txt
 target/release/kallistors-cli trace-reads \
-  --index data/Human_kallisto_index \
-  --reads data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz \
+  --index data/gencode.v49_kallisto.idx \
+  --reads data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade.gz \
   --read-list read_list.txt \
   --out read_traces.tsv \
   --fragment-length 200

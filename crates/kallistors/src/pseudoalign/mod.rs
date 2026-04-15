@@ -27,8 +27,9 @@ mod threaded;
 mod utils;
 use bias::bias_hexamer_for_match;
 pub use bifrost::{
-    BifrostIndex, build_bifrost_index, build_bifrost_index_with_kmer_pos,
-    build_bifrost_index_with_positions,
+    BifrostIndex, build_bifrost_index, build_bifrost_index_threaded,
+    build_bifrost_index_with_kmer_pos, build_bifrost_index_with_kmer_pos_threaded,
+    build_bifrost_index_with_positions, build_bifrost_index_with_positions_threaded,
 };
 pub use core::local_kmer_hits;
 use core::{
@@ -76,11 +77,28 @@ pub fn build_bifrost_index_with_kmer(path: &Path) -> Result<BifrostIndex> {
     Ok(index)
 }
 
+pub fn build_bifrost_index_with_kmer_threaded(path: &Path, threads: usize) -> Result<BifrostIndex> {
+    let mut index = build_bifrost_index_threaded(path, threads)?;
+    index.kmer_index = Some(build_kmer_ec_index(path)?);
+    Ok(index)
+}
+
 pub fn build_bifrost_index_with_positions_and_kmer(
     path: &Path,
     load_positional_info: bool,
 ) -> Result<BifrostIndex> {
     let mut index = build_bifrost_index_with_positions(path, load_positional_info)?;
+    index.kmer_index = Some(build_kmer_ec_index(path)?);
+    Ok(index)
+}
+
+pub fn build_bifrost_index_with_positions_and_kmer_threaded(
+    path: &Path,
+    load_positional_info: bool,
+    threads: usize,
+) -> Result<BifrostIndex> {
+    let mut index =
+        build_bifrost_index_with_positions_threaded(path, load_positional_info, threads)?;
     index.kmer_index = Some(build_kmer_ec_index(path)?);
     Ok(index)
 }
@@ -628,19 +646,13 @@ pub fn debug_minimizer_lookup(
                         }
                         let km_pos = rel_pos as usize;
                         let km_seq = index.km_unitigs[uid].as_slice();
-                        let (used_revcomp, min_pos_match) = if km_seq == kmer {
-                            (false, min_pos_fwd)
-                        } else if km_seq == rev_buf.as_slice() {
-                            (true, min_pos_rev)
-                        } else {
-                            continue;
-                        };
-                        if !kallisto_bifrost_find
-                            && min_pos_match != km_pos
-                            && min_pos_match + km_pos != diff
-                        {
+                        if km_seq != kmer_canon {
                             continue;
                         }
+                        if !kallisto_bifrost_find && min_pos != km_pos && min_pos + km_pos != diff {
+                            continue;
+                        }
+                        let used_revcomp = kmer_canon != kmer;
                         if (used_revcomp && !allow_rev_base)
                             || (!used_revcomp && !allow_forward_base)
                         {
@@ -1136,6 +1148,7 @@ struct ReadEc {
     hits: Vec<Hit>,
     had_offlist: bool,
     shade_union: Vec<u32>,
+    hard_reject_pair: bool,
 }
 
 /// Build a naive k-mer -> EC map by scanning unitigs and EC blocks in the index.

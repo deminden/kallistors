@@ -13,7 +13,7 @@ pub fn run(index: PathBuf, minimizer: String) -> Result<()> {
         .collect::<Vec<_>>()
         .join("");
     let positions = lookup
-        .and_then(|idx| index.minz_positions.get(idx as usize))
+        .map(|idx| index.minz_positions.get(idx as usize))
         .map(|v| v.len())
         .unwrap_or(0);
 

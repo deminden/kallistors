@@ -34,11 +34,14 @@ pub fn pseudoalign_paired_naive<R1: ReadSource, R2: ReadSource>(
                 reads_processed += 1;
                 let ec1 = ec_for_read_naive(index, &a.seq);
                 let ec2 = ec_for_read_naive(index, &b.seq);
-                let (Some(ec1), Some(ec2)) = (ec1, ec2) else {
-                    continue;
-                };
                 let mut merged = Vec::new();
-                super::intersect_sorted(&ec1, &ec2, &mut merged);
+                match (ec1.as_ref(), ec2.as_ref()) {
+                    (None, None) => continue,
+                    (Some(ec), None) | (None, Some(ec)) => merged.extend_from_slice(ec),
+                    (Some(left), Some(right)) => {
+                        super::intersect_sorted(left, right, &mut merged);
+                    }
+                }
                 if merged.is_empty() {
                     continue;
                 }
@@ -173,9 +176,13 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                 let ec1 = super::ec_for_read_bifrost(index, &a.seq, strand, dbg1.as_mut(), options);
                 let ec2 = super::ec_for_read_bifrost(index, &b.seq, strand, dbg2.as_mut(), options);
 
-                if ec1.is_none() || ec2.is_none() {
+                if ec1.is_none() && ec2.is_none() {
                     if let Some(r) = report.as_deref_mut() {
-                        let (state, header) = if ec1.is_none() {
+                        let (state, header) = if dbg1
+                            .as_ref()
+                            .and_then(|s| s.first_no_match_positions.as_ref())
+                            .is_some()
+                        {
                             (dbg1, &a.header)
                         } else {
                             (dbg2, &b.header)
@@ -202,49 +209,92 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                     }
                     continue;
                 }
-                let ec1 = ec1.unwrap();
-                let ec2 = ec2.unwrap();
                 let mut ec1 = ec1;
                 let mut ec2 = ec2;
                 if let Some(mode) = options.strand_specific {
                     let comprehensive = options.do_union || options.no_jump || index.use_shade;
-                    if let Some(filtered) = super::apply_strand_filter(
-                        index,
-                        &ec1,
-                        mode,
-                        true,
-                        comprehensive,
-                        &mut report,
-                        &a.header,
-                    ) {
-                        ec1.ec = filtered;
+                    if let Some(read_ec) = ec1.as_mut()
+                        && let Some(filtered) = super::apply_strand_filter(
+                            index,
+                            read_ec,
+                            mode,
+                            true,
+                            comprehensive,
+                            &mut report,
+                            &a.header,
+                        )
+                    {
+                        read_ec.ec = filtered;
                     }
-                    if let Some(filtered) = super::apply_strand_filter(
-                        index,
-                        &ec2,
-                        mode,
-                        false,
-                        comprehensive,
-                        &mut report,
-                        &b.header,
-                    ) {
-                        ec2.ec = filtered;
+                    if let Some(read_ec) = ec2.as_mut()
+                        && let Some(filtered) = super::apply_strand_filter(
+                            index,
+                            read_ec,
+                            mode,
+                            false,
+                            comprehensive,
+                            &mut report,
+                            &b.header,
+                        )
+                    {
+                        read_ec.ec = filtered;
                     }
                 }
-                if ec1.ec.is_empty() || ec2.ec.is_empty() {
+                if ec1.as_ref().is_some_and(|v| v.ec.is_empty())
+                    && ec1.as_ref().is_some_and(|v| !v.hard_reject_pair)
+                {
+                    ec1 = None;
+                }
+                if ec2.as_ref().is_some_and(|v| v.ec.is_empty())
+                    && ec2.as_ref().is_some_and(|v| !v.hard_reject_pair)
+                {
+                    ec2 = None;
+                }
+                if ec1.as_ref().is_some_and(|v| v.hard_reject_pair)
+                    || ec2.as_ref().is_some_and(|v| v.hard_reject_pair)
+                {
+                    if let Some(r) = report.as_deref_mut() {
+                        let mut header = Vec::new();
+                        header.extend_from_slice(&a.header);
+                        header.extend_from_slice(b"|");
+                        header.extend_from_slice(&b.header);
+                        r.record(
+                            &header,
+                            DebugFailReason::IntersectionEmpty,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            dbg1.as_ref().map(|d| d.used_revcomp).unwrap_or(false)
+                                || dbg2.as_ref().map(|d| d.used_revcomp).unwrap_or(false),
+                        );
+                    }
                     continue;
                 }
 
                 let use_shade = index.use_shade;
                 if use_shade && options.do_union {
-                    super::filter_shades_in_place(&mut ec1.ec, &index.shade_sequences);
-                    super::filter_shades_in_place(&mut ec2.ec, &index.shade_sequences);
+                    if let Some(read_ec) = ec1.as_mut() {
+                        super::filter_shades_in_place(&mut read_ec.ec, &index.shade_sequences);
+                    }
+                    if let Some(read_ec) = ec2.as_mut() {
+                        super::filter_shades_in_place(&mut read_ec.ec, &index.shade_sequences);
+                    }
                 }
 
                 let mut merged = Vec::new();
-                super::intersect_sorted(&ec1.ec, &ec2.ec, &mut merged);
+                match (ec1.as_ref(), ec2.as_ref()) {
+                    (None, None) => continue,
+                    (Some(ec), None) | (None, Some(ec)) => merged.extend_from_slice(&ec.ec),
+                    (Some(left), Some(right)) => {
+                        super::intersect_sorted(&left.ec, &right.ec, &mut merged);
+                    }
+                }
                 if options.dfk_onlist
-                    && (ec1.had_offlist || ec2.had_offlist)
+                    && (ec1.as_ref().is_some_and(|v| v.had_offlist)
+                        || ec2.as_ref().is_some_and(|v| v.had_offlist))
                     && !merged.is_empty()
                     && let Some(onlist) = index.onlist.as_deref()
                 {
@@ -277,8 +327,12 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
 
                 if use_shade && !merged.is_empty() {
                     let mut shade_candidates = Vec::new();
-                    super::merge_sorted_unique_vec(&mut shade_candidates, &ec1.shade_union);
-                    super::merge_sorted_unique_vec(&mut shade_candidates, &ec2.shade_union);
+                    if let Some(read_ec) = ec1.as_ref() {
+                        super::merge_sorted_unique_vec(&mut shade_candidates, &read_ec.shade_union);
+                    }
+                    if let Some(read_ec) = ec2.as_ref() {
+                        super::merge_sorted_unique_vec(&mut shade_candidates, &read_ec.shade_union);
+                    }
                     if !shade_candidates.is_empty() {
                         for shade in shade_candidates {
                             let Some(color) =
@@ -303,8 +357,14 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                         .copied()
                         .unwrap_or(false);
                     if !is_shade
-                        && let Some(frag_len) =
-                            estimate_fragment_length_for_pair(index, tr, &ec1, &ec2)
+                        && ec1.is_some()
+                        && ec2.is_some()
+                        && let Some(frag_len) = estimate_fragment_length_for_pair(
+                            index,
+                            tr,
+                            ec1.as_ref().expect("checked"),
+                            ec2.as_ref().expect("checked"),
+                        )
                     {
                         let idx = frag_len as usize;
                         if idx < frag_hist.len() {
@@ -316,7 +376,10 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
 
                 if let Some(bias_counts) = bias.as_mut()
                     && bias_counts.total < options.max_bias as u64
-                    && let Some(best_match) = ec1.best_match
+                    && let Some(best_match) = ec1
+                        .as_ref()
+                        .and_then(|v| v.best_match)
+                        .or_else(|| ec2.as_ref().and_then(|v| v.best_match))
                     && let Some(hex) = super::bias_hexamer_for_match(index, best_match)
                 {
                     bias_counts.record(hex);

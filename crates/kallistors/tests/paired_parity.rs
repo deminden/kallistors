@@ -39,6 +39,43 @@ fn paired_parity_naive_vs_bifrost() {
     assert_eq!(naive.ec_list.len(), bifrost.ec_list.len());
 }
 
+#[test]
+fn paired_allows_one_unmapped_mate() {
+    let dataset = match helpers::build_synthetic_index() {
+        Some(dataset) => dataset,
+        None => return,
+    };
+    let seq = &dataset.transcripts[0];
+    let read_len = 50usize;
+    let read1 = seq[..read_len].to_vec();
+    let read2 = vec![b'N'; read_len];
+    let (fq1, fq2) = to_fastq_pairs(&[(read1, read2)]);
+
+    let naive_index = build_kmer_ec_index(&dataset.index_path).expect("naive index");
+    let bifrost_index = build_bifrost_index(&dataset.index_path).expect("bifrost index");
+
+    let mut r1 = FastqReader::new(Cursor::new(fq1.clone()));
+    let mut r2 = FastqReader::new(Cursor::new(fq2.clone()));
+    let naive = pseudoalign_paired_naive(&naive_index, &mut r1, &mut r2).expect("naive");
+
+    let mut r1 = FastqReader::new(Cursor::new(fq1));
+    let mut r2 = FastqReader::new(Cursor::new(fq2));
+    let bifrost = pseudoalign_paired_bifrost_with_strand(
+        &bifrost_index,
+        &mut r1,
+        &mut r2,
+        Strand::Unstranded,
+    )
+    .expect("bifrost");
+
+    assert_eq!(naive.reads_processed, 1);
+    assert_eq!(naive.reads_aligned, 1);
+    assert_eq!(bifrost.reads_processed, 1);
+    assert_eq!(bifrost.reads_aligned, 1);
+    assert_eq!(naive.ec_list, bifrost.ec_list);
+    assert_eq!(naive.counts, bifrost.counts);
+}
+
 fn synthesize_paired_reads(
     transcripts: &[Vec<u8>],
     read_len: usize,
