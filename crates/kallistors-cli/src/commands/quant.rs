@@ -7,6 +7,7 @@ pub struct QuantArgs {
     pub index: PathBuf,
     pub out_dir: PathBuf,
     pub reads: Vec<PathBuf>,
+    pub timings: bool,
     pub single: bool,
     pub fragment_length: Option<f64>,
     pub fragment_length_sd: Option<f64>,
@@ -49,6 +50,10 @@ pub fn run(args: QuantArgs) -> Result<()> {
     if args.single_overhang && !args.single {
         return Err(anyhow!("--single-overhang requires --single"));
     }
+
+    let timings_enabled = args.timings || std::env::var_os("KALLISTORS_TIMINGS").is_some();
+    kallistors::timing::set_enabled(timings_enabled);
+    kallistors::timing::reset();
 
     let start_time = format_start_time();
     let strand_specific = if args.fr_stranded {
@@ -96,14 +101,22 @@ pub fn run(args: QuantArgs) -> Result<()> {
         } else if args.kallisto_fallback {
             kallistors::pseudoalign::build_bifrost_index_with_positions_and_kmer(&args.index, true)
         } else {
-            kallistors::pseudoalign::build_bifrost_index_with_positions(&args.index, true)
+            kallistors::pseudoalign::build_bifrost_index_with_positions_threaded(
+                &args.index,
+                true,
+                args.threads,
+            )
         }
     } else if args.kallisto_direct_kmer {
         kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(&args.index, false)
     } else if args.kallisto_fallback {
         kallistors::pseudoalign::build_bifrost_index_with_kmer(&args.index)
     } else {
-        kallistors::pseudoalign::build_bifrost_index(&args.index)
+        kallistors::pseudoalign::build_bifrost_index_with_positions_threaded(
+            &args.index,
+            false,
+            args.threads,
+        )
     }
     .map_err(|err| anyhow!("pseudoalign failed: {err}"))?;
 
@@ -131,6 +144,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
         kallisto_sparse_hits: args.kallisto_sparse_hits,
         bias: args.bias,
         max_bias: 1_000_000,
+        investigation: super::investigation_options_from_env(),
     };
 
     let start = Instant::now();
@@ -183,24 +197,27 @@ pub fn run(args: QuantArgs) -> Result<()> {
         estimate_paired_fragment_lengths(&ec_counts).unwrap_or((200.0, 20.0))
     };
 
-    let result = kallistors::quant::em_quantify(
-        &kallistors::quant::EcCountsInput {
-            ec_list: kallistors::ec::EcList {
-                classes: ec_counts.ec_list.clone(),
+    let result = {
+        let _em_timing = kallistors::timing::scoped(kallistors::timing::Stage::Em);
+        kallistors::quant::em_quantify(
+            &kallistors::quant::EcCountsInput {
+                ec_list: kallistors::ec::EcList {
+                    classes: ec_counts.ec_list.clone(),
+                },
+                counts: ec_counts.counts.clone(),
             },
-            counts: ec_counts.counts.clone(),
-        },
-        &lengths,
-        transcript_seqs.as_deref(),
-        ec_counts.bias.as_ref(),
-        kallistors::quant::QuantOptions {
-            mean_fragment_length,
-            fragment_length_sd,
-            bias: args.bias,
-            strand_specific,
-            ..kallistors::quant::QuantOptions::default()
-        },
-    )?;
+            &lengths,
+            transcript_seqs.as_deref(),
+            ec_counts.bias.as_ref(),
+            kallistors::quant::QuantOptions {
+                mean_fragment_length,
+                fragment_length_sd,
+                bias: args.bias,
+                strand_specific,
+                ..kallistors::quant::QuantOptions::default()
+            },
+        )?
+    };
 
     fs::create_dir_all(&args.out_dir)?;
     let abundance_path = args.out_dir.join("abundance.tsv");
@@ -234,6 +251,16 @@ pub fn run(args: QuantArgs) -> Result<()> {
         ec_counts.ec_list.len(),
         start.elapsed()
     );
+    if timings_enabled {
+        eprintln!("[timings]");
+        for timing in kallistors::timing::snapshot() {
+            eprintln!(
+                "{}\t{:.3}s",
+                timing.stage.label(),
+                timing.duration.as_secs_f64()
+            );
+        }
+    }
     Ok(())
 }
 

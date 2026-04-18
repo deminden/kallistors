@@ -215,6 +215,7 @@ pub fn run(
         kallisto_sparse_hits,
         bias: false,
         max_bias: 0,
+        investigation: super::investigation_options_from_env(),
     };
 
     let filter =

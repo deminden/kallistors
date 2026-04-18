@@ -1,13 +1,43 @@
 use std::collections::HashMap;
-use std::sync::mpsc;
 use std::thread;
+use std::time::Instant;
 
-use crate::io::{FastqRecord, ReadSource, VecReadSource};
+use crossbeam_channel::{Receiver, Sender, bounded};
+
+use crate::io::{PackedBatchSource, PackedFastqBatch, ReadSource};
+use crate::timing::{self, Stage};
 use crate::{Error, Result};
 
 use super::{BifrostIndex, EcCounts, FragmentFilter, PseudoalignOptions, Strand};
 
-pub fn pseudoalign_single_end_bifrost_with_options_threaded<R: ReadSource>(
+fn produce_batches<R: PackedBatchSource>(
+    reader: &mut R,
+    tx: &Sender<Result<PackedFastqBatch>>,
+) -> Result<()> {
+    loop {
+        let Some(batch) = reader.next_packed_batch(super::BATCH_SIZE)? else {
+            break;
+        };
+        if tx.send(Ok(batch)).is_err() {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+fn recv_batch(
+    rx: &Receiver<Result<PackedFastqBatch>>,
+) -> std::result::Result<Option<PackedFastqBatch>, Error> {
+    match rx.recv() {
+        Ok(Ok(batch)) => Ok(Some(batch)),
+        Ok(Err(err)) => Err(err),
+        Err(_) => Ok(None),
+    }
+}
+
+pub fn pseudoalign_single_end_bifrost_with_options_threaded<
+    R: ReadSource + PackedBatchSource + Send,
+>(
     index: &BifrostIndex,
     reader: &mut R,
     strand: Strand,
@@ -24,103 +54,102 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<R: ReadSource>(
     let threads = threads.max(1);
     let mut merged = EcCounts::new(options.bias);
     let mut merged_map: HashMap<Vec<u32>, usize> = HashMap::new();
-    let mut read_error: Option<Error> = None;
+    let mut final_error: Option<Error> = None;
 
     thread::scope(|scope| {
-        let (res_tx, res_rx) = mpsc::channel::<(usize, Result<EcCounts>)>();
-        let mut senders = Vec::with_capacity(threads);
+        let (producer_tx, producer_rx) = bounded::<Result<PackedFastqBatch>>(threads * 2);
+        let (work_tx, work_rx) = bounded::<PackedFastqBatch>(threads * 2);
+        let mut handles = Vec::with_capacity(threads);
 
-        for tid in 0..threads {
-            let (tx, rx) = mpsc::channel::<Vec<FastqRecord>>();
-            senders.push(tx);
-            let res_tx = res_tx.clone();
-            scope.spawn(move || {
+        let read_start = Instant::now();
+        let producer = scope.spawn(move || produce_batches(reader, &producer_tx));
+
+        let pseudoalign_start = Instant::now();
+        for _ in 0..threads {
+            let rx = work_rx.clone();
+            handles.push(scope.spawn(move || -> Result<EcCounts> {
                 let mut acc = EcCounts::new(options.bias);
                 let mut acc_map: HashMap<Vec<u32>, usize> = HashMap::new();
-                for batch in rx {
-                    let mut batch_reader = VecReadSource::new(batch);
-                    let res = super::single::pseudoalign_single_end_bifrost_with_options(
+                while let Ok(batch) = rx.recv() {
+                    super::single::pseudoalign_single_end_bifrost_batch_into(
                         index,
-                        &mut batch_reader,
+                        batch,
                         strand,
                         filter,
                         options,
+                        &mut acc,
+                        &mut acc_map,
                     );
-                    match res {
-                        Ok(counts) => super::merge_ec_counts(&mut acc, &mut acc_map, counts),
-                        Err(err) => {
-                            let _ = res_tx.send((tid, Err(err)));
-                            return;
-                        }
-                    }
                 }
-                let _ = res_tx.send((tid, Ok(acc)));
-            });
+                Ok(acc)
+            }));
         }
 
-        let mut batch = Vec::with_capacity(super::BATCH_SIZE);
-        let mut batch_idx = 0usize;
-        while let Some(record) = reader.next_record() {
-            match record {
-                Ok(record) => {
-                    batch.push(record);
-                    if batch.len() >= super::BATCH_SIZE {
-                        let to_send = std::mem::take(&mut batch);
-                        if senders[batch_idx % threads].send(to_send).is_err() {
-                            read_error = Some(Error::InvalidFormat("worker channel closed".into()));
-                            break;
-                        }
-                        batch = Vec::with_capacity(super::BATCH_SIZE);
-                        batch_idx += 1;
+        loop {
+            match recv_batch(&producer_rx) {
+                Ok(Some(batch)) => {
+                    if work_tx.send(batch).is_err() {
+                        final_error = Some(Error::InvalidFormat("worker queue closed".into()));
+                        break;
                     }
                 }
+                Ok(None) => break,
                 Err(err) => {
-                    read_error = Some(err);
+                    final_error = Some(err);
                     break;
                 }
             }
         }
-        if read_error.is_none() && !batch.is_empty() {
-            let to_send = batch;
-            if senders[batch_idx % threads].send(to_send).is_err() {
-                read_error = Some(Error::InvalidFormat("worker channel closed".into()));
+        drop(work_tx);
+
+        match producer.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                if final_error.is_none() {
+                    final_error = Some(err);
+                }
+            }
+            Err(_) => {
+                if final_error.is_none() {
+                    final_error = Some(Error::InvalidFormat("producer thread panicked".into()));
+                }
             }
         }
-        drop(senders);
+        timing::add_duration(Stage::FastqReadDecompress, read_start.elapsed());
 
-        let mut results: Vec<Option<Result<EcCounts>>> = (0..threads).map(|_| None).collect();
-        for _ in 0..threads {
-            if let Ok((tid, res)) = res_rx.recv() {
-                results[tid] = Some(res);
-            }
-        }
-
-        if read_error.is_none() && results.iter().any(|r| r.is_none()) {
-            read_error = Some(Error::InvalidFormat("worker thread failed".into()));
-        }
-
-        for res in results.iter_mut().take(threads) {
-            if let Some(res) = res.take() {
-                match res {
-                    Ok(counts) => super::merge_ec_counts(&mut merged, &mut merged_map, counts),
-                    Err(err) => {
-                        if read_error.is_none() {
-                            read_error = Some(err);
-                        }
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(counts)) => {
+                    let merge_start = Instant::now();
+                    super::merge_ec_counts(&mut merged, &mut merged_map, counts);
+                    timing::add_duration(Stage::EcMerge, merge_start.elapsed());
+                }
+                Ok(Err(err)) => {
+                    if final_error.is_none() {
+                        final_error = Some(err);
+                    }
+                }
+                Err(_) => {
+                    if final_error.is_none() {
+                        final_error = Some(Error::InvalidFormat("worker thread panicked".into()));
                     }
                 }
             }
         }
+        timing::add_duration(Stage::Pseudoalign, pseudoalign_start.elapsed());
     });
 
-    if let Some(err) = read_error {
+    if let Some(err) = final_error {
         Err(err)
     } else {
         Ok(merged)
     }
 }
 
-pub fn pseudoalign_paired_bifrost_with_options_threaded<R1: ReadSource, R2: ReadSource>(
+pub fn pseudoalign_paired_bifrost_with_options_threaded<
+    R1: ReadSource + PackedBatchSource + Send,
+    R2: ReadSource + PackedBatchSource + Send,
+>(
     index: &BifrostIndex,
     reader1: &mut R1,
     reader2: &mut R2,
@@ -137,118 +166,102 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<R1: ReadSource, R2: Read
     let threads = threads.max(1);
     let mut merged = EcCounts::new(options.bias);
     let mut merged_map: HashMap<Vec<u32>, usize> = HashMap::new();
-    let mut read_error: Option<Error> = None;
+    let mut final_error: Option<Error> = None;
 
     thread::scope(|scope| {
-        let (res_tx, res_rx) = mpsc::channel::<(usize, Result<EcCounts>)>();
-        let mut senders = Vec::with_capacity(threads);
+        let (left_tx, left_rx) = bounded::<Result<PackedFastqBatch>>(threads * 2);
+        let (right_tx, right_rx) = bounded::<Result<PackedFastqBatch>>(threads * 2);
+        let (work_tx, work_rx) = bounded::<(PackedFastqBatch, PackedFastqBatch)>(threads * 2);
+        let mut handles = Vec::with_capacity(threads);
 
-        for tid in 0..threads {
-            let (tx, rx) = mpsc::channel::<(Vec<FastqRecord>, Vec<FastqRecord>)>();
-            senders.push(tx);
-            let res_tx = res_tx.clone();
-            scope.spawn(move || {
+        let read_start = Instant::now();
+        let left_producer = scope.spawn(move || produce_batches(reader1, &left_tx));
+        let right_producer = scope.spawn(move || produce_batches(reader2, &right_tx));
+
+        let pseudoalign_start = Instant::now();
+        for _ in 0..threads {
+            let rx = work_rx.clone();
+            handles.push(scope.spawn(move || -> Result<EcCounts> {
                 let mut acc = EcCounts::new(options.bias);
                 let mut acc_map: HashMap<Vec<u32>, usize> = HashMap::new();
-                for (left, right) in rx {
-                    let mut left_reader = VecReadSource::new(left);
-                    let mut right_reader = VecReadSource::new(right);
-                    let res = super::paired::pseudoalign_paired_bifrost_with_options(
+                while let Ok((left, right)) = rx.recv() {
+                    super::paired::pseudoalign_paired_bifrost_batch_into(
                         index,
-                        &mut left_reader,
-                        &mut right_reader,
+                        left,
+                        right,
                         strand,
                         options,
-                    );
-                    match res {
-                        Ok(counts) => super::merge_ec_counts(&mut acc, &mut acc_map, counts),
-                        Err(err) => {
-                            let _ = res_tx.send((tid, Err(err)));
-                            return;
-                        }
-                    }
+                        &mut acc,
+                        &mut acc_map,
+                    )?;
                 }
-                let _ = res_tx.send((tid, Ok(acc)));
-            });
+                Ok(acc)
+            }));
         }
 
-        let mut left_batch = Vec::with_capacity(super::BATCH_SIZE);
-        let mut right_batch = Vec::with_capacity(super::BATCH_SIZE);
-        let mut batch_idx = 0usize;
         loop {
-            let r1 = reader1.next_record();
-            let r2 = reader2.next_record();
-            match (r1, r2) {
-                (None, None) => break,
-                (Some(_), None) | (None, Some(_)) => {
-                    read_error = Some(Error::InvalidFormat("paired FASTQ length mismatch".into()));
-                    break;
-                }
-                (Some(a), Some(b)) => match (a, b) {
-                    (Ok(a), Ok(b)) => {
-                        left_batch.push(a);
-                        right_batch.push(b);
-                        if left_batch.len() >= super::BATCH_SIZE {
-                            let left_send = std::mem::take(&mut left_batch);
-                            let right_send = std::mem::take(&mut right_batch);
-                            if senders[batch_idx % threads]
-                                .send((left_send, right_send))
-                                .is_err()
-                            {
-                                read_error =
-                                    Some(Error::InvalidFormat("worker channel closed".into()));
-                                break;
-                            }
-                            left_batch = Vec::with_capacity(super::BATCH_SIZE);
-                            right_batch = Vec::with_capacity(super::BATCH_SIZE);
-                            batch_idx += 1;
-                        }
-                    }
-                    (Err(err), _) | (_, Err(err)) => {
-                        read_error = Some(err);
+            let left = recv_batch(&left_rx);
+            let right = recv_batch(&right_rx);
+            match (left, right) {
+                (Ok(Some(left_batch)), Ok(Some(right_batch))) => {
+                    if work_tx.send((left_batch, right_batch)).is_err() {
+                        final_error = Some(Error::InvalidFormat("worker queue closed".into()));
                         break;
                     }
-                },
+                }
+                (Ok(None), Ok(None)) => break,
+                (Ok(None), Ok(Some(_))) | (Ok(Some(_)), Ok(None)) => {
+                    final_error = Some(Error::InvalidFormat("paired FASTQ length mismatch".into()));
+                    break;
+                }
+                (Err(err), _) | (_, Err(err)) => {
+                    final_error = Some(err);
+                    break;
+                }
             }
         }
-        if read_error.is_none() && !left_batch.is_empty() {
-            let left_send = left_batch;
-            let right_send = right_batch;
-            if senders[batch_idx % threads]
-                .send((left_send, right_send))
-                .is_err()
-            {
-                read_error = Some(Error::InvalidFormat("worker channel closed".into()));
-            }
-        }
-        drop(senders);
+        drop(work_tx);
 
-        let mut results: Vec<Option<Result<EcCounts>>> = (0..threads).map(|_| None).collect();
-        for _ in 0..threads {
-            if let Ok((tid, res)) = res_rx.recv() {
-                results[tid] = Some(res);
-            }
-        }
-
-        if read_error.is_none() && results.iter().any(|r| r.is_none()) {
-            read_error = Some(Error::InvalidFormat("worker thread failed".into()));
-        }
-
-        for res in results.iter_mut().take(threads) {
-            if let Some(res) = res.take() {
-                match res {
-                    Ok(counts) => super::merge_ec_counts(&mut merged, &mut merged_map, counts),
-                    Err(err) => {
-                        if read_error.is_none() {
-                            read_error = Some(err);
-                        }
+        for producer in [left_producer, right_producer] {
+            match producer.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    if final_error.is_none() {
+                        final_error = Some(err);
+                    }
+                }
+                Err(_) => {
+                    if final_error.is_none() {
+                        final_error = Some(Error::InvalidFormat("producer thread panicked".into()));
                     }
                 }
             }
         }
+        timing::add_duration(Stage::FastqReadDecompress, read_start.elapsed());
+
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(counts)) => {
+                    let merge_start = Instant::now();
+                    super::merge_ec_counts(&mut merged, &mut merged_map, counts);
+                    timing::add_duration(Stage::EcMerge, merge_start.elapsed());
+                }
+                Ok(Err(err)) => {
+                    if final_error.is_none() {
+                        final_error = Some(err);
+                    }
+                }
+                Err(_) => {
+                    if final_error.is_none() {
+                        final_error = Some(Error::InvalidFormat("worker thread panicked".into()));
+                    }
+                }
+            }
+        }
+        timing::add_duration(Stage::Pseudoalign, pseudoalign_start.elapsed());
     });
 
-    if let Some(err) = read_error {
+    if let Some(err) = final_error {
         Err(err)
     } else {
         Ok(merged)

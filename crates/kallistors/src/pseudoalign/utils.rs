@@ -4,6 +4,24 @@ use crate::bias::BiasCounts;
 
 use super::EcCounts;
 
+pub(crate) fn add_ec_count(
+    target: &mut EcCounts,
+    target_map: &mut HashMap<Vec<u32>, usize>,
+    ec: Vec<u32>,
+) {
+    let ec_id = match target_map.get(&ec) {
+        Some(id) => *id,
+        None => {
+            let id = target.ec_list.len();
+            target_map.insert(ec.clone(), id);
+            target.ec_list.push(ec);
+            target.counts.push(0);
+            id
+        }
+    };
+    target.counts[ec_id] = target.counts[ec_id].saturating_add(1);
+}
+
 pub(crate) fn merge_ec_counts(
     target: &mut EcCounts,
     target_map: &mut HashMap<Vec<u32>, usize>,

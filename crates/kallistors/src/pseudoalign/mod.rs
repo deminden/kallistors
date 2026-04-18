@@ -27,17 +27,21 @@ mod threaded;
 mod utils;
 use bias::bias_hexamer_for_match;
 pub use bifrost::{
-    BifrostIndex, build_bifrost_index, build_bifrost_index_threaded,
-    build_bifrost_index_with_kmer_pos, build_bifrost_index_with_kmer_pos_threaded,
-    build_bifrost_index_with_positions, build_bifrost_index_with_positions_threaded,
+    BifrostIndex, build_bifrost_index, build_bifrost_index_quant_threaded,
+    build_bifrost_index_threaded, build_bifrost_index_with_kmer_pos,
+    build_bifrost_index_with_kmer_pos_threaded, build_bifrost_index_with_positions,
+    build_bifrost_index_with_positions_threaded,
 };
 pub use core::local_kmer_hits;
 use core::{
-    apply_strand_filter, block_index_for_position, ec_block_at, ec_for_read_bifrost,
-    filter_ec_by_fragment, special_unitig_for_kmer, special_unitig_for_kmer_raw,
+    apply_strand_filter, block_index_for_position, ec_for_read_bifrost, filter_ec_by_fragment,
+    reset_thread_local_caches, special_unitig_for_kmer, special_unitig_for_kmer_raw,
 };
 use debug::format_positions_sample;
-pub use debug::{DebugFailReason, DebugReport, ReadTrace};
+pub use debug::{
+    DebugFailReason, DebugReport, DroppedHitTrace, JumpDecisionTrace, MinimizerCandidateTrace,
+    ReadTrace,
+};
 use debug::{ReadDebugState, debug_reason};
 pub(super) use ec::{
     ec_has_offlist, encode_kmer_pair, filter_shades, filter_shades_in_place, intersect_sorted,
@@ -50,7 +54,7 @@ use onlist::{read_onlist, read_onlist_with_lengths};
 pub use paired::{
     pseudoalign_paired_bifrost_debug_with_options, pseudoalign_paired_bifrost_debug_with_strand,
     pseudoalign_paired_bifrost_with_options, pseudoalign_paired_bifrost_with_strand,
-    pseudoalign_paired_naive,
+    pseudoalign_paired_naive, trace_read_pair_bifrost,
 };
 pub use single::{
     pseudoalign_single_end, pseudoalign_single_end_bifrost, pseudoalign_single_end_bifrost_debug,
@@ -65,7 +69,7 @@ pub use threaded::{
     pseudoalign_paired_bifrost_with_options_threaded,
     pseudoalign_single_end_bifrost_with_options_threaded,
 };
-pub(super) use utils::merge_ec_counts;
+pub(super) use utils::{add_ec_count, merge_ec_counts};
 
 const KMER_BYTES_CANDIDATES: [usize; 4] = [8, 16, 24, 32];
 const BATCH_SIZE: usize = 10_000;
@@ -229,6 +233,16 @@ pub struct ReadTraceResult {
     pub dropped_hits: Option<Vec<debug::DroppedHitTrace>>,
     pub minimizer_candidates: Option<Vec<debug::MinimizerCandidateTrace>>,
     pub jump_decisions: Option<Vec<debug::JumpDecisionTrace>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PairedTraceResult {
+    pub left: ReadTraceResult,
+    pub right: ReadTraceResult,
+    pub merged_ec: Option<Vec<u32>>,
+    pub merged_reason: Option<DebugFailReason>,
+    pub hard_reject_pair: bool,
+    pub had_offlist: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -871,6 +885,100 @@ pub fn trace_read_bifrost_with_hits(
     (trace, hits)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn trace_result_from_debug_state(
+    index: &BifrostIndex,
+    seq: &[u8],
+    dbg: &ReadDebugState,
+    read_ec_present: bool,
+    ec_before_filters: Option<Vec<u32>>,
+    ec_after_fragment_filter: Option<Vec<u32>>,
+    ec_after_strand_filter: Option<Vec<u32>>,
+    reason_override: Option<DebugFailReason>,
+) -> ReadTraceResult {
+    if let Some(reason) = reason_override {
+        return ReadTraceResult {
+            ec_before_filters,
+            ec_after_fragment_filter,
+            ec_after_strand_filter,
+            reason: Some(reason),
+            kmer_pos: None,
+            min_pos: None,
+            kmer_seq: None,
+            min_seq: None,
+            positions: None,
+            sample_positions: None,
+            used_revcomp: dbg.used_revcomp,
+            positions_visited: Some(dbg.visited_positions.clone()),
+            dropped_hits: Some(dbg.dropped_hits.clone()),
+            minimizer_candidates: Some(dbg.minimizer_candidates.clone()),
+            jump_decisions: Some(dbg.jump_decisions.clone()),
+        };
+    }
+    if read_ec_present {
+        return ReadTraceResult {
+            ec_before_filters,
+            ec_after_fragment_filter,
+            ec_after_strand_filter,
+            reason: None,
+            kmer_pos: None,
+            min_pos: None,
+            kmer_seq: None,
+            min_seq: None,
+            positions: None,
+            sample_positions: None,
+            used_revcomp: dbg.used_revcomp,
+            positions_visited: Some(dbg.visited_positions.clone()),
+            dropped_hits: Some(dbg.dropped_hits.clone()),
+            minimizer_candidates: Some(dbg.minimizer_candidates.clone()),
+            jump_decisions: Some(dbg.jump_decisions.clone()),
+        };
+    }
+
+    let (reason, kmer_pos, min_pos) = debug_reason(dbg);
+    let kmer_seq = kmer_pos.and_then(|pos| {
+        if pos + index.k <= seq.len() {
+            Some(String::from_utf8_lossy(&seq[pos..pos + index.k]).into_owned())
+        } else {
+            None
+        }
+    });
+    let min_seq = match (kmer_pos, min_pos) {
+        (Some(kp), Some(mp)) => {
+            let start = kp + mp;
+            let end = start + index.g;
+            if end <= seq.len() {
+                Some(String::from_utf8_lossy(&seq[start..end]).into_owned())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    let (positions, sample_positions) = dbg
+        .first_no_match_positions
+        .as_ref()
+        .map(|v| (Some(v.2), Some(v.3.clone())))
+        .unwrap_or((None, None));
+    ReadTraceResult {
+        ec_before_filters,
+        ec_after_fragment_filter,
+        ec_after_strand_filter,
+        reason: Some(reason),
+        kmer_pos,
+        min_pos,
+        kmer_seq,
+        min_seq,
+        positions,
+        sample_positions,
+        used_revcomp: dbg.used_revcomp,
+        positions_visited: Some(dbg.visited_positions.clone()),
+        dropped_hits: Some(dbg.dropped_hits.clone()),
+        minimizer_candidates: Some(dbg.minimizer_candidates.clone()),
+        jump_decisions: Some(dbg.jump_decisions.clone()),
+    }
+}
+
 fn trace_read_bifrost_inner(
     index: &BifrostIndex,
     seq: &[u8],
@@ -914,72 +1022,22 @@ fn trace_read_bifrost_inner(
         } else {
             None
         };
-        return (
-            Some(read_ec),
-            ReadTraceResult {
-                ec_before_filters: Some(ec_before),
-                ec_after_fragment_filter: Some(ec_fragment),
-                ec_after_strand_filter: Some(ec_strand),
-                reason,
-                kmer_pos: None,
-                min_pos: None,
-                kmer_seq: None,
-                min_seq: None,
-                positions: None,
-                sample_positions: None,
-                used_revcomp: dbg.used_revcomp,
-                positions_visited: Some(dbg.visited_positions.clone()),
-                dropped_hits: Some(dbg.dropped_hits.clone()),
-                minimizer_candidates: Some(dbg.minimizer_candidates.clone()),
-                jump_decisions: Some(dbg.jump_decisions.clone()),
-            },
+        let trace = trace_result_from_debug_state(
+            index,
+            seq,
+            &dbg,
+            true,
+            Some(ec_before),
+            Some(ec_fragment),
+            Some(ec_strand),
+            reason,
         );
+        return (Some(read_ec), trace);
     }
 
-    let (reason, kmer_pos, min_pos) = debug_reason(&dbg);
-    let kmer_seq = kmer_pos.and_then(|pos| {
-        if pos + index.k <= seq.len() {
-            Some(String::from_utf8_lossy(&seq[pos..pos + index.k]).into_owned())
-        } else {
-            None
-        }
-    });
-    let min_seq = match (kmer_pos, min_pos) {
-        (Some(kp), Some(mp)) => {
-            let start = kp + mp;
-            let end = start + index.g;
-            if end <= seq.len() {
-                Some(String::from_utf8_lossy(&seq[start..end]).into_owned())
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
-    let (positions, sample_positions) = dbg
-        .first_no_match_positions
-        .as_ref()
-        .map(|v| (Some(v.2), Some(v.3.clone())))
-        .unwrap_or((None, None));
     (
         None,
-        ReadTraceResult {
-            ec_before_filters: None,
-            ec_after_fragment_filter: None,
-            ec_after_strand_filter: None,
-            reason: Some(reason),
-            kmer_pos,
-            min_pos,
-            kmer_seq,
-            min_seq,
-            positions,
-            sample_positions,
-            used_revcomp: dbg.used_revcomp,
-            positions_visited: Some(dbg.visited_positions.clone()),
-            dropped_hits: Some(dbg.dropped_hits.clone()),
-            minimizer_candidates: Some(dbg.minimizer_candidates.clone()),
-            jump_decisions: Some(dbg.jump_decisions.clone()),
-        },
+        trace_result_from_debug_state(index, seq, &dbg, false, None, None, None, None),
     )
 }
 
@@ -1062,6 +1120,25 @@ pub fn unique_pseudoaligned_reads(counts: &EcCounts) -> u64 {
     total
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InvestigationOptions {
+    pub trace_fast_path: bool,
+    pub bounded_incremental_scan: bool,
+    pub faster_probe_state: bool,
+    pub altered_hit_bookkeeping: bool,
+    pub candidate_reuse: bool,
+}
+
+impl InvestigationOptions {
+    pub fn any_enabled(self) -> bool {
+        self.trace_fast_path
+            || self.bounded_incremental_scan
+            || self.faster_probe_state
+            || self.altered_hit_bookkeeping
+            || self.candidate_reuse
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct FragmentFilter {
     pub fragment_length: u32,
@@ -1086,6 +1163,7 @@ pub struct PseudoalignOptions {
     pub kallisto_sparse_hits: bool,
     pub bias: bool,
     pub max_bias: usize,
+    pub investigation: InvestigationOptions,
 }
 
 impl Default for PseudoalignOptions {
@@ -1107,6 +1185,7 @@ impl Default for PseudoalignOptions {
             kallisto_sparse_hits: false,
             bias: false,
             max_bias: 1_000_000,
+            investigation: InvestigationOptions::default(),
         }
     }
 }

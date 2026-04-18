@@ -5,14 +5,194 @@ use super::debug::{
 use super::ec::encode_kmer_pair;
 use super::minimizers::{
     fill_revcomp, minhash_next_after_hash, minhash_primary_for_kmer, minimizer_for_kmer_strict,
-    minimizer_tail_for_kmer, minimizers_for_kmer, minimizers_ranked_for_kmer,
+    minimizer_tail_for_kmer, minimizers_for_kmer, minimizers_for_kmer_into,
+    minimizers_ranked_for_kmer,
 };
 use super::{BifrostIndex, KmerEcIndex, PseudoalignOptions};
 use super::{DebugFailReason, DebugReport, Hit, MatchInfo, ReadEc, Strand, StrandSpecific};
 use super::{
     ec_has_offlist, filter_shades, intersect_sorted, merge_sorted_unique, merge_sorted_unique_vec,
 };
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+
+#[derive(Clone, Copy, Default)]
+struct MphfCacheEntry {
+    key: [u8; 8],
+    idx: u32,
+    state: u8,
+}
+
+#[derive(Default)]
+struct MphfLookupCache {
+    entries: [MphfCacheEntry; 8],
+}
+
+#[derive(Clone, Copy, Default)]
+struct BlockLookupCacheEntry {
+    unitig_id: usize,
+    block_idx: u32,
+    lb: u32,
+    ub: u32,
+    state: u8,
+}
+
+struct BlockLookupCache {
+    entries: [BlockLookupCacheEntry; 8],
+}
+
+impl BlockLookupCache {
+    fn new() -> Self {
+        Self {
+            entries: [BlockLookupCacheEntry::default(); 8],
+        }
+    }
+
+    #[inline]
+    fn slot(unitig_id: usize, pos: usize) -> usize {
+        (unitig_id ^ pos) & 7
+    }
+
+    #[inline]
+    fn get(&self, unitig_id: usize, pos: usize) -> Option<usize> {
+        let entry = &self.entries[Self::slot(unitig_id, pos)];
+        let pos = pos as u32;
+        if entry.state != 0 && entry.unitig_id == unitig_id && pos >= entry.lb && pos < entry.ub {
+            return Some(entry.block_idx as usize);
+        }
+        None
+    }
+
+    #[inline]
+    fn put(&mut self, unitig_id: usize, pos: usize, block_idx: usize, lb: u32, ub: u32) {
+        self.entries[Self::slot(unitig_id, pos)] = BlockLookupCacheEntry {
+            unitig_id,
+            block_idx: block_idx as u32,
+            lb,
+            ub,
+            state: 1,
+        };
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct MinimizerCandidateCacheEntry {
+    key: u64,
+    count: u8,
+    state: u8,
+    values: [([u8; 8], usize); 8],
+}
+
+struct MinimizerCandidateCache {
+    entries: Vec<MinimizerCandidateCacheEntry>,
+}
+
+impl MinimizerCandidateCache {
+    fn new() -> Self {
+        Self {
+            entries: vec![MinimizerCandidateCacheEntry::default(); 1 << 14],
+        }
+    }
+
+    #[inline]
+    fn slot(&self, key: u64) -> usize {
+        (key as usize) & (self.entries.len() - 1)
+    }
+
+    #[inline]
+    fn get(&self, key: u64) -> Option<&[([u8; 8], usize)]> {
+        let entry = &self.entries[self.slot(key)];
+        if entry.state != 0 && entry.key == key {
+            return Some(&entry.values[..entry.count as usize]);
+        }
+        None
+    }
+
+    #[inline]
+    fn put(&mut self, key: u64, values: &[([u8; 8], usize)]) {
+        let mut entry = MinimizerCandidateCacheEntry {
+            key,
+            count: values.len().min(8) as u8,
+            state: 1,
+            values: [([0u8; 8], 0usize); 8],
+        };
+        for (dst, src) in entry.values.iter_mut().zip(values.iter().copied()) {
+            *dst = src;
+        }
+        let slot = self.slot(key);
+        self.entries[slot] = entry;
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct FastKmerMatch {
+    unitig_id: usize,
+    start: usize,
+    block_idx: usize,
+    used_revcomp: bool,
+    forward_strand: bool,
+    matched_relaxed: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct FastKmerMatchCacheEntry {
+    key: u64,
+    value: FastKmerMatch,
+    flags: u8,
+    state: u8,
+}
+
+struct FastKmerMatchCache {
+    entries: Vec<FastKmerMatchCacheEntry>,
+}
+
+impl FastKmerMatchCache {
+    fn new() -> Self {
+        Self {
+            entries: vec![FastKmerMatchCacheEntry::default(); 1 << 14],
+        }
+    }
+
+    #[inline]
+    fn slot(&self, key: u64) -> usize {
+        (key as usize) & (self.entries.len() - 1)
+    }
+
+    #[inline]
+    fn get(&self, key: u64, flags: u8) -> Option<Option<FastKmerMatch>> {
+        let entry = &self.entries[self.slot(key)];
+        if entry.state != 0 && entry.key == key && entry.flags == flags {
+            return Some((entry.state == 1).then_some(entry.value));
+        }
+        None
+    }
+
+    #[inline]
+    fn put(&mut self, key: u64, flags: u8, value: Option<FastKmerMatch>) {
+        let state = if value.is_some() { 1 } else { 2 };
+        let slot = self.slot(key);
+        let entry = &mut self.entries[slot];
+        entry.key = key;
+        entry.flags = flags;
+        entry.state = state;
+        entry.value = value.unwrap_or_default();
+    }
+}
+
+thread_local! {
+    static FAST_KMER_MATCH_CACHE: RefCell<FastKmerMatchCache> =
+        RefCell::new(FastKmerMatchCache::new());
+    static BLOCK_LOOKUP_CACHE: RefCell<BlockLookupCache> =
+        RefCell::new(BlockLookupCache::new());
+    static MINIMIZER_CANDIDATE_CACHE: RefCell<MinimizerCandidateCache> =
+        RefCell::new(MinimizerCandidateCache::new());
+}
+
+pub(crate) fn reset_thread_local_caches() {
+    FAST_KMER_MATCH_CACHE.with(|tl| *tl.borrow_mut() = FastKmerMatchCache::new());
+    BLOCK_LOOKUP_CACHE.with(|tl| *tl.borrow_mut() = BlockLookupCache::new());
+    MINIMIZER_CANDIDATE_CACHE.with(|tl| *tl.borrow_mut() = MinimizerCandidateCache::new());
+}
 
 fn minimizer_hex(bytes: [u8; 8]) -> String {
     let mut out = String::with_capacity(16);
@@ -23,8 +203,135 @@ fn minimizer_hex(bytes: [u8; 8]) -> String {
 }
 
 #[inline]
+fn block_index_for_position_fast(
+    index: &BifrostIndex,
+    unitig_id: usize,
+    pos: usize,
+) -> Option<usize> {
+    if let Some(cached) = BLOCK_LOOKUP_CACHE.with(|tl| tl.borrow().get(unitig_id, pos)) {
+        return Some(cached);
+    }
+    index
+        .flat_ec
+        .block_index_for_position(unitig_id, pos)
+        .inspect(|&block_idx| {
+            if let Some((lb, ub)) = index.flat_ec.block_bounds(unitig_id, block_idx) {
+                BLOCK_LOOKUP_CACHE
+                    .with(|tl| tl.borrow_mut().put(unitig_id, pos, block_idx, lb, ub));
+            }
+        })
+}
+
+#[inline]
+fn ec_slice(index: &BifrostIndex, unitig_id: usize, block_idx: usize) -> &[u32] {
+    index.flat_ec.ec(unitig_id, block_idx)
+}
+
+#[inline]
 fn onlist_cardinality(onlist: &[bool]) -> u32 {
     onlist.iter().filter(|&&v| v).count() as u32
+}
+
+#[inline]
+fn fast_path_enabled(index: &BifrostIndex, dbg: bool, options: PseudoalignOptions) -> bool {
+    if std::env::var_os("KALLISTORS_DISABLE_FAST_PATH").is_some() {
+        return false;
+    }
+    (!dbg || options.investigation.trace_fast_path)
+        && !index.use_shade
+        && !options.do_union
+        && !options.dfk_onlist
+        && !options.no_jump
+        && !options.kallisto_enum
+        && !options.kallisto_strict
+        && !options.kallisto_local_fallback
+        && !options.kallisto_fallback
+        && !options.discard_special_only
+        && !options.kallisto_direct_kmer
+        && !options.kallisto_bifrost_find
+}
+
+#[inline]
+fn mphf_lookup_cached(
+    index: &BifrostIndex,
+    cache: &mut MphfLookupCache,
+    min_bytes: &[u8; 8],
+) -> Option<usize> {
+    let slot = usize::from(min_bytes[0] ^ min_bytes[7]) & (cache.entries.len() - 1);
+    let entry = &cache.entries[slot];
+    if entry.state != 0 && entry.key == *min_bytes {
+        return (entry.state == 1).then_some(entry.idx as usize);
+    }
+    let idx = index
+        .mphf
+        .lookup(min_bytes)
+        .and_then(|v| usize::try_from(v).ok());
+    cache.entries[slot] = MphfCacheEntry {
+        key: *min_bytes,
+        idx: idx.unwrap_or(0) as u32,
+        state: if idx.is_some() { 1 } else { 2 },
+    };
+    idx
+}
+
+#[inline]
+fn minimizer_bucket_idx(
+    index: &BifrostIndex,
+    cache: &mut MphfLookupCache,
+    min_bytes: &[u8; 8],
+) -> Option<usize> {
+    mphf_lookup_cached(index, cache, min_bytes)
+}
+
+#[inline]
+fn minimizer_candidates_cached_into(
+    kmer: &[u8],
+    g: usize,
+    out: &mut Vec<([u8; 8], usize)>,
+) -> bool {
+    let cache_disabled = std::env::var_os("KALLISTORS_DISABLE_MINIMIZER_CACHE").is_some();
+    let Some((fwd, _rev)) = encode_kmer_pair(kmer) else {
+        out.clear();
+        return false;
+    };
+    if !cache_disabled {
+        let hit = MINIMIZER_CANDIDATE_CACHE.with(|tl| {
+            let cache = tl.borrow();
+            if let Some(cached) = cache.get(fwd) {
+                out.clear();
+                out.extend_from_slice(cached);
+                true
+            } else {
+                false
+            }
+        });
+        if hit {
+            return true;
+        }
+    }
+    if !minimizers_for_kmer_into(kmer, g, out) {
+        return false;
+    }
+    if !cache_disabled {
+        MINIMIZER_CANDIDATE_CACHE.with(|tl| tl.borrow_mut().put(fwd, out));
+    }
+    true
+}
+
+#[inline]
+fn minimizer_bucket_has_overcrowded_marker(
+    index: &BifrostIndex,
+    cache: &mut MphfLookupCache,
+    min_bytes: &[u8; 8],
+) -> bool {
+    let Some(bucket_idx) = minimizer_bucket_idx(index, cache, min_bytes) else {
+        return false;
+    };
+    index
+        .minz_positions
+        .get(bucket_idx)
+        .iter()
+        .any(|&pos_id| (pos_id >> 32) as u32 == u32::MAX && (pos_id & 0x8000_0000) != 0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -86,6 +393,1091 @@ fn match_unitig_candidate(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
+fn match_unitig_candidate_encoded(
+    index: &BifrostIndex,
+    unitig_id: usize,
+    rel_pos: usize,
+    diff: usize,
+    min_pos_fwd: usize,
+    min_pos_rev: usize,
+    read_fwd: u64,
+    read_rev: u64,
+    allow_forward: bool,
+    allow_rev: bool,
+    allow_relaxed: bool,
+) -> Option<(usize, bool, bool, bool)> {
+    let unitig_len = index.unitigs[unitig_id].len();
+    if unitig_len < index.k {
+        return None;
+    }
+
+    let rel = rel_pos as isize;
+    let start_fwd = rel - min_pos_fwd as isize;
+    if allow_forward && start_fwd >= 0 {
+        let start = start_fwd as usize;
+        if start + index.k <= unitig_len
+            && index
+                .encoded_unitigs
+                .unitig_bases
+                .encode_kmer_at(unitig_id, start, index.k)
+                == Some(read_fwd)
+        {
+            return Some((start, false, false, true));
+        }
+    }
+
+    let start_rev = rel - diff as isize + min_pos_rev as isize;
+    if allow_rev && start_rev >= 0 {
+        let start = start_rev as usize;
+        if start + index.k <= unitig_len
+            && index
+                .encoded_unitigs
+                .unitig_bases
+                .encode_kmer_at(unitig_id, start, index.k)
+                == Some(read_rev)
+        {
+            return Some((start, true, false, false));
+        }
+    }
+    if !allow_relaxed {
+        return None;
+    }
+    let max_start = unitig_len - index.k;
+    let start_lo = rel_pos.saturating_sub(diff).min(max_start);
+    let start_hi = rel_pos.min(max_start);
+    if start_lo > start_hi {
+        return None;
+    }
+    for start in start_lo..=start_hi {
+        let Some(code) = index
+            .encoded_unitigs
+            .unitig_bases
+            .encode_kmer_at(unitig_id, start, index.k)
+        else {
+            continue;
+        };
+        if allow_forward && code == read_fwd {
+            return Some((start, false, true, true));
+        }
+        if allow_rev && code == read_rev {
+            return Some((start, true, true, false));
+        }
+    }
+
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn match_kmer_at_pos_fast_uncached_precomputed(
+    index: &BifrostIndex,
+    kmer: &[u8],
+    allow_forward: bool,
+    allow_rev: bool,
+    diff: usize,
+    min_candidates: &[([u8; 8], usize)],
+    next_min_candidate: Option<([u8; 8], usize)>,
+    cache: &mut MphfLookupCache,
+    allow_relaxed: bool,
+) -> Option<FastKmerMatch> {
+    let (read_fwd, read_rev) = encode_kmer_pair(kmer)?;
+    let use_revcomp = read_rev < read_fwd;
+    let mut saw_overcrowded = false;
+    for (min_bytes, min_pos) in min_candidates.iter().copied() {
+        let min_pos_fwd = if use_revcomp {
+            diff.saturating_sub(min_pos)
+        } else {
+            min_pos
+        };
+        let min_pos_rev = if use_revcomp {
+            min_pos
+        } else {
+            diff.saturating_sub(min_pos)
+        };
+        let Some(bucket_idx) = minimizer_bucket_idx(index, cache, &min_bytes) else {
+            continue;
+        };
+        for &pos_id in index.minz_positions.get(bucket_idx) {
+            let unitig_id_raw = (pos_id >> 32) as u32;
+            if unitig_id_raw == u32::MAX {
+                if (pos_id & 0x8000_0000) != 0 {
+                    saw_overcrowded = true;
+                    continue;
+                }
+                if (pos_id & 0xffff_ffff) != 0
+                    && let Some(uid) = special_unitig_for_kmer(index, kmer)
+                {
+                    let used_revcomp = use_revcomp;
+                    if (used_revcomp && !allow_rev) || (!used_revcomp && !allow_forward) {
+                        continue;
+                    }
+                    let block_idx = block_index_for_position_fast(index, uid, 0)?;
+                    return Some(FastKmerMatch {
+                        unitig_id: uid,
+                        start: 0,
+                        block_idx,
+                        used_revcomp,
+                        forward_strand: !used_revcomp,
+                        matched_relaxed: false,
+                    });
+                }
+                continue;
+            }
+            let (unitig_id, rel_pos, is_km) = crate::index::bifrost::decode_pos_id(pos_id);
+            if is_km {
+                let uid = unitig_id as usize;
+                if uid >= index.km_unitigs.len() {
+                    continue;
+                }
+                let km_pos = rel_pos as usize;
+                let kmer_canon = if use_revcomp { read_rev } else { read_fwd };
+                if index
+                    .encoded_unitigs
+                    .km_bases
+                    .encode_kmer_at(uid, 0, index.k)
+                    != Some(kmer_canon)
+                {
+                    continue;
+                }
+                if min_pos != km_pos && min_pos + km_pos != diff {
+                    continue;
+                }
+                let used_revcomp = use_revcomp;
+                if (used_revcomp && !allow_rev) || (!used_revcomp && !allow_forward) {
+                    continue;
+                }
+                let unitig_id = index.unitigs.len() + uid;
+                let block_idx = block_index_for_position_fast(index, unitig_id, 0)?;
+                return Some(FastKmerMatch {
+                    unitig_id,
+                    start: 0,
+                    block_idx,
+                    used_revcomp,
+                    forward_strand: !used_revcomp,
+                    matched_relaxed: false,
+                });
+            }
+            let uid = unitig_id as usize;
+            if uid >= index.unitigs.len() {
+                continue;
+            }
+            if let Some((start, used_revcomp, matched_relaxed, forward_strand)) =
+                match_unitig_candidate_encoded(
+                    index,
+                    uid,
+                    rel_pos as usize,
+                    diff,
+                    min_pos_fwd,
+                    min_pos_rev,
+                    read_fwd,
+                    read_rev,
+                    allow_forward,
+                    allow_rev,
+                    allow_relaxed,
+                )
+            {
+                let block_idx = block_index_for_position_fast(index, uid, start)?;
+                return Some(FastKmerMatch {
+                    unitig_id: uid,
+                    start,
+                    block_idx,
+                    used_revcomp,
+                    forward_strand,
+                    matched_relaxed,
+                });
+            }
+        }
+    }
+    if saw_overcrowded
+        && let Some((next_bytes, next_pos)) = next_min_candidate
+        && !min_candidates
+            .iter()
+            .any(|&(bytes, pos)| bytes == next_bytes && pos == next_pos)
+        && let Some(bucket_idx) = minimizer_bucket_idx(index, cache, &next_bytes)
+    {
+        let min_pos_fwd = if use_revcomp {
+            diff.saturating_sub(next_pos)
+        } else {
+            next_pos
+        };
+        let min_pos_rev = if use_revcomp {
+            next_pos
+        } else {
+            diff.saturating_sub(next_pos)
+        };
+        for &pos_id in index.minz_positions.get(bucket_idx) {
+            let unitig_id_raw = (pos_id >> 32) as u32;
+            if unitig_id_raw == u32::MAX {
+                continue;
+            }
+            let (unitig_id, rel_pos, is_km) = crate::index::bifrost::decode_pos_id(pos_id);
+            if is_km {
+                let uid = unitig_id as usize;
+                if uid >= index.km_unitigs.len() {
+                    continue;
+                }
+                let km_pos = rel_pos as usize;
+                let kmer_canon = if use_revcomp { read_rev } else { read_fwd };
+                if index
+                    .encoded_unitigs
+                    .km_bases
+                    .encode_kmer_at(uid, 0, index.k)
+                    != Some(kmer_canon)
+                {
+                    continue;
+                }
+                if next_pos != km_pos && next_pos + km_pos != diff {
+                    continue;
+                }
+                let used_revcomp = use_revcomp;
+                if (used_revcomp && !allow_rev) || (!used_revcomp && !allow_forward) {
+                    continue;
+                }
+                let unitig_id = index.unitigs.len() + uid;
+                let block_idx = block_index_for_position_fast(index, unitig_id, 0)?;
+                return Some(FastKmerMatch {
+                    unitig_id,
+                    start: 0,
+                    block_idx,
+                    used_revcomp,
+                    forward_strand: !used_revcomp,
+                    matched_relaxed: false,
+                });
+            }
+            let uid = unitig_id as usize;
+            if uid >= index.unitigs.len() {
+                continue;
+            }
+            if let Some((start, used_revcomp, matched_relaxed, forward_strand)) =
+                match_unitig_candidate_encoded(
+                    index,
+                    uid,
+                    rel_pos as usize,
+                    diff,
+                    min_pos_fwd,
+                    min_pos_rev,
+                    read_fwd,
+                    read_rev,
+                    allow_forward,
+                    allow_rev,
+                    allow_relaxed,
+                )
+            {
+                let block_idx = block_index_for_position_fast(index, uid, start)?;
+                return Some(FastKmerMatch {
+                    unitig_id: uid,
+                    start,
+                    block_idx,
+                    used_revcomp,
+                    forward_strand,
+                    matched_relaxed,
+                });
+            }
+        }
+    }
+    if saw_overcrowded
+        && let Some((unitig_id, start, used_revcomp)) =
+            match_kmer_direct(index, kmer, allow_forward, allow_rev)
+    {
+        let block_idx = block_index_for_position_fast(index, unitig_id, start)?;
+        return Some(FastKmerMatch {
+            unitig_id,
+            start,
+            block_idx,
+            used_revcomp,
+            forward_strand: !used_revcomp,
+            matched_relaxed: false,
+        });
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn match_kmer_at_pos_fast_uncached(
+    index: &BifrostIndex,
+    kmer: &[u8],
+    allow_forward: bool,
+    allow_rev: bool,
+    diff: usize,
+    min_candidates: &mut Vec<([u8; 8], usize)>,
+    cache: &mut MphfLookupCache,
+    allow_relaxed: bool,
+    allow_tail_minimizer: bool,
+) -> Option<FastKmerMatch> {
+    if !minimizer_candidates_cached_into(kmer, index.g, min_candidates) {
+        return None;
+    }
+    let needs_slow_path = min_candidates.iter().any(|(min_bytes, _)| {
+        *min_bytes == [0u8; 8] || minimizer_bucket_has_overcrowded_marker(index, cache, min_bytes)
+    });
+    if needs_slow_path {
+        let mut rev_buf = Vec::new();
+        return match_kmer_at_pos(
+            index,
+            kmer,
+            allow_forward,
+            allow_rev,
+            diff,
+            &mut rev_buf,
+            false,
+            false,
+            false,
+            false,
+            true,
+            allow_relaxed,
+        )
+        .map(
+            |(unitig_id, start, used_revcomp, block_idx, matched_relaxed)| FastKmerMatch {
+                unitig_id,
+                start,
+                block_idx,
+                used_revcomp,
+                forward_strand: !used_revcomp,
+                matched_relaxed,
+            },
+        );
+    }
+    let matched = match_kmer_at_pos_fast_uncached_precomputed(
+        index,
+        kmer,
+        allow_forward,
+        allow_rev,
+        diff,
+        min_candidates,
+        None,
+        cache,
+        allow_relaxed,
+    );
+    if matched.is_some() || !allow_tail_minimizer {
+        return matched;
+    }
+    if let Some((tail_bytes, tail_pos)) = minimizer_tail_for_kmer(kmer, index.g)
+        && !min_candidates
+            .iter()
+            .any(|&(min_bytes, min_pos)| min_bytes == tail_bytes && min_pos == tail_pos)
+    {
+        if tail_bytes == [0u8; 8]
+            || minimizer_bucket_has_overcrowded_marker(index, cache, &tail_bytes)
+        {
+            let mut rev_buf = Vec::new();
+            return match_kmer_at_pos(
+                index,
+                kmer,
+                allow_forward,
+                allow_rev,
+                diff,
+                &mut rev_buf,
+                false,
+                false,
+                false,
+                false,
+                true,
+                allow_relaxed,
+            )
+            .map(
+                |(unitig_id, start, used_revcomp, block_idx, matched_relaxed)| FastKmerMatch {
+                    unitig_id,
+                    start,
+                    block_idx,
+                    used_revcomp,
+                    forward_strand: !used_revcomp,
+                    matched_relaxed,
+                },
+            );
+        }
+        let tail_candidate = [(tail_bytes, tail_pos)];
+        return match_kmer_at_pos_fast_uncached_precomputed(
+            index,
+            kmer,
+            allow_forward,
+            allow_rev,
+            diff,
+            &tail_candidate,
+            None,
+            cache,
+            allow_relaxed,
+        );
+    }
+    matched
+}
+
+#[inline]
+fn fast_match_cache_key(
+    kmer: &[u8],
+    allow_forward: bool,
+    allow_rev: bool,
+    allow_relaxed: bool,
+) -> Option<(u64, u64)> {
+    let (fwd, rev) = encode_kmer_pair(kmer)?;
+    let mut key = fwd;
+    key ^= rev.rotate_left(17);
+    key ^= u64::from(allow_forward as u8) << 62;
+    key ^= u64::from(allow_rev as u8) << 61;
+    key ^= u64::from(allow_relaxed as u8) << 60;
+    Some((key, fwd.min(rev)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn match_kmer_at_pos_fast(
+    index: &BifrostIndex,
+    kmer: &[u8],
+    allow_forward: bool,
+    allow_rev: bool,
+    diff: usize,
+    min_candidates: &mut Vec<([u8; 8], usize)>,
+    cache: &mut MphfLookupCache,
+    allow_relaxed: bool,
+    allow_tail_minimizer: bool,
+) -> Option<FastKmerMatch> {
+    let (cache_key, _canonical_code) =
+        fast_match_cache_key(kmer, allow_forward, allow_rev, allow_relaxed)?;
+    let flags = ((allow_forward as u8) << 2) | ((allow_rev as u8) << 1) | (allow_relaxed as u8);
+    let cache_disabled = std::env::var_os("KALLISTORS_DISABLE_MATCH_CACHE").is_some();
+    if !cache_disabled
+        && let Some(cached) = FAST_KMER_MATCH_CACHE.with(|tl| tl.borrow().get(cache_key, flags))
+    {
+        return cached;
+    }
+    let matched = match_kmer_at_pos_fast_uncached(
+        index,
+        kmer,
+        allow_forward,
+        allow_rev,
+        diff,
+        min_candidates,
+        cache,
+        allow_relaxed,
+        allow_tail_minimizer,
+    );
+    if !cache_disabled {
+        FAST_KMER_MATCH_CACHE.with(|tl| tl.borrow_mut().put(cache_key, flags, matched));
+    }
+    matched
+}
+
+fn ec_for_read_bifrost_fast(
+    index: &BifrostIndex,
+    seq: &[u8],
+    strand: Strand,
+    mut dbg: Option<&mut ReadDebugState>,
+    options: PseudoalignOptions,
+) -> Option<ReadEc> {
+    let mut current: Vec<u32> = Vec::new();
+    let mut next: Vec<u32> = Vec::new();
+    let mut min_candidates: Vec<([u8; 8], usize)> = Vec::with_capacity(8);
+    let mut jump_candidates: Vec<([u8; 8], usize)> = Vec::with_capacity(8);
+    let mut cache = MphfLookupCache::default();
+    let allow_forward_base = strand != Strand::Reverse;
+    let allow_rev_base = strand != Strand::Forward;
+    let mut has_hit = false;
+    let diff = index.k.saturating_sub(index.g);
+    let mut best_match: Option<MatchInfo> = None;
+    let mut first_hit: Option<Hit> = None;
+    let mut hits: Vec<Hit> = Vec::new();
+    let dlist_dummy = index.onlist.as_deref().map(onlist_cardinality);
+    let mut any_dlist_kmer = false;
+    let mut dlist_early_return = false;
+    let mut append_dummy_hit = false;
+    let mut online_intersection: Vec<u32> = Vec::new();
+    let mut has_online_intersection = false;
+    let mut backoff_until: Option<usize> = None;
+    let mut pos = 0usize;
+    let last_pos = seq.len() - index.k;
+    while pos <= last_pos {
+        if let Some(state) = dbg.as_deref_mut() {
+            state.saw_valid_kmer = true;
+            if state.visited_positions.len() < 4096 {
+                state.visited_positions.push(pos);
+            }
+        }
+        let mut in_backoff = false;
+        if let Some(until) = backoff_until {
+            if pos > until {
+                backoff_until = None;
+            } else {
+                in_backoff = true;
+            }
+        }
+        let kmer = &seq[pos..pos + index.k];
+        let kmer_codes = encode_kmer_pair(kmer);
+        let kmer_in_dlist = index
+            .dlist
+            .as_ref()
+            .zip(kmer_codes)
+            .is_some_and(|(dlist, (fwd, rev))| dlist.contains(&fwd.min(rev)));
+        if kmer_in_dlist {
+            any_dlist_kmer = true;
+        }
+        if !allow_forward_base && !allow_rev_base {
+            pos += 1;
+            continue;
+        }
+        let Some((_read_fwd, _read_rev)) = kmer_codes else {
+            pos += 1;
+            continue;
+        };
+        if dlist_dummy.is_some() && kmer_in_dlist {
+            append_dummy_hit = true;
+        }
+        if !minimizer_candidates_cached_into(kmer, index.g, &mut min_candidates) {
+            pos += 1;
+            continue;
+        }
+        if let Some(state) = dbg.as_deref_mut() {
+            for (min_bytes, min_pos) in &min_candidates {
+                let bucket = minimizer_bucket_idx(index, &mut cache, min_bytes);
+                let positions_len = bucket
+                    .map(|idx| index.minz_positions.get(idx).len())
+                    .unwrap_or(0);
+                let sample_positions = bucket
+                    .map(|idx| format_positions_sample(index.minz_positions.get(idx)))
+                    .unwrap_or_else(|| "-".to_string());
+                if bucket.is_some() {
+                    state.saw_mphf_hit = true;
+                    if positions_len > 0 {
+                        state.saw_positions = true;
+                    }
+                }
+                state.minimizer_candidates.push(MinimizerCandidateTrace {
+                    read_pos: pos,
+                    min_pos: *min_pos,
+                    minimizer: minimizer_hex(*min_bytes),
+                    mphf_hit: bucket.is_some(),
+                    positions_len,
+                    sample_positions,
+                    has_special: false,
+                    overcrowded: positions_len > 64,
+                    matched: false,
+                });
+            }
+        }
+        let mut fallback_rev_buf: Vec<u8> = Vec::new();
+        let matched = if let Some(matched) = match_kmer_at_pos_fast_uncached(
+            index,
+            kmer,
+            allow_forward_base,
+            allow_rev_base,
+            diff,
+            &mut min_candidates,
+            &mut cache,
+            true,
+            !in_backoff,
+        ) {
+            matched
+        } else if !options.kallisto_strict
+            && !options.kallisto_enum
+            && in_backoff
+            && min_candidates.len() == 1
+            && let Some((uid, start, used_revcomp, block_idx, matched_relaxed)) = match_kmer_at_pos(
+                index,
+                kmer,
+                allow_forward_base,
+                allow_rev_base,
+                diff,
+                &mut fallback_rev_buf,
+                options.kallisto_direct_kmer,
+                options.kallisto_enum,
+                options.kallisto_strict,
+                options.skip_overcrowded_minimizer,
+                true,
+                false,
+            )
+        {
+            FastKmerMatch {
+                unitig_id: uid,
+                start,
+                block_idx,
+                used_revcomp,
+                forward_strand: !used_revcomp,
+                matched_relaxed,
+            }
+        } else {
+            if let Some(state) = dbg.as_deref_mut()
+                && state.first_no_match.is_none()
+            {
+                state.first_no_match = Some((pos, 0));
+            }
+            pos += 1;
+            continue;
+        };
+        let uid = matched.unitig_id;
+        let start = matched.start;
+        let kmer_pos = pos;
+        let block_idx = matched.block_idx;
+        let used_revcomp = matched.used_revcomp;
+        let forward_strand = matched.forward_strand;
+        let matched_relaxed = matched.matched_relaxed;
+        let ec = ec_slice(index, uid, block_idx);
+        if let Some(state) = dbg.as_deref_mut() {
+            state.saw_match = true;
+            if ec.is_empty() {
+                if state.first_empty_ec.is_none() {
+                    state.first_empty_ec = Some((pos, 0));
+                }
+            } else {
+                state.saw_ec = true;
+            }
+            if let Some(entry) = state
+                .minimizer_candidates
+                .iter_mut()
+                .rev()
+                .find(|entry| entry.read_pos == pos)
+            {
+                entry.matched = true;
+            }
+            state.used_revcomp = used_revcomp;
+        }
+        let mut accept_for_stream = true;
+        if matched_relaxed && has_hit {
+            accept_for_stream = false;
+            if let Some(state) = dbg.as_deref_mut()
+                && state.dropped_hits.len() < 256
+            {
+                state.dropped_hits.push(DroppedHitTrace {
+                    read_pos: kmer_pos,
+                    min_pos: 0,
+                    unitig_id: uid,
+                    unitig_pos: start,
+                    block_idx: Some(block_idx),
+                    reason: if in_backoff {
+                        "backoff_relaxed_probe"
+                    } else {
+                        "relaxed_probe"
+                    },
+                    used_revcomp,
+                    is_special: false,
+                });
+            }
+        }
+        if accept_for_stream && !ec.is_empty() {
+            if has_online_intersection {
+                next.clear();
+                intersect_sorted(&online_intersection, ec, &mut next);
+                if next.is_empty() {
+                    return Some(ReadEc {
+                        ec: Vec::new(),
+                        best_match,
+                        first_hit,
+                        hits,
+                        had_offlist: false,
+                        shade_union: Vec::new(),
+                        hard_reject_pair: true,
+                    });
+                }
+                std::mem::swap(&mut online_intersection, &mut next);
+            } else {
+                online_intersection.extend_from_slice(ec);
+                has_online_intersection = true;
+            }
+        }
+        if best_match.map(|m| kmer_pos < m.read_pos).unwrap_or(true) {
+            best_match = Some(MatchInfo {
+                unitig_id: uid,
+                unitig_pos: start,
+                read_pos: kmer_pos,
+                used_revcomp,
+            });
+        }
+        hits.push(Hit {
+            unitig_id: uid,
+            read_pos: kmer_pos,
+            block_idx,
+            used_revcomp,
+        });
+        if first_hit
+            .as_ref()
+            .map(|h| kmer_pos < h.read_pos)
+            .unwrap_or(true)
+        {
+            first_hit = Some(Hit {
+                unitig_id: uid,
+                read_pos: kmer_pos,
+                block_idx,
+                used_revcomp,
+            });
+        }
+        has_hit = true;
+
+        let mut jump_to: Option<usize> = None;
+        let mut force_break = false;
+        let mut synthetic_hit: Option<Hit> = None;
+        if let Some(dist) = jump_distance_for_match(index, uid, block_idx, start, forward_strand) {
+            let mut next_pos = pos + dist;
+            if next_pos > last_pos {
+                next_pos = last_pos;
+            }
+            if next_pos > pos {
+                let kmer_next = &seq[next_pos..next_pos + index.k];
+                let next_hit = match_kmer_at_pos_fast(
+                    index,
+                    kmer_next,
+                    allow_forward_base,
+                    allow_rev_base,
+                    diff,
+                    &mut jump_candidates,
+                    &mut cache,
+                    true,
+                    !in_backoff,
+                );
+                let current_ec = ec_slice(index, uid, block_idx);
+                let mut use_backoff = false;
+                if let Some(next_hit) = next_hit {
+                    let uid2 = next_hit.unitig_id;
+                    let block_idx2 = next_hit.block_idx;
+                    let next_ec = ec_slice(index, uid2, block_idx2);
+                    if uid2 == uid && next_ec == current_ec {
+                        if let Some(state) = dbg.as_deref_mut() {
+                            state.jump_decisions.push(JumpDecisionTrace {
+                                read_pos: pos,
+                                matched_unitig_id: uid,
+                                matched_block_idx: block_idx,
+                                jump_distance: dist,
+                                next_pos,
+                                in_backoff,
+                                next_hit_found: true,
+                                next_hit_relaxed: false,
+                                next_hit_same_unitig: true,
+                                next_hit_same_ec: true,
+                                mid_hit_found: false,
+                                mid_hit_relaxed: false,
+                                mid_hit_matches_either: false,
+                                jumped: true,
+                                reason: "next_same_unitig_same_ec",
+                            });
+                        }
+                        if next_pos >= last_pos {
+                            synthetic_hit = Some(Hit {
+                                unitig_id: uid,
+                                read_pos: last_pos,
+                                block_idx,
+                                used_revcomp,
+                            });
+                            force_break = true;
+                        } else {
+                            synthetic_hit = Some(Hit {
+                                unitig_id: uid,
+                                read_pos: next_pos,
+                                block_idx,
+                                used_revcomp,
+                            });
+                            jump_to = Some(next_pos);
+                        }
+                    } else if dist > 4 {
+                        let middle_pos = (pos + next_pos) / 2;
+                        if middle_pos <= last_pos {
+                            let kmer_mid = &seq[middle_pos..middle_pos + index.k];
+                            if let Some(mid_hit) = match_kmer_at_pos_fast(
+                                index,
+                                kmer_mid,
+                                allow_forward_base,
+                                allow_rev_base,
+                                diff,
+                                &mut jump_candidates,
+                                &mut cache,
+                                true,
+                                !in_backoff,
+                            ) {
+                                let uid3 = mid_hit.unitig_id;
+                                let rev3 = mid_hit.used_revcomp;
+                                let block_idx3 = mid_hit.block_idx;
+                                let mid_ec = ec_slice(index, uid3, block_idx3);
+                                let mid_matches_current = uid3 == uid && mid_ec == current_ec;
+                                let mid_matches_next = uid3 == uid2 && mid_ec == next_ec;
+                                if mid_matches_current || mid_matches_next {
+                                    if let Some(state) = dbg.as_deref_mut() {
+                                        state.jump_decisions.push(JumpDecisionTrace {
+                                            read_pos: pos,
+                                            matched_unitig_id: uid,
+                                            matched_block_idx: block_idx,
+                                            jump_distance: dist,
+                                            next_pos,
+                                            in_backoff,
+                                            next_hit_found: true,
+                                            next_hit_relaxed: false,
+                                            next_hit_same_unitig: uid2 == uid,
+                                            next_hit_same_ec: next_ec == current_ec,
+                                            mid_hit_found: true,
+                                            mid_hit_relaxed: false,
+                                            mid_hit_matches_either: true,
+                                            jumped: true,
+                                            reason: "middle_confirms_jump",
+                                        });
+                                    }
+                                    if !mid_ec.is_empty() {
+                                        if has_online_intersection {
+                                            next.clear();
+                                            intersect_sorted(
+                                                &online_intersection,
+                                                mid_ec,
+                                                &mut next,
+                                            );
+                                            if next.is_empty() {
+                                                return Some(ReadEc {
+                                                    ec: Vec::new(),
+                                                    best_match,
+                                                    first_hit,
+                                                    hits,
+                                                    had_offlist: false,
+                                                    shade_union: Vec::new(),
+                                                    hard_reject_pair: true,
+                                                });
+                                            }
+                                            std::mem::swap(&mut online_intersection, &mut next);
+                                        } else {
+                                            online_intersection.extend_from_slice(mid_ec);
+                                            has_online_intersection = true;
+                                        }
+                                    }
+                                    let found3pos = if mid_matches_current {
+                                        middle_pos
+                                    } else {
+                                        pos + dist
+                                    };
+                                    synthetic_hit = Some(Hit {
+                                        unitig_id: uid3,
+                                        read_pos: found3pos,
+                                        block_idx: block_idx3,
+                                        used_revcomp: rev3,
+                                    });
+                                    if next_pos >= last_pos {
+                                        force_break = true;
+                                    } else {
+                                        jump_to = Some(next_pos);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let next_in_dlist = index.dlist.as_ref().is_some_and(|dlist| {
+                        encode_kmer_pair(kmer_next)
+                            .is_some_and(|(fwd, rev)| dlist.contains(&fwd.min(rev)))
+                    });
+                    if next_in_dlist {
+                        dlist_early_return = true;
+                        append_dummy_hit = dlist_dummy.is_some();
+                    }
+                    if let Some(state) = dbg.as_deref_mut() {
+                        state.jump_decisions.push(JumpDecisionTrace {
+                            read_pos: pos,
+                            matched_unitig_id: uid,
+                            matched_block_idx: block_idx,
+                            jump_distance: dist,
+                            next_pos,
+                            in_backoff,
+                            next_hit_found: false,
+                            next_hit_relaxed: false,
+                            next_hit_same_unitig: false,
+                            next_hit_same_ec: false,
+                            mid_hit_found: false,
+                            mid_hit_relaxed: false,
+                            mid_hit_matches_either: false,
+                            jumped: !dlist_early_return,
+                            reason: if dlist_early_return {
+                                "next_miss_dlist_early_return"
+                            } else {
+                                "next_miss_jump_or_break"
+                            },
+                        });
+                    }
+                    if next_pos >= last_pos {
+                        synthetic_hit = Some(Hit {
+                            unitig_id: uid,
+                            read_pos: last_pos,
+                            block_idx,
+                            used_revcomp,
+                        });
+                        force_break = true;
+                    } else {
+                        synthetic_hit = Some(Hit {
+                            unitig_id: uid,
+                            read_pos: kmer_pos,
+                            block_idx,
+                            used_revcomp,
+                        });
+                        jump_to = Some(next_pos);
+                    }
+                    if dlist_early_return {
+                        force_break = true;
+                        jump_to = None;
+                    }
+                }
+                if jump_to.is_none() && !force_break {
+                    if options.investigation.bounded_incremental_scan {
+                        let stop = next_pos.min(last_pos);
+                        let mut recovered = false;
+                        let mut scan_pos = pos + 1;
+                        while scan_pos <= stop {
+                            let scan_kmer = &seq[scan_pos..scan_pos + index.k];
+                            if let Some(scan_hit) = match_kmer_at_pos_fast(
+                                index,
+                                scan_kmer,
+                                allow_forward_base,
+                                allow_rev_base,
+                                diff,
+                                &mut jump_candidates,
+                                &mut cache,
+                                options.investigation.candidate_reuse,
+                                !in_backoff,
+                            ) {
+                                synthetic_hit = Some(Hit {
+                                    unitig_id: scan_hit.unitig_id,
+                                    read_pos: scan_pos,
+                                    block_idx: scan_hit.block_idx,
+                                    used_revcomp: scan_hit.used_revcomp,
+                                });
+                                jump_to = Some(scan_pos);
+                                recovered = true;
+                                if let Some(state) = dbg.as_deref_mut() {
+                                    state.jump_decisions.push(JumpDecisionTrace {
+                                        read_pos: pos,
+                                        matched_unitig_id: uid,
+                                        matched_block_idx: block_idx,
+                                        jump_distance: dist,
+                                        next_pos: scan_pos,
+                                        in_backoff,
+                                        next_hit_found: false,
+                                        next_hit_relaxed: false,
+                                        next_hit_same_unitig: scan_hit.unitig_id == uid,
+                                        next_hit_same_ec: false,
+                                        mid_hit_found: false,
+                                        mid_hit_relaxed: false,
+                                        mid_hit_matches_either: false,
+                                        jumped: true,
+                                        reason: "bounded_incremental_recovery",
+                                    });
+                                }
+                                break;
+                            }
+                            scan_pos += 1;
+                        }
+                        if !recovered {
+                            use_backoff = true;
+                        }
+                    } else {
+                        use_backoff = true;
+                    }
+                }
+                if let Some(hit) = synthetic_hit.take() {
+                    hits.push(hit);
+                }
+                if use_backoff {
+                    backoff_until = Some(next_pos);
+                }
+            }
+        }
+        if force_break {
+            break;
+        }
+        if let Some(next_pos) = jump_to {
+            pos = next_pos.saturating_add(1);
+            continue;
+        }
+        let _ = in_backoff;
+        pos += 1;
+    }
+
+    if !dlist_early_return && any_dlist_kmer && has_hit {
+        append_dummy_hit = dlist_dummy.is_some();
+    }
+    if !has_hit || hits.is_empty() {
+        return None;
+    }
+
+    let mut minpos = usize::MAX;
+    let mut maxpos = 0usize;
+    let mut last_unitig = None;
+    let mut last_block_idx = None;
+    let mut found_nonempty = false;
+    for hit in &hits {
+        minpos = minpos.min(hit.read_pos);
+        maxpos = maxpos.max(hit.read_pos);
+        let ec = ec_slice(index, hit.unitig_id, hit.block_idx);
+        if !found_nonempty {
+            if !ec.is_empty() {
+                current.extend_from_slice(ec);
+                last_unitig = Some(hit.unitig_id);
+                last_block_idx = Some(hit.block_idx);
+                found_nonempty = true;
+            }
+            continue;
+        }
+        if last_unitig == Some(hit.unitig_id) && last_block_idx == Some(hit.block_idx) {
+            continue;
+        }
+        if ec.is_empty() {
+            continue;
+        }
+        if current.is_empty() {
+            current.extend_from_slice(ec);
+            last_unitig = Some(hit.unitig_id);
+            last_block_idx = Some(hit.block_idx);
+            continue;
+        }
+        next.clear();
+        intersect_sorted(&current, ec, &mut next);
+        std::mem::swap(&mut current, &mut next);
+        if current.is_empty() {
+            return Some(ReadEc {
+                ec: Vec::new(),
+                best_match,
+                first_hit,
+                hits,
+                had_offlist: false,
+                shade_union: Vec::new(),
+                hard_reject_pair: true,
+            });
+        }
+        last_unitig = Some(hit.unitig_id);
+        last_block_idx = Some(hit.block_idx);
+    }
+
+    if append_dummy_hit && let Some(dummy) = dlist_dummy {
+        let ec = [dummy];
+        if current.is_empty() {
+            current.extend_from_slice(&ec);
+        } else {
+            next.clear();
+            intersect_sorted(&current, &ec, &mut next);
+            std::mem::swap(&mut current, &mut next);
+            if current.is_empty() {
+                return Some(ReadEc {
+                    ec: Vec::new(),
+                    best_match,
+                    first_hit,
+                    hits,
+                    had_offlist: true,
+                    shade_union: Vec::new(),
+                    hard_reject_pair: true,
+                });
+            }
+        }
+    }
+
+    if current.is_empty() {
+        return None;
+    }
+    if let Some(onlist) = index.onlist.as_deref() {
+        current.retain(|&t| (t as usize) < onlist.len() && onlist[t as usize]);
+    }
+    if current.is_empty() {
+        return None;
+    }
+    let min_range = 1usize;
+    if maxpos >= minpos && (maxpos - minpos + index.k) < min_range {
+        return None;
+    }
+    Some(ReadEc {
+        ec: current,
+        best_match,
+        first_hit,
+        hits,
+        had_offlist: false,
+        shade_union: Vec::new(),
+        hard_reject_pair: false,
+    })
+}
+
 pub(super) fn ec_for_read_bifrost(
     index: &BifrostIndex,
     seq: &[u8],
@@ -99,6 +1491,9 @@ pub(super) fn ec_for_read_bifrost(
         }
         return None;
     }
+    if fast_path_enabled(index, dbg.is_some(), options) {
+        return ec_for_read_bifrost_fast(index, seq, strand, dbg, options);
+    }
     let mut current: Vec<u32> = Vec::new();
     let mut next: Vec<u32> = Vec::new();
     let mut rev_buf: Vec<u8> = Vec::new();
@@ -111,13 +1506,14 @@ pub(super) fn ec_for_read_bifrost(
     let mut hits: Vec<Hit> = Vec::new();
     let use_shade = index.use_shade && !options.do_union;
     let mut shade_scratch: Vec<u32> = Vec::new();
-    let mut online_intersection: Option<Vec<u32>> = None;
+    let mut online_intersection: Vec<u32> = Vec::new();
+    let mut has_online_intersection = false;
     let mut saw_special_hit = false;
     let mut saw_non_special_hit = false;
     let dlist_dummy = index.onlist.as_deref().map(onlist_cardinality);
     let mut any_dlist_kmer = false;
     let mut dlist_early_return = false;
-    let mut extra_ec_hits: Vec<Vec<u32>> = Vec::new();
+    let mut append_dummy_hit = false;
     // Kallisto falls back to incremental scanning after a failed jump; track that window.
     let mut backoff_until: Option<usize> = None;
     // Legacy parity switch kept for CLI compatibility.
@@ -464,7 +1860,7 @@ pub(super) fn ec_for_read_bifrost(
                         options.kallisto_strict,
                         options.skip_overcrowded_minimizer,
                         true,
-                        true,
+                        false,
                     )
                 {
                     matched = Some((
@@ -484,8 +1880,9 @@ pub(super) fn ec_for_read_bifrost(
             if !options.kallisto_bifrost_find
                 && !options.kallisto_strict
                 && !options.kallisto_enum
-                && !in_backoff
                 && !tried_tail_minimizer
+                && (!in_backoff
+                    || std::env::var_os("KALLISTORS_ALLOW_TAIL_MINIMIZER_IN_BACKOFF").is_some())
                 && let Some((tail_bytes, tail_pos)) = minimizer_tail_for_kmer(min_input, index.g)
                 && !min_candidates
                     .iter()
@@ -518,6 +1915,77 @@ pub(super) fn ec_for_read_bifrost(
             }
         }
 
+        if matched.is_none()
+            && !options.kallisto_bifrost_find
+            && !options.kallisto_strict
+            && !options.kallisto_enum
+            && any_mphf
+            && any_positions
+            && in_backoff
+            && min_candidates.len() == 1
+            && let Some((uid, start, used_revcomp, _block_idx, matched_relaxed)) = match_kmer_at_pos(
+                index,
+                kmer,
+                allow_forward_base,
+                allow_rev_base,
+                diff,
+                &mut rev_buf,
+                options.kallisto_direct_kmer,
+                options.kallisto_enum,
+                options.kallisto_strict,
+                options.skip_overcrowded_minimizer,
+                true,
+                true,
+            )
+        {
+            matched = Some((
+                uid,
+                start,
+                pos,
+                0usize,
+                used_revcomp,
+                false,
+                false,
+                matched_relaxed,
+                !used_revcomp,
+            ));
+        }
+
+        if matched.is_none()
+            && in_backoff
+            && has_hit
+            && std::env::var_os("KALLISTORS_BACKOFF_DIRECT_RESCUE").is_some()
+            && let Some((uid, start, used_revcomp)) =
+                match_kmer_direct(index, kmer, allow_forward_base, allow_rev_base)
+            && let Some(block_idx) = block_index_for_position_fast(index, uid, start)
+        {
+            matched = Some((
+                uid,
+                start,
+                pos,
+                0usize,
+                used_revcomp,
+                false,
+                false,
+                false,
+                !used_revcomp,
+            ));
+            if let Some(state) = dbg.as_deref_mut()
+                && state.dropped_hits.len() < 256
+            {
+                state.dropped_hits.push(DroppedHitTrace {
+                    read_pos: pos,
+                    min_pos: 0,
+                    unitig_id: uid,
+                    unitig_pos: start,
+                    block_idx: Some(block_idx),
+                    reason: "backoff_direct_rescue",
+                    used_revcomp,
+                    is_special: false,
+                });
+            }
+        }
+
         let Some((
             uid,
             start,
@@ -538,7 +2006,10 @@ pub(super) fn ec_for_read_bifrost(
         // enter the accepted hit stream used for intersection.
         let mut accept_for_stream = true;
         let mut stream_drop_reason = "";
-        if matched_relaxed && has_hit {
+        if matched_relaxed
+            && has_hit
+            && std::env::var_os("KALLISTORS_ACCEPT_RELAXED_STREAM").is_none()
+        {
             accept_for_stream = false;
             stream_drop_reason = if in_backoff {
                 "backoff_relaxed_probe"
@@ -555,13 +2026,13 @@ pub(super) fn ec_for_read_bifrost(
                 min_pos,
                 unitig_id: uid,
                 unitig_pos: start,
-                block_idx: block_index_for_position(&index.ec_blocks[uid], start),
+                block_idx: block_index_for_position_fast(index, uid, start),
                 reason: stream_drop_reason,
                 used_revcomp,
                 is_special,
             });
         }
-        let Some(block_idx) = block_index_for_position(&index.ec_blocks[uid], start) else {
+        let Some(block_idx) = block_index_for_position_fast(index, uid, start) else {
             if let Some(state) = dbg.as_deref_mut()
                 && state.dropped_hits.len() < 256
             {
@@ -579,7 +2050,7 @@ pub(super) fn ec_for_read_bifrost(
             pos += 1;
             continue;
         };
-        let ec = &index.ec_blocks[uid][block_idx].ec;
+        let ec = ec_slice(index, uid, block_idx);
         let ec = if use_shade {
             filter_shades(ec, &index.shade_sequences, &mut shade_scratch);
             shade_scratch.as_slice()
@@ -589,9 +2060,9 @@ pub(super) fn ec_for_read_bifrost(
         // Match kallisto's partial intersection behavior: maintain a live running
         // intersection and stop the read as soon as it collapses.
         if accept_for_stream && !options.do_union && !ec.is_empty() {
-            if let Some(current) = online_intersection.as_ref() {
+            if has_online_intersection {
                 let mut next = Vec::new();
-                intersect_sorted(current, ec, &mut next);
+                intersect_sorted(&online_intersection, ec, &mut next);
                 if next.is_empty() {
                     if let Some(state) = dbg.as_deref_mut() {
                         state.intersection_empty = true;
@@ -618,9 +2089,11 @@ pub(super) fn ec_for_read_bifrost(
                         hard_reject_pair: true,
                     });
                 }
-                online_intersection = Some(next);
+                online_intersection = next;
             } else {
-                online_intersection = Some(ec.to_vec());
+                online_intersection.clear();
+                online_intersection.extend_from_slice(ec);
+                has_online_intersection = true;
             }
         }
         if is_special {
@@ -696,7 +2169,7 @@ pub(super) fn ec_for_read_bifrost(
                     options.kallisto_bifrost_find,
                     true,
                 );
-                let current_ec = &index.ec_blocks[uid][block_idx].ec;
+                let current_ec = ec_slice(index, uid, block_idx);
                 let mut jump_reason = "no_jump";
                 let mut next_hit_found = false;
                 let mut next_hit_relaxed = false;
@@ -709,7 +2182,7 @@ pub(super) fn ec_for_read_bifrost(
                 if let Some((uid2, _start2, _rev2, block_idx2, next_relaxed)) = next_hit {
                     next_hit_found = true;
                     next_hit_relaxed = next_relaxed;
-                    let next_ec = &index.ec_blocks[uid2][block_idx2].ec;
+                    let next_ec = ec_slice(index, uid2, block_idx2);
                     next_hit_same_unitig = uid2 == uid;
                     next_hit_same_ec = next_ec == current_ec;
                     if next_hit_same_unitig && next_hit_same_ec {
@@ -754,7 +2227,7 @@ pub(super) fn ec_for_read_bifrost(
                             {
                                 mid_hit_found = true;
                                 mid_hit_relaxed = mid_relaxed;
-                                let mid_ec = &index.ec_blocks[uid3][block_idx3].ec;
+                                let mid_ec = ec_slice(index, uid3, block_idx3);
                                 let mid_matches_current = uid3 == uid && mid_ec == current_ec;
                                 let mid_matches_next = uid3 == uid2 && mid_ec == next_ec;
                                 mid_hit_matches_either = mid_matches_current || mid_matches_next;
@@ -762,9 +2235,13 @@ pub(super) fn ec_for_read_bifrost(
                                     // Kallisto accepts this middle hit before final jump decision.
                                     if accept_for_stream && !options.do_union && !mid_ec.is_empty()
                                     {
-                                        if let Some(current) = online_intersection.as_ref() {
+                                        if has_online_intersection {
                                             let mut next = Vec::new();
-                                            intersect_sorted(current, mid_ec, &mut next);
+                                            intersect_sorted(
+                                                &online_intersection,
+                                                mid_ec,
+                                                &mut next,
+                                            );
                                             if next.is_empty() {
                                                 if let Some(state) = dbg.as_deref_mut() {
                                                     state.intersection_empty = true;
@@ -791,9 +2268,11 @@ pub(super) fn ec_for_read_bifrost(
                                                     hard_reject_pair: true,
                                                 });
                                             }
-                                            online_intersection = Some(next);
+                                            online_intersection = next;
                                         } else {
-                                            online_intersection = Some(mid_ec.to_vec());
+                                            online_intersection.clear();
+                                            online_intersection.extend_from_slice(mid_ec);
+                                            has_online_intersection = true;
                                         }
                                     }
                                     let found3pos = if mid_matches_current {
@@ -829,9 +2308,7 @@ pub(super) fn ec_for_read_bifrost(
                     if next_in_dlist {
                         dlist_early_return = true;
                         jump_reason = "next_missing_dlist_early_return";
-                        if let Some(dummy) = dlist_dummy {
-                            extra_ec_hits.push(vec![dummy]);
-                        }
+                        append_dummy_hit = dlist_dummy.is_some();
                     }
                     if next_pos >= last_pos {
                         synthetic_hit = Some(Hit {
@@ -902,12 +2379,8 @@ pub(super) fn ec_for_read_bifrost(
     }
 
     // Mirror kallisto's post-loop D-list dummy append in partial mode.
-    if !dlist_early_return
-        && any_dlist_kmer
-        && (has_hit || options.do_union)
-        && let Some(dummy) = dlist_dummy
-    {
-        extra_ec_hits.push(vec![dummy]);
+    if !dlist_early_return && any_dlist_kmer && (has_hit || options.do_union) {
+        append_dummy_hit = dlist_dummy.is_some();
     }
 
     if options.discard_special_only && saw_special_hit && !saw_non_special_hit {
@@ -934,7 +2407,7 @@ pub(super) fn ec_for_read_bifrost(
                 && let Some(ec) =
                     ec_for_read_local_kmer(index, seq, &unitigs, true, options.discard_special_only)
             {
-                if let Some(state) = dbg.as_deref_mut() {
+                if let Some(state) = dbg {
                     state.saw_valid_kmer = true;
                     state.saw_ec = true;
                 }
@@ -972,15 +2445,15 @@ pub(super) fn ec_for_read_bifrost(
 
     let mut minpos = usize::MAX;
     let mut maxpos = 0usize;
-    let mut last_ec: Vec<u32> = Vec::new();
     let mut last_unitig = None;
+    let mut last_block_idx = None;
     let mut found_nonempty = false;
     let mut current_offlist = false;
     let mut ec_scratch: Vec<u32> = Vec::new();
     for hit in &hits {
         minpos = minpos.min(hit.read_pos);
         maxpos = maxpos.max(hit.read_pos);
-        let ec = &index.ec_blocks[hit.unitig_id][hit.block_idx].ec;
+        let ec = ec_slice(index, hit.unitig_id, hit.block_idx);
         let ec = if use_shade {
             filter_shades(ec, &index.shade_sequences, &mut shade_scratch);
             shade_scratch.as_slice()
@@ -1000,15 +2473,15 @@ pub(super) fn ec_for_read_bifrost(
                     current.dedup();
                 } else {
                     current.extend_from_slice(ec);
-                    last_ec = ec.to_vec();
                     last_unitig = Some(hit.unitig_id);
+                    last_block_idx = Some(hit.block_idx);
                 }
                 current_offlist = ec_offlist;
                 found_nonempty = true;
             }
             continue;
         }
-        if last_unitig == Some(hit.unitig_id) && ec == last_ec.as_slice() {
+        if last_unitig == Some(hit.unitig_id) && last_block_idx == Some(hit.block_idx) {
             continue;
         }
         if ec.is_empty() {
@@ -1027,8 +2500,8 @@ pub(super) fn ec_for_read_bifrost(
         } else {
             if current.is_empty() {
                 current.extend_from_slice(ec);
-                last_ec = ec.to_vec();
                 last_unitig = Some(hit.unitig_id);
+                last_block_idx = Some(hit.block_idx);
                 current_offlist = ec_offlist;
                 continue;
             }
@@ -1056,7 +2529,7 @@ pub(super) fn ec_for_read_bifrost(
             intersect_sorted(&current, ec_slice, &mut next);
             std::mem::swap(&mut current, &mut next);
             if current.is_empty() {
-                if let Some(state) = dbg.as_deref_mut() {
+                if let Some(state) = dbg {
                     state.intersection_empty = true;
                 }
                 return Some(ReadEc {
@@ -1069,45 +2542,41 @@ pub(super) fn ec_for_read_bifrost(
                     hard_reject_pair: true,
                 });
             }
-            last_ec = ec.to_vec();
             last_unitig = Some(hit.unitig_id);
+            last_block_idx = Some(hit.block_idx);
             current_offlist = current_offlist || ec_offlist;
         }
     }
 
     // Apply synthetic D-list dummy hits (kallisto um_dummy behavior).
-    for ec in &extra_ec_hits {
-        if ec.is_empty() {
-            continue;
-        }
+    if append_dummy_hit && let Some(dummy) = dlist_dummy {
+        let ec = [dummy];
         if options.do_union {
-            merge_sorted_unique_vec(&mut current, ec);
+            merge_sorted_unique_vec(&mut current, &ec);
             current_offlist = true;
-            continue;
-        }
-        if current.is_empty() {
-            current.extend_from_slice(ec);
+        } else if current.is_empty() {
+            current.extend_from_slice(&ec);
             current_offlist = true;
-            continue;
-        }
-        next.clear();
-        intersect_sorted(&current, ec, &mut next);
-        std::mem::swap(&mut current, &mut next);
-        if current.is_empty() {
-            if let Some(state) = dbg.as_deref_mut() {
-                state.intersection_empty = true;
+        } else {
+            next.clear();
+            intersect_sorted(&current, &ec, &mut next);
+            std::mem::swap(&mut current, &mut next);
+            if current.is_empty() {
+                if let Some(state) = dbg {
+                    state.intersection_empty = true;
+                }
+                return Some(ReadEc {
+                    ec: Vec::new(),
+                    best_match,
+                    first_hit,
+                    hits,
+                    had_offlist: current_offlist,
+                    shade_union: Vec::new(),
+                    hard_reject_pair: true,
+                });
             }
-            return Some(ReadEc {
-                ec: Vec::new(),
-                best_match,
-                first_hit,
-                hits,
-                had_offlist: current_offlist,
-                shade_union: Vec::new(),
-                hard_reject_pair: true,
-            });
+            current_offlist = true;
         }
-        current_offlist = true;
     }
 
     if current.is_empty() {
@@ -1132,7 +2601,7 @@ pub(super) fn ec_for_read_bifrost(
         let mut shade_union = Vec::new();
         if index.use_shade {
             for hit in &hits {
-                let ec = &index.ec_blocks[hit.unitig_id][hit.block_idx].ec;
+                let ec = ec_slice(index, hit.unitig_id, hit.block_idx);
                 for &tr in ec {
                     let idx = tr as usize;
                     if idx < index.shade_sequences.len() && index.shade_sequences[idx] {
@@ -1188,7 +2657,7 @@ fn match_kmer_at_pos(
         && let Some((uid, start, used_revcomp)) =
             match_kmer_direct(index, kmer, allow_forward, allow_rev)
     {
-        let block_idx = block_index_for_position(&index.ec_blocks[uid], start)?;
+        let block_idx = block_index_for_position_fast(index, uid, start)?;
         return Some((uid, start, used_revcomp, block_idx, false));
     }
     let (mut min_candidates, mut min_hash_current) = if kallisto_bifrost_find {
@@ -1276,7 +2745,7 @@ fn match_kmer_at_pos(
                         if (used_revcomp && !allow_rev) || (!used_revcomp && !allow_forward) {
                             continue;
                         }
-                        let block_idx = block_index_for_position(&index.ec_blocks[uid], 0)?;
+                        let block_idx = block_index_for_position_fast(index, uid, 0)?;
                         return Some((uid, 0usize, used_revcomp, block_idx, false));
                     }
                     if kallisto_bifrost_find && overcrowded {
@@ -1303,7 +2772,7 @@ fn match_kmer_at_pos(
                         continue;
                     }
                     let unitig_id = index.unitigs.len() + uid;
-                    let block_idx = block_index_for_position(&index.ec_blocks[unitig_id], 0)?;
+                    let block_idx = block_index_for_position_fast(index, unitig_id, 0)?;
                     return Some((unitig_id, 0usize, used_revcomp, block_idx, false));
                 } else {
                     let uid = unitig_id as usize;
@@ -1325,7 +2794,7 @@ fn match_kmer_at_pos(
                             allow_relaxed,
                         )
                     {
-                        let block_idx = block_index_for_position(&index.ec_blocks[uid], start)?;
+                        let block_idx = block_index_for_position_fast(index, uid, start)?;
                         return Some((uid, start, used_revcomp, block_idx, matched_relaxed));
                     }
                 }
@@ -1367,26 +2836,37 @@ fn match_kmer_direct(
     allow_forward: bool,
     allow_rev: bool,
 ) -> Option<(usize, usize, bool)> {
-    let map = index.kmer_pos_index.as_ref()?;
     let (fwd, rev) = encode_kmer_pair(kmer)?;
-    if let Some(entries) = map.get(&fwd) {
-        for &(unitig_id, pos, used_revcomp) in entries {
-            if used_revcomp {
-                continue;
+    if let Some(map) = index.kmer_pos_index.as_ref() {
+        if let Some(entries) = map.get(&fwd) {
+            for &(unitig_id, pos, used_revcomp) in entries {
+                if used_revcomp {
+                    continue;
+                }
+                if allow_forward {
+                    return Some((unitig_id, pos, false));
+                }
             }
-            if allow_forward {
-                return Some((unitig_id, pos, false));
+        }
+        if let Some(entries) = map.get(&rev) {
+            for &(unitig_id, pos, used_revcomp) in entries {
+                if !used_revcomp {
+                    continue;
+                }
+                if allow_rev {
+                    return Some((unitig_id, pos, true));
+                }
             }
         }
     }
-    if let Some(entries) = map.get(&rev) {
-        for &(unitig_id, pos, used_revcomp) in entries {
-            if !used_revcomp {
-                continue;
-            }
-            if allow_rev {
-                return Some((unitig_id, pos, true));
-            }
+
+    let code = fwd.min(rev);
+    for &(unitig_id, seq_fwd) in index.selective_fallback_kmers.lookup(code)? {
+        if allow_forward && seq_fwd == fwd {
+            return Some((unitig_id, 0, false));
+        }
+        if allow_rev && seq_fwd == rev {
+            return Some((unitig_id, 0, true));
         }
     }
     None
@@ -1612,9 +3092,9 @@ pub(super) fn special_unitig_for_kmer_raw(index: &BifrostIndex, kmer: &[u8]) -> 
 
 fn special_ec_for_kmer<'a>(index: &'a BifrostIndex, kmer: &'a [u8]) -> Option<&'a [u32]> {
     let uid = special_unitig_for_kmer(index, kmer)?;
-    let blocks = index.ec_blocks.get(uid)?;
-    let block_idx = block_index_for_position(blocks, 0)?;
-    Some(&blocks[block_idx].ec)
+    let _ = index.ec_blocks.get(uid)?;
+    let block_idx = block_index_for_position_fast(index, uid, 0)?;
+    Some(index.flat_ec.ec(uid, block_idx))
 }
 
 fn ec_for_read_local_kmer(

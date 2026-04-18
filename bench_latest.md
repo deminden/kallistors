@@ -1,49 +1,58 @@
 # Real-data benchmark vs kallisto
-Generated: 2026-02-15
+Generated: 2026-04-18
 
 ## Environment
-- OS: macOS arm64
-- CPU cores: 8
+- OS: Linux x86_64
+- CPU: AMD Ryzen 9 7950X3D
+- Threads used: 32
 
 ## Inputs
-- Reads: `data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz`
-- Read count: 43,817
-- Mean read length: 168.904 (used `-l 169 -s 20`)
-- Index: `data/Human_kallisto_index`
-- Threads: `-t 8`
+- Reads:
+  - `data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade.gz`
+  - `data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade (2).gz`
+- Read pairs: 4,408,640
+- Reference transcripts: `data/gencode.v49.transcripts.fa.gz`
+- Index: `data/gencode.v49_kallisto.idx`
+- Threads: `-t 32`
 
 ## Benchmark (no debug flags)
 Commands:
 ```bash
 kallisto_src/build/src/kallisto quant \
-  -i data/Human_kallisto_index -o data/kallisto_bench_run_step17_seq \
-  --single -l 169 -s 20 -t 8 \
-  data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
+  -i data/gencode.v49_kallisto.idx -o /tmp/kallisto_full -t 32 \
+  data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade.gz \
+  "data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade (2).gz"
 
 ./target/release/kallistors-cli quant \
-  -i data/Human_kallisto_index -o data/kallistors_bench_run_step17_seq \
-  --single -l 169 -s 20 -t 8 \
-  data/SRR13638690_RNA-seq_of_homo_sapiens_temporal_muscle_of_low_grade_migraine_1_trimmed_subset.fastq.gz
+  -i data/gencode.v49_kallisto.idx -o /tmp/kallistors_full -t 32 \
+  data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade.gz \
+  "data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade (2).gz"
 ```
 
 Timings:
-- kallisto: real 15.62s, user 37.85s, sys 2.22s
-- kallistors: real 51.32s, user 44.08s, sys 10.85s
+- kallisto: real 56.24s
+- kallistors: real 68.63s, user 1006.42s, sys 17.45s, peak RSS 5,653,304 KB
 
 run_info:
-- kallisto `n_pseudoaligned`: 41626 / 43817
-- kallistors `n_pseudoaligned`: 41626 / 43817
+- kallisto `n_pseudoaligned`: 4244771 / 4408640
+- kallistors `n_pseudoaligned`: 4244771 / 4408640
+- kallisto `n_unique`: 276251
+- kallistors `n_unique`: 276251
 
-Accuracy (TPM filter `max(k_tpm, o_tpm) > 1`; n = 7697):
-- TPM Pearson: 0.999999
-- TPM MAE: 0.045
-- est_counts Pearson: 1.000000
-- est_counts MAE: 0.00084
+Current `kallistors` stage timings:
+- `index_header_parse 2.113s`
+- `graph_decode 6.859s`
+- `minimizer_count_pass 1.390s`
+- `minimizer_fill_pass 9.002s`
+- `fastq_read_decompress 34.613s`
+- `pseudoalign 47.39s`
 
-## Read-level parity (25k sample, same index)
-- Before relaxed minimizer-window matching: 79 mismatches (40 `no_hits_ok`, 39 `ok_no_hits`)
-- After jump/backoff alignment using instrumented kallisto traces: 0 mismatches (0 `no_hits_ok`, 0 `ok_no_hits`)
-- Artifacts:
-  - `data/kallisto_vs_kallistors_read_diff_25000_step17.tsv`
-  - `data/kallisto_vs_kallistors_read_diff_no_hits_ok_25000_step17.txt`
-  - `data/kallisto_vs_kallistors_read_diff_ok_no_hits_25000_step17.txt`
+## Read-level parity
+- Full-file paired parity is exact against `kallisto` on the checked-in real dataset.
+- Deterministic paired prefixes are exact through `262144` pairs in `data/subsets/`.
+
+## Notable improvements behind this result
+- Bifrost-style retry on probe/backoff misses after prior evidence exists, fixing the last full-file paired mismatch.
+- `flate2` switched to the `zlib-rs` backend.
+- Threaded workers now accumulate directly into long-lived `EcCounts`.
+- Threaded FASTQ transport now uses packed/reusable batches with one contiguous byte buffer plus per-record offsets instead of owned `FastqRecord` payloads.

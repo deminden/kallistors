@@ -10,6 +10,7 @@ pub fn run(
     reads2: Option<&Path>,
     out: &Path,
     threads: usize,
+    timings: bool,
     debug_out: Option<&Path>,
     debug_max: usize,
     strand: kallistors::pseudoalign::Strand,
@@ -33,6 +34,10 @@ pub fn run(
     kallisto_bifrost_find: bool,
     kallisto_sparse_hits: bool,
 ) -> Result<()> {
+    let timings_enabled = timings || std::env::var_os("KALLISTORS_TIMINGS").is_some();
+    kallistors::timing::set_enabled(timings_enabled);
+    kallistors::timing::reset();
+
     if reads2.is_some() && fragment_length.is_some() {
         return Err(anyhow!(
             "--fragment-length is only supported for single-end reads"
@@ -74,6 +79,7 @@ pub fn run(
         kallisto_sparse_hits,
         bias,
         max_bias: 1_000_000,
+        investigation: super::investigation_options_from_env(),
     };
     let filter =
         fragment_length
@@ -91,14 +97,16 @@ pub fn run(
         } else if kallisto_fallback {
             kallistors::pseudoalign::build_bifrost_index_with_positions_and_kmer(index, true)
         } else {
-            kallistors::pseudoalign::build_bifrost_index_with_positions(index, true)
+            kallistors::pseudoalign::build_bifrost_index_with_positions_threaded(
+                index, true, threads,
+            )
         }
     } else if kallisto_direct_kmer {
         kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(index, false)
     } else if kallisto_fallback {
         kallistors::pseudoalign::build_bifrost_index_with_kmer(index)
     } else {
-        kallistors::pseudoalign::build_bifrost_index(index)
+        kallistors::pseudoalign::build_bifrost_index_with_positions_threaded(index, false, threads)
     }
     .map_err(|err| anyhow!("pseudoalign failed: {err}"))?;
     let (res, report) = if let Some(reader2) = reader2.as_mut() {
@@ -176,6 +184,16 @@ pub fn run(
         res.reads_aligned,
         res.ec_list.len()
     );
+    if timings_enabled {
+        eprintln!("[timings]");
+        for timing in kallistors::timing::snapshot() {
+            eprintln!(
+                "{}\t{:.3}s",
+                timing.stage.label(),
+                timing.duration.as_secs_f64()
+            );
+        }
+    }
 
     if let Some(path) = debug_out
         && let Some(report) = report

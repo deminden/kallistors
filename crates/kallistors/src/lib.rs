@@ -7,6 +7,7 @@ pub mod index;
 pub mod io;
 pub mod pseudoalign;
 pub mod quant;
+pub mod timing;
 pub mod util;
 
 pub use error::Error;

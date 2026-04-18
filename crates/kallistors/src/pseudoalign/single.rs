@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::Result;
 use crate::bias::BiasCounts;
-use crate::io::ReadSource;
+use crate::io::{PackedFastqBatch, ReadSource};
 
 use super::{
     BifrostIndex, DebugFailReason, DebugReport, EcCounts, FragmentFilter, KmerEcIndex,
@@ -25,6 +25,9 @@ pub fn pseudoalign_single_end<R: ReadSource>(
 
     while let Some(record) = reader.next_record() {
         let record = record?;
+        if std::env::var_os("KALLISTORS_RESET_ALL_CACHES_PER_READ").is_some() {
+            super::reset_thread_local_caches();
+        }
         reads_processed += 1;
         if record.seq.len() < index.k {
             continue;
@@ -190,6 +193,68 @@ pub fn pseudoalign_single_end_bifrost_with_options<R: ReadSource>(
     pseudoalign_single_end_bifrost_inner(index, reader, strand, None, filter, options)
 }
 
+pub(crate) fn pseudoalign_single_end_bifrost_batch_into(
+    index: &BifrostIndex,
+    batch: PackedFastqBatch,
+    strand: Strand,
+    filter: Option<FragmentFilter>,
+    options: PseudoalignOptions,
+    counts: &mut EcCounts,
+    ec_map: &mut HashMap<Vec<u32>, usize>,
+) {
+    for record in batch.records() {
+        if std::env::var_os("KALLISTORS_RESET_ALL_CACHES_PER_READ").is_some() {
+            super::reset_thread_local_caches();
+        }
+        counts.reads_processed = counts.reads_processed.saturating_add(1);
+
+        let Some(mut read_ec) =
+            super::ec_for_read_bifrost(index, record.seq, strand, None, options)
+        else {
+            continue;
+        };
+        if let Some(filter) = filter
+            && !filter.single_overhang
+            && filter.fragment_length > 0
+            && let Some(best_match) = read_ec.best_match
+        {
+            read_ec.ec = super::filter_ec_by_fragment(
+                index,
+                &read_ec.ec,
+                best_match,
+                filter.fragment_length as i64,
+            );
+        }
+        if let Some(mode) = options.strand_specific {
+            let comprehensive = options.do_union || options.no_jump || index.use_shade;
+            if let Some(filtered) = super::apply_strand_filter(
+                index,
+                &read_ec,
+                mode,
+                true,
+                comprehensive,
+                &mut None,
+                b"",
+            ) {
+                read_ec.ec = filtered;
+            }
+        }
+        if read_ec.ec.is_empty() {
+            continue;
+        }
+        if let Some(bias_counts) = counts.bias.as_mut()
+            && bias_counts.total < options.max_bias as u64
+            && let Some(best_match) = read_ec.best_match
+            && let Some(hex) = super::bias_hexamer_for_match(index, best_match)
+        {
+            bias_counts.record(hex);
+        }
+
+        counts.reads_aligned = counts.reads_aligned.saturating_add(1);
+        super::add_ec_count(counts, ec_map, read_ec.ec);
+    }
+}
+
 pub fn pseudoalign_single_end_bifrost_debug_with_options<R: ReadSource>(
     index: &BifrostIndex,
     reader: &mut R,
@@ -231,6 +296,9 @@ fn pseudoalign_single_end_bifrost_inner<R: ReadSource>(
 
     while let Some(record) = reader.next_record() {
         let record = record?;
+        if std::env::var_os("KALLISTORS_RESET_ALL_CACHES_PER_READ").is_some() {
+            super::reset_thread_local_caches();
+        }
         reads_processed += 1;
 
         let mut dbg = report.as_ref().map(|_| ReadDebugState::default());

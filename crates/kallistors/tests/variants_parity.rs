@@ -1,11 +1,11 @@
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use kallistors::io::FastqReader;
 use kallistors::pseudoalign::{
-    EcCounts, build_bifrost_index, build_kmer_ec_index, pseudoalign_single_end,
+    PseudoalignOptions, Strand, build_bifrost_index, pseudoalign_paired_bifrost_with_options,
     pseudoalign_single_end_bifrost,
 };
 
@@ -33,22 +33,43 @@ fn parity_on_synthetic_variants() {
     let gc = synthesize_reads_gc_biased(&mut rng, &transcripts, 40, 20, 0.6);
     write_fastq(&gc_reads, &gc.iter().collect::<Vec<_>>()).expect("write gc reads");
 
-    assert_parity(&dataset.index_path, &read1);
-    assert_parity(&dataset.index_path, &read2);
-    assert_parity(&dataset.index_path, &gc_reads);
+    assert_kallisto_paired_parity(&dataset.index_path, &read1, &read2);
+    assert_kallisto_single_overhang_parity(&dataset.index_path, &gc_reads);
 
     let _ = fs::remove_dir_all(&tmp);
 }
 
-fn assert_parity(index: &Path, reads: &Path) {
-    let naive_index = build_kmer_ec_index(index).expect("naive index");
+fn assert_kallisto_paired_parity(index: &Path, reads1: &Path, reads2: &Path) {
     let bifrost_index = build_bifrost_index(index).expect("bifrost index");
 
-    let naive_counts = {
-        let file = File::open(reads).expect("reads file");
-        let mut reader = FastqReader::new(BufReader::new(file));
-        pseudoalign_single_end(&naive_index, &mut reader).expect("naive counts")
+    let bifrost_counts = {
+        let file1 = File::open(reads1).expect("reads1 file");
+        let file2 = File::open(reads2).expect("reads2 file");
+        let mut reader1 = FastqReader::new(BufReader::new(file1));
+        let mut reader2 = FastqReader::new(BufReader::new(file2));
+        pseudoalign_paired_bifrost_with_options(
+            &bifrost_index,
+            &mut reader1,
+            &mut reader2,
+            Strand::Unstranded,
+            PseudoalignOptions::default(),
+        )
+        .expect("paired bifrost counts")
     };
+
+    let kallisto_aligned =
+        run_kallisto_quant_paired(index, reads1, reads2).expect("kallisto synthetic paired count");
+    assert_eq!(
+        bifrost_counts.reads_aligned,
+        kallisto_aligned,
+        "bifrost/kallisto synthetic paired parity mismatch for {} and {}",
+        reads1.display(),
+        reads2.display()
+    );
+}
+
+fn assert_kallisto_single_overhang_parity(index: &Path, reads: &Path) {
+    let bifrost_index = build_bifrost_index(index).expect("bifrost index");
 
     let bifrost_counts = {
         let file = File::open(reads).expect("reads file");
@@ -56,25 +77,87 @@ fn assert_parity(index: &Path, reads: &Path) {
         pseudoalign_single_end_bifrost(&bifrost_index, &mut reader).expect("bifrost counts")
     };
 
-    assert_eq!(naive_counts.reads_processed, bifrost_counts.reads_processed);
-    let aligned_diff = naive_counts
-        .reads_aligned
-        .abs_diff(bifrost_counts.reads_aligned);
-    if aligned_diff != 0 {
-        assert!(aligned_diff <= 1, "reads_aligned drift too large");
-        return;
-    }
-    assert_eq!(normalize_ec(&naive_counts), normalize_ec(&bifrost_counts));
+    let kallisto_aligned = run_kallisto_quant_single_overhang(index, reads)
+        .expect("kallisto synthetic single-overhang count");
+    assert_eq!(
+        bifrost_counts.reads_aligned,
+        kallisto_aligned,
+        "bifrost/kallisto synthetic single-overhang parity mismatch for {}",
+        reads.display()
+    );
 }
 
-fn normalize_ec(counts: &EcCounts) -> HashMap<Vec<u32>, u32> {
-    let mut map = HashMap::new();
-    for (ec, &count) in counts.ec_list.iter().zip(counts.counts.iter()) {
-        let mut key = ec.clone();
-        key.sort_unstable();
-        map.insert(key, count);
+fn run_kallisto_quant_single_overhang(index: &Path, reads: &Path) -> Option<u64> {
+    let out_dir = temp_dir("kallistors-variants-kallisto");
+    let _ = fs::remove_dir_all(&out_dir);
+    fs::create_dir_all(&out_dir).ok()?;
+    let status = Command::new("kallisto")
+        .arg("quant")
+        .arg("--single")
+        .arg("-l")
+        .arg("100")
+        .arg("-s")
+        .arg("20")
+        .arg("--single-overhang")
+        .arg("-i")
+        .arg(index)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg(reads)
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
     }
-    map
+    let run_info = fs::read_to_string(out_dir.join("run_info.json")).ok()?;
+    let key = "\"n_pseudoaligned\"";
+    let idx = run_info.find(key)?;
+    let after = &run_info[idx + key.len()..];
+    let colon = after.find(':')?;
+    let rest = after[colon + 1..].trim_start();
+    let mut digits = String::new();
+    for c in rest.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+        } else if !digits.is_empty() {
+            break;
+        }
+    }
+    digits.parse().ok()
+}
+
+fn run_kallisto_quant_paired(index: &Path, reads1: &Path, reads2: &Path) -> Option<u64> {
+    let out_dir = temp_dir("kallistors-variants-kallisto-paired");
+    let _ = fs::remove_dir_all(&out_dir);
+    fs::create_dir_all(&out_dir).ok()?;
+    let status = Command::new("kallisto")
+        .arg("quant")
+        .arg("-i")
+        .arg(index)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg(reads1)
+        .arg(reads2)
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let run_info = fs::read_to_string(out_dir.join("run_info.json")).ok()?;
+    let key = "\"n_pseudoaligned\"";
+    let idx = run_info.find(key)?;
+    let after = &run_info[idx + key.len()..];
+    let colon = after.find(':')?;
+    let rest = after[colon + 1..].trim_start();
+    let mut digits = String::new();
+    for c in rest.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+        } else if !digits.is_empty() {
+            break;
+        }
+    }
+    digits.parse().ok()
 }
 
 fn temp_dir(prefix: &str) -> PathBuf {

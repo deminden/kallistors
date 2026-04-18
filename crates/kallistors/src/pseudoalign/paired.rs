@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
 use crate::bias::BiasCounts;
-use crate::io::ReadSource;
+use crate::io::{PackedFastqBatch, ReadSource};
 use crate::{Error, Result};
 
 use super::{
     BifrostIndex, DebugFailReason, DebugReport, EcCounts, FragmentLengthStats, KmerEcIndex,
-    PseudoalignOptions, ReadDebugState, Strand,
+    PairedTraceResult, PseudoalignOptions, ReadDebugState, Strand,
 };
 
 pub fn pseudoalign_paired_naive<R1: ReadSource, R2: ReadSource>(
@@ -31,6 +31,9 @@ pub fn pseudoalign_paired_naive<R1: ReadSource, R2: ReadSource>(
             (Some(a), Some(b)) => {
                 let a = a?;
                 let b = b?;
+                if std::env::var_os("KALLISTORS_RESET_ALL_CACHES_PER_READ").is_some() {
+                    super::reset_thread_local_caches();
+                }
                 reads_processed += 1;
                 let ec1 = ec_for_read_naive(index, &a.seq);
                 let ec2 = ec_for_read_naive(index, &b.seq);
@@ -135,6 +138,301 @@ pub fn pseudoalign_paired_bifrost_debug_with_options<R1: ReadSource, R2: ReadSou
         options,
     )?;
     Ok((counts, report))
+}
+
+pub fn trace_read_pair_bifrost(
+    index: &BifrostIndex,
+    left_seq: &[u8],
+    right_seq: &[u8],
+    strand: Strand,
+    options: PseudoalignOptions,
+) -> PairedTraceResult {
+    let mut dbg1 = ReadDebugState::default();
+    let mut dbg2 = ReadDebugState::default();
+    let mut ec1 = super::ec_for_read_bifrost(index, left_seq, strand, Some(&mut dbg1), options);
+    let mut ec2 = super::ec_for_read_bifrost(index, right_seq, strand, Some(&mut dbg2), options);
+
+    if let Some(mode) = options.strand_specific {
+        let comprehensive = options.do_union || options.no_jump || index.use_shade;
+        if let Some(read_ec) = ec1.as_mut()
+            && let Some(filtered) = super::apply_strand_filter(
+                index,
+                read_ec,
+                mode,
+                true,
+                comprehensive,
+                &mut None,
+                b"",
+            )
+        {
+            read_ec.ec = filtered;
+        }
+        if let Some(read_ec) = ec2.as_mut()
+            && let Some(filtered) = super::apply_strand_filter(
+                index,
+                read_ec,
+                mode,
+                false,
+                comprehensive,
+                &mut None,
+                b"",
+            )
+        {
+            read_ec.ec = filtered;
+        }
+    }
+
+    let mut left_reason_override = None;
+    let mut right_reason_override = None;
+    if ec1.as_ref().is_some_and(|v| v.ec.is_empty())
+        && ec1.as_ref().is_some_and(|v| !v.hard_reject_pair)
+    {
+        left_reason_override = Some(DebugFailReason::EmptyEc);
+        ec1 = None;
+    }
+    if ec2.as_ref().is_some_and(|v| v.ec.is_empty())
+        && ec2.as_ref().is_some_and(|v| !v.hard_reject_pair)
+    {
+        right_reason_override = Some(DebugFailReason::EmptyEc);
+        ec2 = None;
+    }
+
+    let hard_reject_pair = ec1.as_ref().is_some_and(|v| v.hard_reject_pair)
+        || ec2.as_ref().is_some_and(|v| v.hard_reject_pair);
+
+    let mut merged = Vec::new();
+    let mut had_offlist = false;
+    let merged_reason = if hard_reject_pair {
+        Some(DebugFailReason::IntersectionEmpty)
+    } else {
+        match (ec1.as_ref(), ec2.as_ref()) {
+            (None, None) => {
+                if left_reason_override.is_none() && right_reason_override.is_none() {
+                    left_reason_override = Some(DebugFailReason::NoKmerMatch);
+                    right_reason_override = Some(DebugFailReason::NoKmerMatch);
+                }
+                None
+            }
+            (Some(ec), None) | (None, Some(ec)) => {
+                merged.extend_from_slice(&ec.ec);
+                had_offlist = ec.had_offlist;
+                None
+            }
+            (Some(left), Some(right)) => {
+                super::intersect_sorted(&left.ec, &right.ec, &mut merged);
+                had_offlist = left.had_offlist || right.had_offlist;
+                if merged.is_empty() {
+                    Some(DebugFailReason::IntersectionEmpty)
+                } else {
+                    None
+                }
+            }
+        }
+    };
+
+    let left_before = ec1.as_ref().map(|v| v.ec.clone());
+    let right_before = ec2.as_ref().map(|v| v.ec.clone());
+    let left_trace = super::trace_result_from_debug_state(
+        index,
+        left_seq,
+        &dbg1,
+        ec1.is_some(),
+        left_before.clone(),
+        left_before.clone(),
+        left_before,
+        left_reason_override,
+    );
+    let right_trace = super::trace_result_from_debug_state(
+        index,
+        right_seq,
+        &dbg2,
+        ec2.is_some(),
+        right_before.clone(),
+        right_before.clone(),
+        right_before,
+        right_reason_override,
+    );
+
+    PairedTraceResult {
+        left: left_trace,
+        right: right_trace,
+        merged_ec: (!merged.is_empty()).then_some(merged),
+        merged_reason,
+        hard_reject_pair,
+        had_offlist,
+    }
+}
+
+pub(crate) fn pseudoalign_paired_bifrost_batch_into(
+    index: &BifrostIndex,
+    left_batch: PackedFastqBatch,
+    right_batch: PackedFastqBatch,
+    strand: Strand,
+    options: PseudoalignOptions,
+    counts: &mut EcCounts,
+    ec_map: &mut HashMap<Vec<u32>, usize>,
+) -> Result<()> {
+    if left_batch.len() != right_batch.len() {
+        return Err(Error::InvalidFormat("paired FASTQ length mismatch".into()));
+    }
+    let mut frag_stats = counts.fragment_length_stats.take().unwrap_or_default();
+    let mut frag_hist = counts
+        .fragment_length_hist
+        .take()
+        .unwrap_or_else(|| vec![0u32; super::MAX_FRAG_LEN as usize]);
+
+    for (a, b) in left_batch.records().zip(right_batch.records()) {
+        if std::env::var_os("KALLISTORS_RESET_ALL_CACHES_PER_READ").is_some() {
+            super::reset_thread_local_caches();
+        }
+        counts.reads_processed = counts.reads_processed.saturating_add(1);
+
+        let mut ec1 = super::ec_for_read_bifrost(index, a.seq, strand, None, options);
+        let mut ec2 = super::ec_for_read_bifrost(index, b.seq, strand, None, options);
+        if ec1.is_none() && ec2.is_none() {
+            continue;
+        }
+        if let Some(mode) = options.strand_specific {
+            let comprehensive = options.do_union || options.no_jump || index.use_shade;
+            if let Some(read_ec) = ec1.as_mut()
+                && let Some(filtered) = super::apply_strand_filter(
+                    index,
+                    read_ec,
+                    mode,
+                    true,
+                    comprehensive,
+                    &mut None,
+                    b"",
+                )
+            {
+                read_ec.ec = filtered;
+            }
+            if let Some(read_ec) = ec2.as_mut()
+                && let Some(filtered) = super::apply_strand_filter(
+                    index,
+                    read_ec,
+                    mode,
+                    false,
+                    comprehensive,
+                    &mut None,
+                    b"",
+                )
+            {
+                read_ec.ec = filtered;
+            }
+        }
+        if ec1.as_ref().is_some_and(|v| v.ec.is_empty())
+            && ec1.as_ref().is_some_and(|v| !v.hard_reject_pair)
+        {
+            ec1 = None;
+        }
+        if ec2.as_ref().is_some_and(|v| v.ec.is_empty())
+            && ec2.as_ref().is_some_and(|v| !v.hard_reject_pair)
+        {
+            ec2 = None;
+        }
+        if ec1.as_ref().is_some_and(|v| v.hard_reject_pair)
+            || ec2.as_ref().is_some_and(|v| v.hard_reject_pair)
+        {
+            continue;
+        }
+
+        let use_shade = index.use_shade;
+        if use_shade && options.do_union {
+            if let Some(read_ec) = ec1.as_mut() {
+                super::filter_shades_in_place(&mut read_ec.ec, &index.shade_sequences);
+            }
+            if let Some(read_ec) = ec2.as_mut() {
+                super::filter_shades_in_place(&mut read_ec.ec, &index.shade_sequences);
+            }
+        }
+
+        let mut merged = Vec::new();
+        match (ec1.as_ref(), ec2.as_ref()) {
+            (None, None) => continue,
+            (Some(ec), None) | (None, Some(ec)) => merged.extend_from_slice(&ec.ec),
+            (Some(left), Some(right)) => super::intersect_sorted(&left.ec, &right.ec, &mut merged),
+        }
+        if options.dfk_onlist
+            && (ec1.as_ref().is_some_and(|v| v.had_offlist)
+                || ec2.as_ref().is_some_and(|v| v.had_offlist))
+            && !merged.is_empty()
+            && let Some(onlist) = index.onlist.as_deref()
+        {
+            let dummy = onlist.len() as u32;
+            if merged.last().copied() != Some(dummy) {
+                merged.push(dummy);
+            }
+        }
+        if merged.is_empty() {
+            continue;
+        }
+
+        if use_shade && !merged.is_empty() {
+            let mut shade_candidates = Vec::new();
+            if let Some(read_ec) = ec1.as_ref() {
+                super::merge_sorted_unique_vec(&mut shade_candidates, &read_ec.shade_union);
+            }
+            if let Some(read_ec) = ec2.as_ref() {
+                super::merge_sorted_unique_vec(&mut shade_candidates, &read_ec.shade_union);
+            }
+            if !shade_candidates.is_empty() {
+                for shade in shade_candidates {
+                    let Some(color) = index.shade_to_color.get(shade as usize).copied().flatten()
+                    else {
+                        continue;
+                    };
+                    if merged.binary_search(&color).is_ok() {
+                        merged.push(shade);
+                    }
+                }
+                merged.sort_unstable();
+                merged.dedup();
+            }
+        }
+
+        if merged.len() == 1 {
+            let tr = merged[0];
+            let is_shade = index
+                .shade_sequences
+                .get(tr as usize)
+                .copied()
+                .unwrap_or(false);
+            if !is_shade
+                && ec1.is_some()
+                && ec2.is_some()
+                && let Some(frag_len) = estimate_fragment_length_for_pair(
+                    index,
+                    tr,
+                    ec1.as_ref().expect("checked"),
+                    ec2.as_ref().expect("checked"),
+                )
+            {
+                let idx = frag_len as usize;
+                if idx < frag_hist.len() {
+                    frag_hist[idx] = frag_hist[idx].saturating_add(1);
+                    frag_stats.add(frag_len as f64);
+                }
+            }
+        }
+
+        if let Some(bias_counts) = counts.bias.as_mut()
+            && bias_counts.total < options.max_bias as u64
+            && let Some(best_match) = ec1
+                .as_ref()
+                .and_then(|v| v.best_match)
+                .or_else(|| ec2.as_ref().and_then(|v| v.best_match))
+            && let Some(hex) = super::bias_hexamer_for_match(index, best_match)
+        {
+            bias_counts.record(hex);
+        }
+
+        counts.reads_aligned = counts.reads_aligned.saturating_add(1);
+        super::add_ec_count(counts, ec_map, merged);
+    }
+    counts.fragment_length_stats = (frag_stats.count() > 0).then_some(frag_stats);
+    counts.fragment_length_hist = counts.fragment_length_stats.as_ref().map(|_| frag_hist);
+    Ok(())
 }
 
 fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
@@ -423,24 +721,32 @@ fn estimate_fragment_length_for_pair(
     if left_match.unitig_id != right_match.unitig_id {
         return None;
     }
-    let blocks = index.ec_blocks.get(left_match.unitig_id)?;
-    let block_left = super::block_index_for_position(blocks, left_match.unitig_pos)?;
-    let block_right = super::block_index_for_position(blocks, right_match.unitig_pos)?;
+    let block_left = index
+        .flat_ec
+        .block_index_for_position(left_match.unitig_id, left_match.unitig_pos)?;
+    let block_right = index
+        .flat_ec
+        .block_index_for_position(right_match.unitig_id, right_match.unitig_pos)?;
     if block_left != block_right {
         return None;
     }
-    let (_, ub_left) = super::ec_block_at(blocks, left_match.unitig_pos as u32)?;
-    let (_, ub_right) = super::ec_block_at(blocks, right_match.unitig_pos as u32)?;
+    let (_, ub_left) = index
+        .flat_ec
+        .block_bounds(left_match.unitig_id, block_left)?;
+    let (_, ub_right) = index
+        .flat_ec
+        .block_bounds(right_match.unitig_id, block_right)?;
     if ub_left != ub_right {
         return None;
     }
     if left_match.used_revcomp == right_match.used_revcomp {
         return None;
     }
-    if !blocks
-        .get(block_left)
-        .map(|block| block.ec.binary_search(&tr).is_ok())
-        .unwrap_or(false)
+    if index
+        .flat_ec
+        .ec(left_match.unitig_id, block_left)
+        .binary_search(&tr)
+        .is_err()
     {
         return None;
     }

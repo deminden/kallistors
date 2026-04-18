@@ -1,6 +1,6 @@
 [package]
 name = "kallistors"
-version = "0.2.1"
+version = "0.2.2"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,8 +9,9 @@ repository.workspace = true
 thiserror = "2.0.17"
 croaring-sys = "4.4.1"
 boomphf = "0.6.0"
-flate2 = "1.1.2"
+flate2 = { version = "1.1.2", default-features = false, features = ["zlib-rs"] }
 rayon = "1.11.0"
+crossbeam-channel = "0.5.15"
 
 [dev-dependencies]
 tempfile = "3.24.0"

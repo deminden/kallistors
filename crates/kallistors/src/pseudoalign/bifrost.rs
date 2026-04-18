@@ -3,13 +3,15 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::ops::Index;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use rayon::ThreadPool;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
-use crate::index::bifrost::{BooPhf, encode_minimizer_rep, read_bitcontainer_values};
+use crate::index::bifrost::{BooPhf, read_bitcontainer_values};
 use crate::index::{parse_graph_section, read_block_array_blocks};
+use crate::timing::{self, Stage};
 use crate::{Error, Result};
 
 use super::ec::encode_kmer_pair;
@@ -17,6 +19,268 @@ use super::io::{read_i32_le, read_u32_le, read_u64_le};
 use super::{KMER_BYTES_CANDIDATES, KmerEcIndex, read_onlist_with_lengths};
 
 pub type KmerPosIndex = HashMap<u64, Vec<(usize, usize, bool)>>;
+
+const LOAD_BATCH_POSITIONS: usize = 1 << 20;
+const LOAD_MIN_PAR_CHUNK: usize = 1 << 14;
+
+pub(crate) struct EncodedMinimizerStore {
+    offsets: Vec<usize>,
+    values: Vec<[u8; 8]>,
+}
+
+impl EncodedMinimizerStore {
+    fn from_sequences(seqs: &[Vec<u8>], g: usize, pool: Option<&ThreadPool>) -> Self {
+        let mut offsets = Vec::with_capacity(seqs.len() + 1);
+        offsets.push(0);
+        let mut total = 0usize;
+        for seq in seqs {
+            total += minimizer_count(seq.len(), g);
+            offsets.push(total);
+        }
+
+        let build_sequential = || {
+            let mut values = vec![[0u8; 8]; total];
+            for (seq_idx, seq) in seqs.iter().enumerate() {
+                let start = offsets[seq_idx];
+                let end = offsets[seq_idx + 1];
+                if start == end {
+                    continue;
+                }
+                compute_minimizer_reps_into(seq, g, &mut values[start..end]);
+            }
+            values
+        };
+
+        let values = if let Some(pool) = pool {
+            let mut values = vec![[0u8; 8]; total];
+            let base_ptr = values.as_mut_ptr() as usize;
+            pool.install(|| {
+                (0..seqs.len())
+                    .into_par_iter()
+                    .with_min_len(2048)
+                    .for_each(|seq_idx| {
+                        let start = offsets[seq_idx];
+                        let end = offsets[seq_idx + 1];
+                        if start == end {
+                            return;
+                        }
+                        let out = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                (base_ptr as *mut [u8; 8]).add(start),
+                                end - start,
+                            )
+                        };
+                        compute_minimizer_reps_into(&seqs[seq_idx], g, out);
+                    });
+            });
+            values
+        } else {
+            build_sequential()
+        };
+
+        Self { offsets, values }
+    }
+
+    #[inline]
+    fn len(&self, seq_idx: usize) -> usize {
+        self.offsets[seq_idx + 1] - self.offsets[seq_idx]
+    }
+
+    #[inline]
+    fn get(&self, seq_idx: usize, pos: usize) -> Option<&[u8; 8]> {
+        let start = *self.offsets.get(seq_idx)?;
+        let end = *self.offsets.get(seq_idx + 1)?;
+        self.values.get(start..end)?.get(pos)
+    }
+}
+
+pub(crate) struct EncodedBaseStore {
+    offsets: Vec<usize>,
+    values: Vec<u8>,
+}
+
+impl EncodedBaseStore {
+    fn from_sequences(seqs: &[Vec<u8>], pool: Option<&ThreadPool>) -> Self {
+        let mut offsets = Vec::with_capacity(seqs.len() + 1);
+        offsets.push(0);
+        let mut total = 0usize;
+        for seq in seqs {
+            total += seq.len();
+            offsets.push(total);
+        }
+
+        let build_sequential = || {
+            let mut values = vec![0u8; total];
+            for (seq_idx, seq) in seqs.iter().enumerate() {
+                let start = offsets[seq_idx];
+                let end = offsets[seq_idx + 1];
+                if start == end {
+                    continue;
+                }
+                encode_bases_into(seq, &mut values[start..end]);
+            }
+            values
+        };
+
+        let values = if let Some(pool) = pool {
+            let mut values = vec![0u8; total];
+            let base_ptr = values.as_mut_ptr() as usize;
+            pool.install(|| {
+                (0..seqs.len())
+                    .into_par_iter()
+                    .with_min_len(2048)
+                    .for_each(|seq_idx| {
+                        let start = offsets[seq_idx];
+                        let end = offsets[seq_idx + 1];
+                        if start == end {
+                            return;
+                        }
+                        // SAFETY: each sequence owns a disjoint prefix-summed slice.
+                        let out = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                (base_ptr as *mut u8).add(start),
+                                end - start,
+                            )
+                        };
+                        encode_bases_into(&seqs[seq_idx], out);
+                    });
+            });
+            values
+        } else {
+            build_sequential()
+        };
+
+        Self { offsets, values }
+    }
+
+    #[inline]
+    pub(crate) fn encode_kmer_at(&self, seq_idx: usize, start: usize, k: usize) -> Option<u64> {
+        if k > 32 {
+            return None;
+        }
+        let seq_start = *self.offsets.get(seq_idx)?;
+        let seq_end = *self.offsets.get(seq_idx + 1)?;
+        let seq_len = seq_end.checked_sub(seq_start)?;
+        if start.checked_add(k)? > seq_len {
+            return None;
+        }
+        let mut out = 0u64;
+        for &base in &self.values[seq_start + start..seq_start + start + k] {
+            out = (out << 2) | u64::from(base);
+        }
+        Some(out)
+    }
+}
+
+pub(crate) struct EncodedUnitigs {
+    pub(crate) unitig_minimizers: EncodedMinimizerStore,
+    pub(crate) km_minimizers: EncodedMinimizerStore,
+    pub(crate) unitig_bases: EncodedBaseStore,
+    pub(crate) km_bases: EncodedBaseStore,
+}
+
+pub(crate) struct FlatEcIndex {
+    unitig_block_offsets: Vec<usize>,
+    block_lbs: Vec<u32>,
+    block_ubs: Vec<u32>,
+    block_ec_offsets: Vec<usize>,
+    ec_values: Vec<u32>,
+}
+
+impl FlatEcIndex {
+    fn new(unitig_capacity: usize) -> Self {
+        let mut unitig_block_offsets = Vec::with_capacity(unitig_capacity + 1);
+        unitig_block_offsets.push(0);
+        let block_ec_offsets = vec![0];
+        Self {
+            unitig_block_offsets,
+            block_lbs: Vec::new(),
+            block_ubs: Vec::new(),
+            block_ec_offsets,
+            ec_values: Vec::new(),
+        }
+    }
+
+    fn push_unitig_blocks(&mut self, blocks: &[crate::index::EcBlock]) {
+        for block in blocks {
+            self.block_lbs.push(block.lb);
+            self.block_ubs.push(block.ub);
+            self.ec_values.extend_from_slice(&block.ec);
+            self.block_ec_offsets.push(self.ec_values.len());
+        }
+        self.unitig_block_offsets.push(self.block_lbs.len());
+    }
+
+    pub(crate) fn block_index_for_position(&self, unitig_id: usize, pos: usize) -> Option<usize> {
+        let start = *self.unitig_block_offsets.get(unitig_id)?;
+        let end = *self.unitig_block_offsets.get(unitig_id + 1)?;
+        if start == end {
+            return None;
+        }
+
+        let pos = pos as u32;
+        let mut lo = start;
+        let mut hi = end;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let lb = self.block_lbs[mid];
+            let ub = self.block_ubs[mid];
+            if pos < lb {
+                hi = mid;
+            } else if pos >= ub {
+                lo = mid + 1;
+            } else {
+                return Some(mid - start);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn ec(&self, unitig_id: usize, block_idx: usize) -> &[u32] {
+        let global_idx = self.unitig_block_offsets[unitig_id] + block_idx;
+        &self.ec_values[self.block_ec_offsets[global_idx]..self.block_ec_offsets[global_idx + 1]]
+    }
+
+    pub(crate) fn block_bounds(&self, unitig_id: usize, block_idx: usize) -> Option<(u32, u32)> {
+        let global_idx = self.unitig_block_offsets.get(unitig_id)? + block_idx;
+        Some((
+            *self.block_lbs.get(global_idx)?,
+            *self.block_ubs.get(global_idx)?,
+        ))
+    }
+}
+
+pub(crate) struct SelectiveFallbackKmerIndex {
+    entries: HashMap<u64, Vec<(usize, u64)>>,
+}
+
+impl SelectiveFallbackKmerIndex {
+    fn build(unitigs_len: usize, km_unitigs: &[Vec<u8>], h_kmers: &[Vec<u8>]) -> Self {
+        let mut entries = HashMap::<u64, Vec<(usize, u64)>>::new();
+        for (km_id, seq) in km_unitigs.iter().enumerate() {
+            if let Some((fwd, rev)) = encode_kmer_pair(seq) {
+                entries
+                    .entry(fwd.min(rev))
+                    .or_default()
+                    .push((unitigs_len + km_id, fwd));
+            }
+        }
+        let base_h = unitigs_len + km_unitigs.len();
+        for (hk_id, seq) in h_kmers.iter().enumerate() {
+            if let Some((fwd, rev)) = encode_kmer_pair(seq) {
+                entries
+                    .entry(fwd.min(rev))
+                    .or_default()
+                    .push((base_h + hk_id, fwd));
+            }
+        }
+        Self { entries }
+    }
+
+    pub(crate) fn lookup(&self, code: u64) -> Option<&[(usize, u64)]> {
+        self.entries.get(&code).map(Vec::as_slice)
+    }
+}
 
 pub struct MinzPositionIndex {
     offsets: Vec<usize>,
@@ -73,11 +337,15 @@ pub struct BifrostIndex {
     pub h_kmers: Vec<Vec<u8>>,
     pub h_kmer_map: Option<HashMap<u64, usize>>,
     pub dlist: Option<HashSet<u64>>,
+    #[allow(dead_code)]
+    pub(crate) encoded_unitigs: EncodedUnitigs,
     pub kmer_pos_index: Option<KmerPosIndex>,
     pub kmer_index: Option<KmerEcIndex>,
     pub(crate) ec_blocks: Vec<Vec<crate::index::EcBlock>>,
+    pub(crate) flat_ec: FlatEcIndex,
     pub minz_positions: MinzPositionIndex,
     pub mphf: BooPhf,
+    pub(crate) selective_fallback_kmers: SelectiveFallbackKmerIndex,
     pub onlist: Option<Vec<bool>>,
     pub transcript_lengths: Vec<u32>,
     pub transcript_names: Vec<String>,
@@ -88,6 +356,14 @@ pub struct BifrostIndex {
 
 pub fn build_bifrost_index(path: &Path) -> Result<BifrostIndex> {
     build_bifrost_index_with_positions_threaded(path, false, 1)
+}
+
+pub fn build_bifrost_index_quant_threaded(
+    path: &Path,
+    load_positional_info: bool,
+    threads: usize,
+) -> Result<BifrostIndex> {
+    build_bifrost_index_with_positions_threaded_impl(path, load_positional_info, threads, false)
 }
 
 pub fn build_bifrost_index_with_kmer_pos(
@@ -126,14 +402,28 @@ pub fn build_bifrost_index_with_positions_threaded(
     load_positional_info: bool,
     threads: usize,
 ) -> Result<BifrostIndex> {
-    let kmer_bytes = detect_kmer_bytes(path)?;
+    build_bifrost_index_with_positions_threaded_impl(path, load_positional_info, threads, true)
+}
+
+fn build_bifrost_index_with_positions_threaded_impl(
+    path: &Path,
+    load_positional_info: bool,
+    _threads: usize,
+    store_ec_blocks: bool,
+) -> Result<BifrostIndex> {
+    let _header_timing = timing::scoped(Stage::IndexHeaderParse);
     let file = File::open(path).map_err(|_| Error::MissingFile(path.to_path_buf()))?;
     let mut reader = BufReader::new(file);
 
     let _index_version = read_u64_le(&mut reader)?;
     let dbg_size = read_u64_le(&mut reader)?;
     let dbg_start = reader.stream_position()?;
+    let graph_meta = parse_graph_section(&mut reader, dbg_start, dbg_size, &KMER_BYTES_CANDIDATES)?;
+    let kmer_bytes = graph_meta.kmer_bytes;
+    reader.seek(SeekFrom::Start(dbg_start))?;
+    drop(_header_timing);
 
+    let _graph_timing = timing::scoped(Stage::GraphDecode);
     let file_format_version = read_u64_le(&mut reader)?;
     let k = read_i32_le(&mut reader)?;
     let g = read_i32_le(&mut reader)?;
@@ -267,7 +557,12 @@ pub fn build_bifrost_index_with_positions_threaded(
     let dlist = if dlist.is_empty() { None } else { Some(dlist) };
 
     let node_count = read_u64_le(&mut reader)? as usize;
-    let mut ec_blocks = Vec::with_capacity(node_count);
+    let mut ec_blocks = if store_ec_blocks {
+        Vec::with_capacity(node_count)
+    } else {
+        Vec::new()
+    };
+    let mut flat_ec = FlatEcIndex::new(node_count);
     for _ in 0..node_count {
         reader.seek(SeekFrom::Current(k as i64))?;
         let node_size = read_u32_le(&mut reader)? as usize;
@@ -280,10 +575,14 @@ pub fn build_bifrost_index_with_positions_threaded(
         } else {
             read_block_array_blocks(&mut cur)?
         };
-        ec_blocks.push(blocks);
+        flat_ec.push_unitig_blocks(&blocks);
+        if store_ec_blocks {
+            ec_blocks.push(blocks);
+        }
     }
-
-    let load_threads = threads.max(1);
+    let selective_fallback_kmers =
+        SelectiveFallbackKmerIndex::build(unitigs.len(), &km_unitigs, &h_kmers);
+    let load_threads = _threads.max(1);
     let rayon_pool = if load_threads > 1 {
         Some(
             ThreadPoolBuilder::new()
@@ -294,25 +593,31 @@ pub fn build_bifrost_index_with_positions_threaded(
     } else {
         None
     };
+    let encoded_unitigs = precompute_encoded_unitigs(&unitigs, &km_unitigs, g, rayon_pool.as_ref());
+
     let mut minz_counts = vec![0usize; hmap_min_unitigs_sz];
+    drop(_graph_timing);
+    let _count_timing = timing::scoped(Stage::MinimizerCountPass);
     populate_unitig_minimizer_counts(
         &mut minz_counts,
         &bmp_unitigs,
-        &unitigs,
-        g,
+        &encoded_unitigs,
         &mphf,
         rayon_pool.as_ref(),
     );
 
     let km_glen = k.saturating_sub(g) + 1;
     let kmer_load_ctx = KmerLoadContext {
-        km_unitigs: &km_unitigs,
-        g,
+        km_minimizers: &encoded_unitigs.km_minimizers,
         km_glen,
         mphf: &mphf,
-        pool: rayon_pool.as_ref(),
     };
-    populate_kmer_minimizer_counts(&mut minz_counts, &bmp_km, &kmer_load_ctx);
+    populate_kmer_minimizer_counts(
+        &mut minz_counts,
+        &bmp_km,
+        &kmer_load_ctx,
+        rayon_pool.as_ref(),
+    );
 
     for (minz, _pos_id) in special_minz.iter().copied() {
         let bytes = minz.to_le_bytes();
@@ -323,12 +628,13 @@ pub fn build_bifrost_index_with_positions_threaded(
 
     let mut minz_positions = MinzPositionIndex::from_counts(minz_counts);
     let mut minz_cursors = minz_positions.cursors();
+    drop(_count_timing);
+    let _fill_timing = timing::scoped(Stage::MinimizerFillPass);
     populate_unitig_minimizer_storage(
         &mut minz_positions,
         &mut minz_cursors,
         &bmp_unitigs,
-        &unitigs,
-        g,
+        &encoded_unitigs,
         &mphf,
         rayon_pool.as_ref(),
     );
@@ -337,6 +643,7 @@ pub fn build_bifrost_index_with_positions_threaded(
         &mut minz_cursors,
         &bmp_km,
         &kmer_load_ctx,
+        rayon_pool.as_ref(),
     );
 
     for (minz, pos_id) in special_minz {
@@ -356,11 +663,14 @@ pub fn build_bifrost_index_with_positions_threaded(
         h_kmers,
         h_kmer_map,
         dlist,
+        encoded_unitigs,
         kmer_pos_index: None,
         kmer_index: None,
         ec_blocks,
+        flat_ec,
         minz_positions,
         mphf,
+        selective_fallback_kmers,
         onlist: onlist.onlist,
         transcript_lengths: onlist.lengths,
         transcript_names: onlist.names,
@@ -370,157 +680,273 @@ pub fn build_bifrost_index_with_positions_threaded(
     })
 }
 
-const LOAD_BATCH_SIZE: usize = 1 << 20;
-
 struct KmerLoadContext<'a> {
-    km_unitigs: &'a [Vec<u8>],
-    g: usize,
+    km_minimizers: &'a EncodedMinimizerStore,
     km_glen: usize,
     mphf: &'a BooPhf,
-    pool: Option<&'a ThreadPool>,
 }
 
-fn batch_capacity(len: usize) -> usize {
-    len.clamp(1, LOAD_BATCH_SIZE)
+fn base_code(base: u8) -> Option<u64> {
+    match base {
+        b'A' | b'a' => Some(0),
+        b'C' | b'c' => Some(1),
+        b'G' | b'g' => Some(2),
+        b'T' | b't' => Some(3),
+        _ => None,
+    }
+}
+
+fn encode_word_pair(seq: &[u8]) -> Option<(u64, u64)> {
+    let mut fwd = 0u64;
+    for (i, &base) in seq.iter().enumerate() {
+        let code = base_code(base)?;
+        fwd |= code << (62 - ((i & 0x1f) << 1));
+    }
+
+    let mut rev = 0u64;
+    for (i, &base) in seq.iter().rev().enumerate() {
+        let code = base_code(base)?;
+        rev |= (3 - code) << (62 - ((i & 0x1f) << 1));
+    }
+    Some((fwd, rev))
+}
+
+#[inline]
+fn minimizer_count(seq_len: usize, g: usize) -> usize {
+    if g == 0 || seq_len < g {
+        0
+    } else {
+        seq_len - g + 1
+    }
+}
+
+fn compute_minimizer_reps_into(seq: &[u8], g: usize, out: &mut [[u8; 8]]) {
+    if out.is_empty() {
+        return;
+    }
+
+    debug_assert_eq!(out.len(), minimizer_count(seq.len(), g));
+
+    let Some((mut fwd, mut rev)) = encode_word_pair(&seq[..g]) else {
+        return;
+    };
+    let tail_shift = 64usize.saturating_sub(g * 2);
+    let high_mask = if g == 32 {
+        u64::MAX
+    } else {
+        (!0u64) << tail_shift
+    };
+
+    out[0] = fwd.min(rev).to_le_bytes();
+
+    for (dst, &base) in out.iter_mut().skip(1).zip(&seq[g..]) {
+        let Some(code) = base_code(base) else {
+            return;
+        };
+        let comp = 3 - code;
+        fwd = ((fwd << 2) & high_mask) | (code << tail_shift);
+        rev = ((rev >> 2) & high_mask) | (comp << 62);
+        *dst = fwd.min(rev).to_le_bytes();
+    }
+}
+
+fn encode_bases_into(seq: &[u8], out: &mut [u8]) {
+    debug_assert_eq!(seq.len(), out.len());
+    for (src, dst) in seq.iter().zip(out.iter_mut()) {
+        *dst = match *src {
+            b'A' | b'a' => 0,
+            b'C' | b'c' => 1,
+            b'G' | b'g' => 2,
+            b'T' | b't' => 3,
+            _ => 0,
+        };
+    }
+}
+
+fn precompute_encoded_unitigs(
+    unitigs: &[Vec<u8>],
+    km_unitigs: &[Vec<u8>],
+    g: usize,
+    pool: Option<&ThreadPool>,
+) -> EncodedUnitigs {
+    EncodedUnitigs {
+        unitig_minimizers: EncodedMinimizerStore::from_sequences(unitigs, g, pool),
+        km_minimizers: EncodedMinimizerStore::from_sequences(km_unitigs, g, pool),
+        unitig_bases: EncodedBaseStore::from_sequences(unitigs, pool),
+        km_bases: EncodedBaseStore::from_sequences(km_unitigs, pool),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct UnitigBlockState {
+    unitig_id: usize,
+    total_unitig_len: u64,
+    current_unitig_len: u64,
+}
+
+fn advance_unitig_state(state: &mut UnitigBlockState, encoded_unitigs: &EncodedUnitigs, pos: u64) {
+    while pos >= state.total_unitig_len + state.current_unitig_len {
+        state.unitig_id += 1;
+        state.total_unitig_len += state.current_unitig_len;
+        state.current_unitig_len = encoded_unitigs.unitig_minimizers.len(state.unitig_id) as u64;
+    }
+}
+
+fn precompute_unitig_block_states(
+    bmp_unitigs: &[Vec<u32>],
+    encoded_unitigs: &EncodedUnitigs,
+) -> Vec<UnitigBlockState> {
+    let mut out = Vec::with_capacity(bmp_unitigs.len());
+    if encoded_unitigs.unitig_minimizers.offsets.len() <= 1 {
+        return out;
+    }
+
+    let mut state = UnitigBlockState {
+        unitig_id: 0,
+        total_unitig_len: 0,
+        current_unitig_len: encoded_unitigs.unitig_minimizers.len(0) as u64,
+    };
+    for (i, bitmap) in bmp_unitigs.iter().enumerate() {
+        let base = (i as u64) << 32;
+        advance_unitig_state(&mut state, encoded_unitigs, base);
+        out.push(state);
+        if let Some(&last_pos) = bitmap.last() {
+            advance_unitig_state(&mut state, encoded_unitigs, base + last_pos as u64);
+        }
+    }
+    out
 }
 
 fn populate_unitig_minimizer_counts(
     minz_counts: &mut [usize],
     bmp_unitigs: &[Vec<u32>],
-    unitigs: &[Vec<u8>],
-    g: usize,
+    encoded_unitigs: &EncodedUnitigs,
     mphf: &BooPhf,
     pool: Option<&ThreadPool>,
 ) {
-    if bmp_unitigs.is_empty() || unitigs.is_empty() {
+    if bmp_unitigs.is_empty() || encoded_unitigs.unitig_minimizers.offsets.len() <= 1 {
         return;
     }
 
-    let mut unitig_id = 0usize;
-    let mut total_unitig_len = 0u64;
-    let mut current_unitig_len = unitigs[0].len().saturating_sub(g) as u64 + 1;
+    let Some(pool) = pool else {
+        let mut state = UnitigBlockState {
+            unitig_id: 0,
+            total_unitig_len: 0,
+            current_unitig_len: encoded_unitigs.unitig_minimizers.len(0) as u64,
+        };
+        for (i, bitmap) in bmp_unitigs.iter().enumerate() {
+            let base = (i as u64) << 32;
+            for &pos_bmp in bitmap {
+                let pos = base + pos_bmp as u64;
+                advance_unitig_state(&mut state, encoded_unitigs, pos);
+                let rel = (pos - state.total_unitig_len) as usize;
+                if let Some(bytes) = encoded_unitigs.unitig_minimizers.get(state.unitig_id, rel)
+                    && let Some(idx) = mphf.lookup(bytes)
+                {
+                    minz_counts[idx as usize] += 1;
+                }
+            }
+        }
+        return;
+    };
+
+    let states = precompute_unitig_block_states(bmp_unitigs, encoded_unitigs);
+    let mut batch_pos_ids = Vec::with_capacity(LOAD_BATCH_POSITIONS);
+    let mut flush_batch = |batch_pos_ids: &mut Vec<u64>| {
+        if batch_pos_ids.is_empty() {
+            return;
+        }
+        let grouped = collect_unitig_batch_counts(batch_pos_ids, encoded_unitigs, mphf, pool);
+        merge_count_batches(minz_counts, grouped);
+        batch_pos_ids.clear();
+    };
 
     for (i, bitmap) in bmp_unitigs.iter().enumerate() {
+        let mut state = states[i];
         let base = (i as u64) << 32;
-        let mut batch = Vec::with_capacity(batch_capacity(bitmap.len()));
         for &pos_bmp in bitmap {
             let pos = base + pos_bmp as u64;
-            while pos >= total_unitig_len + current_unitig_len {
-                unitig_id += 1;
-                total_unitig_len += current_unitig_len;
-                current_unitig_len = unitigs[unitig_id].len().saturating_sub(g) as u64 + 1;
-            }
-            let rel = pos - total_unitig_len;
-            batch.push(((unitig_id as u64) << 32) | rel);
-            if batch.len() >= LOAD_BATCH_SIZE {
-                flush_unitig_count_batch(minz_counts, &batch, unitigs, g, mphf, pool);
-                batch.clear();
+            advance_unitig_state(&mut state, encoded_unitigs, pos);
+            let rel = (pos - state.total_unitig_len) as usize;
+            batch_pos_ids.push(((state.unitig_id as u64) << 32) | rel as u64);
+            if batch_pos_ids.len() >= LOAD_BATCH_POSITIONS {
+                flush_batch(&mut batch_pos_ids);
             }
         }
-        if !batch.is_empty() {
-            flush_unitig_count_batch(minz_counts, &batch, unitigs, g, mphf, pool);
-        }
     }
-}
-
-fn flush_unitig_count_batch(
-    minz_counts: &mut [usize],
-    batch: &[u64],
-    unitigs: &[Vec<u8>],
-    g: usize,
-    mphf: &BooPhf,
-    pool: Option<&ThreadPool>,
-) {
-    let pairs = parallel_pairs(batch, pool, |pos_id| {
-        let pos_id = *pos_id;
-        let unitig_id = (pos_id >> 32) as usize;
-        let rel = (pos_id & 0xffff_ffff) as usize;
-        let seq = &unitigs[unitig_id];
-        encode_minimizer_rep(&seq[rel..rel + g])
-            .and_then(|bytes| mphf.lookup(&bytes))
-            .map(|idx| (idx as usize, pos_id))
-    });
-    for (idx, _) in pairs {
-        minz_counts[idx] += 1;
-    }
+    flush_batch(&mut batch_pos_ids);
 }
 
 fn populate_unitig_minimizer_storage(
     minz_positions: &mut MinzPositionIndex,
     minz_cursors: &mut [usize],
     bmp_unitigs: &[Vec<u32>],
-    unitigs: &[Vec<u8>],
-    g: usize,
+    encoded_unitigs: &EncodedUnitigs,
     mphf: &BooPhf,
     pool: Option<&ThreadPool>,
 ) {
-    if bmp_unitigs.is_empty() || unitigs.is_empty() {
+    if bmp_unitigs.is_empty() || encoded_unitigs.unitig_minimizers.offsets.len() <= 1 {
         return;
     }
 
-    let mut unitig_id = 0usize;
-    let mut total_unitig_len = 0u64;
-    let mut current_unitig_len = unitigs[0].len().saturating_sub(g) as u64 + 1;
-
-    for (i, bitmap) in bmp_unitigs.iter().enumerate() {
-        let base = (i as u64) << 32;
-        let mut batch = Vec::with_capacity(batch_capacity(bitmap.len()));
-        for &pos_bmp in bitmap {
-            let pos = base + pos_bmp as u64;
-            while pos >= total_unitig_len + current_unitig_len {
-                unitig_id += 1;
-                total_unitig_len += current_unitig_len;
-                current_unitig_len = unitigs[unitig_id].len().saturating_sub(g) as u64 + 1;
-            }
-            let rel = pos - total_unitig_len;
-            batch.push(((unitig_id as u64) << 32) | rel);
-            if batch.len() >= LOAD_BATCH_SIZE {
-                flush_unitig_storage_batch(
-                    minz_positions,
-                    minz_cursors,
-                    &batch,
-                    unitigs,
-                    g,
-                    mphf,
-                    pool,
-                );
-                batch.clear();
+    let Some(pool) = pool else {
+        let mut state = UnitigBlockState {
+            unitig_id: 0,
+            total_unitig_len: 0,
+            current_unitig_len: encoded_unitigs.unitig_minimizers.len(0) as u64,
+        };
+        for (i, bitmap) in bmp_unitigs.iter().enumerate() {
+            let base = (i as u64) << 32;
+            for &pos_bmp in bitmap {
+                let pos = base + pos_bmp as u64;
+                advance_unitig_state(&mut state, encoded_unitigs, pos);
+                let rel = (pos - state.total_unitig_len) as usize;
+                if let Some(bytes) = encoded_unitigs.unitig_minimizers.get(state.unitig_id, rel)
+                    && let Some(idx) = mphf.lookup(bytes)
+                {
+                    let pos_id = ((state.unitig_id as u64) << 32) | rel as u64;
+                    minz_positions.push_at(minz_cursors, idx as usize, pos_id);
+                }
             }
         }
-        if !batch.is_empty() {
-            flush_unitig_storage_batch(
-                minz_positions,
-                minz_cursors,
-                &batch,
-                unitigs,
-                g,
-                mphf,
-                pool,
-            );
-        }
-    }
-}
+        return;
+    };
 
-fn flush_unitig_storage_batch(
-    minz_positions: &mut MinzPositionIndex,
-    minz_cursors: &mut [usize],
-    batch: &[u64],
-    unitigs: &[Vec<u8>],
-    g: usize,
-    mphf: &BooPhf,
-    pool: Option<&ThreadPool>,
-) {
-    let pairs = parallel_pairs(batch, pool, |pos_id| {
-        let pos_id = *pos_id;
-        let unitig_id = (pos_id >> 32) as usize;
-        let rel = (pos_id & 0xffff_ffff) as usize;
-        let seq = &unitigs[unitig_id];
-        encode_minimizer_rep(&seq[rel..rel + g])
-            .and_then(|bytes| mphf.lookup(&bytes))
-            .map(|idx| (idx as usize, pos_id))
+    let states = precompute_unitig_block_states(bmp_unitigs, encoded_unitigs);
+    let cursors = minz_cursors
+        .iter()
+        .copied()
+        .map(AtomicUsize::new)
+        .collect::<Vec<_>>();
+    let values = minz_positions
+        .values
+        .iter()
+        .copied()
+        .map(AtomicU64::new)
+        .collect::<Vec<_>>();
+    pool.install(|| {
+        bmp_unitigs.par_iter().enumerate().for_each(|(i, bitmap)| {
+            let mut state = states[i];
+            let base = (i as u64) << 32;
+            for &pos_bmp in bitmap {
+                let pos = base + pos_bmp as u64;
+                advance_unitig_state(&mut state, encoded_unitigs, pos);
+                let rel = (pos - state.total_unitig_len) as usize;
+                if let Some(bytes) = encoded_unitigs.unitig_minimizers.get(state.unitig_id, rel)
+                    && let Some(idx) = mphf.lookup(bytes)
+                {
+                    let pos_id = ((state.unitig_id as u64) << 32) | rel as u64;
+                    let slot = cursors[idx as usize].fetch_add(1, Ordering::Relaxed);
+                    values[slot].store(pos_id, Ordering::Relaxed);
+                }
+            }
+        });
     });
-    for (idx, pos_id) in pairs {
-        minz_positions.push_at(minz_cursors, idx, pos_id);
+    for (dst, src) in minz_positions.values.iter_mut().zip(values) {
+        *dst = src.into_inner();
+    }
+    for (dst, src) in minz_cursors.iter_mut().zip(cursors) {
+        *dst = src.into_inner();
     }
 }
 
@@ -528,39 +954,48 @@ fn populate_kmer_minimizer_counts(
     minz_counts: &mut [usize],
     bmp_km: &[Vec<u32>],
     ctx: &KmerLoadContext<'_>,
+    pool: Option<&ThreadPool>,
 ) {
-    for (i, bitmap) in bmp_km.iter().enumerate() {
-        let base = (i as u64) << 32;
-        let mut batch = Vec::with_capacity(batch_capacity(bitmap.len()));
-        for &pos_bmp in bitmap {
-            batch.push(base + pos_bmp as u64);
-            if batch.len() >= LOAD_BATCH_SIZE {
-                flush_kmer_count_batch(minz_counts, &batch, ctx);
-                batch.clear();
+    let Some(pool) = pool else {
+        for (i, bitmap) in bmp_km.iter().enumerate() {
+            let base = (i as u64) << 32;
+            for &pos_bmp in bitmap {
+                let pos = base + pos_bmp as u64;
+                let km_id = (pos / ctx.km_glen as u64) as usize;
+                let km_pos = (pos % ctx.km_glen as u64) as usize;
+                if let Some(bytes) = ctx.km_minimizers.get(km_id, km_pos)
+                    && let Some(idx) = ctx.mphf.lookup(bytes)
+                {
+                    minz_counts[idx as usize] += 1;
+                }
             }
         }
-        if !batch.is_empty() {
-            flush_kmer_count_batch(minz_counts, &batch, ctx);
-        }
-    }
-}
+        return;
+    };
 
-fn flush_kmer_count_batch(minz_counts: &mut [usize], batch: &[u64], ctx: &KmerLoadContext<'_>) {
-    let pairs = parallel_pairs(batch, ctx.pool, |pos| {
-        let pos = *pos;
-        let km_id = (pos / ctx.km_glen as u64) as usize;
-        let km_pos = (pos % ctx.km_glen as u64) as usize;
-        if km_id >= ctx.km_unitigs.len() || km_pos + ctx.g > ctx.km_unitigs[km_id].len() {
-            return None;
+    let mut batch_pos_ids = Vec::with_capacity(LOAD_BATCH_POSITIONS);
+    let mut flush_batch = |batch_pos_ids: &mut Vec<u64>| {
+        if batch_pos_ids.is_empty() {
+            return;
         }
-        let pos_id = ((km_id as u64) << 32) | 0x8000_0000 | (km_pos as u64);
-        encode_minimizer_rep(&ctx.km_unitigs[km_id][km_pos..km_pos + ctx.g])
-            .and_then(|bytes| ctx.mphf.lookup(&bytes))
-            .map(|idx| (idx as usize, pos_id))
-    });
-    for (idx, _) in pairs {
-        minz_counts[idx] += 1;
+        let grouped = collect_kmer_batch_counts(batch_pos_ids, ctx, pool);
+        merge_count_batches(minz_counts, grouped);
+        batch_pos_ids.clear();
+    };
+
+    for (i, bitmap) in bmp_km.iter().enumerate() {
+        let base = (i as u64) << 32;
+        for &pos_bmp in bitmap {
+            let pos = base + pos_bmp as u64;
+            let km_id = (pos / ctx.km_glen as u64) as usize;
+            let km_pos = (pos % ctx.km_glen as u64) as usize;
+            batch_pos_ids.push(((km_id as u64) << 32) | 0x8000_0000 | km_pos as u64);
+            if batch_pos_ids.len() >= LOAD_BATCH_POSITIONS {
+                flush_batch(&mut batch_pos_ids);
+            }
+        }
     }
+    flush_batch(&mut batch_pos_ids);
 }
 
 fn populate_kmer_minimizer_storage(
@@ -568,62 +1003,137 @@ fn populate_kmer_minimizer_storage(
     minz_cursors: &mut [usize],
     bmp_km: &[Vec<u32>],
     ctx: &KmerLoadContext<'_>,
+    pool: Option<&ThreadPool>,
 ) {
-    for (i, bitmap) in bmp_km.iter().enumerate() {
-        let base = (i as u64) << 32;
-        let mut batch = Vec::with_capacity(batch_capacity(bitmap.len()));
-        for &pos_bmp in bitmap {
-            batch.push(base + pos_bmp as u64);
-            if batch.len() >= LOAD_BATCH_SIZE {
-                flush_kmer_storage_batch(minz_positions, minz_cursors, &batch, ctx);
-                batch.clear();
+    let Some(pool) = pool else {
+        for (i, bitmap) in bmp_km.iter().enumerate() {
+            let base = (i as u64) << 32;
+            for &pos_bmp in bitmap {
+                let pos = base + pos_bmp as u64;
+                let km_id = (pos / ctx.km_glen as u64) as usize;
+                let km_pos = (pos % ctx.km_glen as u64) as usize;
+                if let Some(bytes) = ctx.km_minimizers.get(km_id, km_pos)
+                    && let Some(idx) = ctx.mphf.lookup(bytes)
+                {
+                    let pos_id = ((km_id as u64) << 32) | 0x8000_0000 | km_pos as u64;
+                    minz_positions.push_at(minz_cursors, idx as usize, pos_id);
+                }
             }
         }
-        if !batch.is_empty() {
-            flush_kmer_storage_batch(minz_positions, minz_cursors, &batch, ctx);
-        }
-    }
-}
+        return;
+    };
 
-fn flush_kmer_storage_batch(
-    minz_positions: &mut MinzPositionIndex,
-    minz_cursors: &mut [usize],
-    batch: &[u64],
-    ctx: &KmerLoadContext<'_>,
-) {
-    let pairs = parallel_pairs(batch, ctx.pool, |pos| {
-        let pos = *pos;
-        let km_id = (pos / ctx.km_glen as u64) as usize;
-        let km_pos = (pos % ctx.km_glen as u64) as usize;
-        if km_id >= ctx.km_unitigs.len() || km_pos + ctx.g > ctx.km_unitigs[km_id].len() {
-            return None;
-        }
-        let pos_id = ((km_id as u64) << 32) | 0x8000_0000 | (km_pos as u64);
-        encode_minimizer_rep(&ctx.km_unitigs[km_id][km_pos..km_pos + ctx.g])
-            .and_then(|bytes| ctx.mphf.lookup(&bytes))
-            .map(|idx| (idx as usize, pos_id))
+    let cursors = minz_cursors
+        .iter()
+        .copied()
+        .map(AtomicUsize::new)
+        .collect::<Vec<_>>();
+    let values = minz_positions
+        .values
+        .iter()
+        .copied()
+        .map(AtomicU64::new)
+        .collect::<Vec<_>>();
+    pool.install(|| {
+        bmp_km.par_iter().enumerate().for_each(|(i, bitmap)| {
+            let base = (i as u64) << 32;
+            for &pos_bmp in bitmap {
+                let pos = base + pos_bmp as u64;
+                let km_id = (pos / ctx.km_glen as u64) as usize;
+                let km_pos = (pos % ctx.km_glen as u64) as usize;
+                if let Some(bytes) = ctx.km_minimizers.get(km_id, km_pos)
+                    && let Some(idx) = ctx.mphf.lookup(bytes)
+                {
+                    let pos_id = ((km_id as u64) << 32) | 0x8000_0000 | km_pos as u64;
+                    let slot = cursors[idx as usize].fetch_add(1, Ordering::Relaxed);
+                    values[slot].store(pos_id, Ordering::Relaxed);
+                }
+            }
+        });
     });
-    for (idx, pos_id) in pairs {
-        minz_positions.push_at(minz_cursors, idx, pos_id);
+    for (dst, src) in minz_positions.values.iter_mut().zip(values) {
+        *dst = src.into_inner();
+    }
+    for (dst, src) in minz_cursors.iter_mut().zip(cursors) {
+        *dst = src.into_inner();
     }
 }
 
-fn parallel_pairs<T, F>(items: &[T], pool: Option<&ThreadPool>, map: F) -> Vec<(usize, u64)>
-where
-    T: Sync + Send,
-    F: Fn(&T) -> Option<(usize, u64)> + Sync + Send,
-{
-    if pool.is_none() || items.len() < 4096 {
-        return items.iter().filter_map(map).collect();
-    }
-
-    pool.expect("checked above").install(|| {
-        items
-            .par_iter()
-            .with_min_len(4096)
-            .filter_map(map)
+fn collect_unitig_batch_counts(
+    pos_ids: &[u64],
+    encoded_unitigs: &EncodedUnitigs,
+    mphf: &BooPhf,
+    pool: &ThreadPool,
+) -> Vec<Vec<usize>> {
+    let chunk_len =
+        (pos_ids.len() / (pool.current_num_threads() * 4).max(1)).max(LOAD_MIN_PAR_CHUNK);
+    pool.install(|| {
+        pos_ids
+            .par_chunks(chunk_len)
+            .map(|chunk| {
+                let mut indices = Vec::with_capacity(chunk.len());
+                for &pos_id in chunk {
+                    let unitig_id = (pos_id >> 32) as usize;
+                    let rel = (pos_id & 0xffff_ffff) as usize;
+                    if let Some(bytes) = encoded_unitigs.unitig_minimizers.get(unitig_id, rel)
+                        && let Some(idx) = mphf.lookup(bytes)
+                    {
+                        indices.push(idx as usize);
+                    }
+                }
+                indices.sort_unstable();
+                indices
+            })
             .collect()
     })
+}
+
+fn collect_kmer_batch_counts(
+    pos_ids: &[u64],
+    ctx: &KmerLoadContext<'_>,
+    pool: &ThreadPool,
+) -> Vec<Vec<usize>> {
+    let chunk_len =
+        (pos_ids.len() / (pool.current_num_threads() * 4).max(1)).max(LOAD_MIN_PAR_CHUNK);
+    pool.install(|| {
+        pos_ids
+            .par_chunks(chunk_len)
+            .map(|chunk| {
+                let mut indices = Vec::with_capacity(chunk.len());
+                for &pos_id in chunk {
+                    let km_id = (pos_id >> 32) as usize;
+                    let km_pos = (pos_id & 0x7fff_ffff) as usize;
+                    if let Some(bytes) = ctx.km_minimizers.get(km_id, km_pos)
+                        && let Some(idx) = ctx.mphf.lookup(bytes)
+                    {
+                        indices.push(idx as usize);
+                    }
+                }
+                indices.sort_unstable();
+                indices
+            })
+            .collect()
+    })
+}
+
+fn merge_count_batches(minz_counts: &mut [usize], grouped: Vec<Vec<usize>>) {
+    for indices in grouped {
+        let mut iter = indices.into_iter();
+        let Some(mut idx) = iter.next() else {
+            continue;
+        };
+        let mut count = 1usize;
+        for next_idx in iter {
+            if next_idx == idx {
+                count += 1;
+            } else {
+                minz_counts[idx] += count;
+                idx = next_idx;
+                count = 1;
+            }
+        }
+        minz_counts[idx] += count;
+    }
 }
 
 fn build_kmer_pos_index(index: &BifrostIndex) -> KmerPosIndex {
@@ -669,21 +1179,6 @@ fn build_kmer_pos_index(index: &BifrostIndex) -> KmerPosIndex {
         }
     }
     map
-}
-
-fn detect_kmer_bytes(path: &Path) -> Result<usize> {
-    let file = File::open(path).map_err(|_| Error::MissingFile(path.to_path_buf()))?;
-    let mut reader = BufReader::new(file);
-
-    let _index_version = read_u64_le(&mut reader)?;
-    let dbg_size = read_u64_le(&mut reader)?;
-    if dbg_size == 0 {
-        return Err(Error::InvalidFormat("missing graph section".into()));
-    }
-
-    let dbg_start = reader.stream_position()?;
-    let meta = parse_graph_section(&mut reader, dbg_start, dbg_size, &KMER_BYTES_CANDIDATES)?;
-    Ok(meta.kmer_bytes)
 }
 
 pub(super) fn read_unitig_sequences<R: Read + Seek>(

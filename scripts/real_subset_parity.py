@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -80,6 +82,22 @@ def run_command(cmd: List[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, text=True, capture_output=True, check=False)
 
 
+def run_command_env(cmd: List[str], env: Dict[str, str]) -> subprocess.CompletedProcess[str]:
+    merged = os.environ.copy()
+    merged.update(env)
+    return subprocess.run(cmd, text=True, capture_output=True, check=False, env=merged)
+
+
+def parse_env_assignments(values: List[str]) -> Dict[str, str]:
+    env: Dict[str, str] = {}
+    for value in values:
+        if "=" not in value:
+            raise argparse.ArgumentTypeError(f"invalid --fast-env assignment: {value}")
+        key, raw = value.split("=", 1)
+        env[key.strip()] = raw.strip()
+    return env
+
+
 def find_first_mismatch(
     kallisto_bin: Path,
     kallistors_bin: Path,
@@ -151,9 +169,52 @@ def find_first_mismatch(
 
 
 def gzip_open_text(path: Path):
-    import gzip
-
     return gzip.open(path, "rt", encoding="utf-8", errors="ignore")
+
+
+def collect_headers(path: Path) -> List[str]:
+    headers: List[str] = []
+    with gzip_open_text(path) as handle:
+        while True:
+            header = handle.readline()
+            if not header:
+                break
+            seq = handle.readline()
+            plus = handle.readline()
+            qual = handle.readline()
+            if not seq or not plus or not qual:
+                break
+            headers.append(header.strip().split()[0].lstrip("@"))
+    return headers
+
+
+def extract_pair_subset(src1: Path, src2: Path, header: str, out1: Path, out2: Path) -> None:
+    with gzip_open_text(src1) as handle1, gzip_open_text(src2) as handle2:
+        with gzip.open(out1, "wt", encoding="utf-8") as dst1, gzip.open(
+            out2, "wt", encoding="utf-8"
+        ) as dst2:
+            while True:
+                h1 = handle1.readline()
+                h2 = handle2.readline()
+                if not h1 or not h2:
+                    break
+                s1, p1, q1 = handle1.readline(), handle1.readline(), handle1.readline()
+                s2, p2, q2 = handle2.readline(), handle2.readline(), handle2.readline()
+                if not all([s1, p1, q1, s2, p2, q2]):
+                    break
+                key1 = h1.strip().split()[0].lstrip("@")
+                key2 = h2.strip().split()[0].lstrip("@")
+                if key1 == header and key2 == header:
+                    dst1.write(h1)
+                    dst1.write(s1)
+                    dst1.write(p1)
+                    dst1.write(q1)
+                    dst2.write(h2)
+                    dst2.write(s2)
+                    dst2.write(p2)
+                    dst2.write(q2)
+                    return
+    raise SystemExit(f"failed to extract paired read {header}")
 
 
 def main() -> None:
@@ -167,6 +228,22 @@ def main() -> None:
     parser.add_argument("--kallisto-bin", default="./kallisto_src/build/src/kallisto")
     parser.add_argument("--kallistors-bin", default="./target/release/kallistors-cli")
     parser.add_argument("--report", default="data/subsets/parity_report.tsv")
+    parser.add_argument(
+        "--fast-env",
+        action="append",
+        default=[],
+        help="environment assignment for fast branch, e.g. KALLISTORS_FAST_DELTA_BOUNDED_INCREMENTAL_SCAN=1",
+    )
+    parser.add_argument(
+        "--compare-out",
+        default="data/subsets/fast_trace_compare.tsv",
+        help="trace-compare report for the first mismatched subset/read",
+    )
+    parser.add_argument(
+        "--kallisto-trace-out",
+        default="data/subsets/fast_kallisto_ec_trace.tsv",
+        help="instrumented kallisto ec-trace for the first mismatched pair",
+    )
     args = parser.parse_args()
 
     kallisto_bin = Path(args.kallisto_bin)
@@ -185,6 +262,8 @@ def main() -> None:
 
     rows = []
     mismatch_found = False
+    first_mismatch_inputs: Tuple[int, Path, Path] | None = None
+    fast_env = parse_env_assignments(args.fast_env)
 
     for reads_n in args.sizes:
         mate1 = subset_dir / f"real_mate1_n{reads_n}.fastq.gz"
@@ -237,7 +316,7 @@ def main() -> None:
             k_result = run_command(kallisto_cmd)
             if k_result.returncode != 0:
                 raise SystemExit(f"kallisto failed for n={reads_n}: {k_result.stderr}")
-            o_result = run_command(ours_cmd)
+            o_result = run_command_env(ours_cmd, fast_env) if fast_env else run_command(ours_cmd)
             if o_result.returncode != 0:
                 raise SystemExit(f"kallistors failed for n={reads_n}: {o_result.stderr}")
 
@@ -271,6 +350,8 @@ def main() -> None:
                 }
             )
             mismatch_found = mismatch_found or not run_info_match
+            if not run_info_match and first_mismatch_inputs is None:
+                first_mismatch_inputs = (reads_n, mate1, mate2)
 
     with report_path.open("w", encoding="utf-8", newline="") as handle:
         fieldnames = list(rows[0].keys()) if rows else []
@@ -287,6 +368,84 @@ def main() -> None:
         )
 
     if mismatch_found:
+        if first_mismatch_inputs and args.mode == "paired":
+            reads_n, mate1, mate2 = first_mismatch_inputs
+            compare_out = Path(args.compare_out)
+            compare_out.parent.mkdir(parents=True, exist_ok=True)
+            headers = collect_headers(mate1)
+            with tempfile.TemporaryDirectory(prefix="kallistors-fast-compare-") as tmp:
+                tmp_path = Path(tmp)
+                read_list = tmp_path / "reads.txt"
+                read_list.write_text("\n".join(headers) + "\n", encoding="utf-8")
+                compare_cmd = [
+                    str(kallistors_bin),
+                    "trace-compare",
+                    "--index",
+                    str(index),
+                    "--reads",
+                    str(mate1),
+                    "--reads2",
+                    str(mate2),
+                    "--read-list",
+                    str(read_list),
+                    "--out",
+                    str(compare_out),
+                ]
+                compare_result = (
+                    run_command_env(compare_cmd, fast_env) if fast_env else run_command(compare_cmd)
+                )
+                if compare_result.returncode != 0:
+                    raise SystemExit(
+                        f"trace-compare failed for n={reads_n}: {compare_result.stderr}"
+                    )
+                first_diff = None
+                with compare_out.open("r", encoding="utf-8") as handle:
+                    reader = csv.DictReader(handle, delimiter="\t")
+                    for row in reader:
+                        if (
+                            row["aligned_baseline"] != row["aligned_fast"]
+                            or row["reason_baseline"] != row["reason_fast"]
+                            or row["ec_baseline"] != row["ec_fast"]
+                        ):
+                            first_diff = row
+                            break
+                if first_diff:
+                    print(
+                        "first divergent paired read:",
+                        first_diff["read"],
+                        first_diff["reason_baseline"],
+                        first_diff["reason_fast"],
+                    )
+                    with tempfile.TemporaryDirectory(prefix="kallisto-fast-first-pair-") as tmp2:
+                        tmp_path = Path(tmp2)
+                        one1 = tmp_path / "pair_1.fastq.gz"
+                        one2 = tmp_path / "pair_2.fastq.gz"
+                        extract_pair_subset(mate1, mate2, first_diff["read"], one1, one2)
+                        k_out = tmp_path / "kallisto"
+                        k_out.mkdir()
+                        kallisto_trace = Path(args.kallisto_trace_out)
+                        kallisto_trace.parent.mkdir(parents=True, exist_ok=True)
+                        kallisto_cmd = [
+                            str(kallisto_bin),
+                            "quant",
+                            "-i",
+                            str(index),
+                            "-o",
+                            str(k_out),
+                            "-t",
+                            "1",
+                            "--ec-trace",
+                            str(kallisto_trace),
+                            "--ec-trace-max-reads",
+                            "0",
+                            str(one1),
+                            str(one2),
+                        ]
+                        k_result = run_command(kallisto_cmd)
+                        if k_result.returncode != 0:
+                            raise SystemExit(
+                                f"kallisto ec-trace failed for {first_diff['read']}: {k_result.stderr}"
+                            )
         raise SystemExit("parity mismatch detected; inspect the report for the first failing subset")
 
 

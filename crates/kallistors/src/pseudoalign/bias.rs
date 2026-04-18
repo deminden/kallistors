@@ -1,10 +1,14 @@
 use crate::bias::hexamer_to_int;
 
-use super::{BifrostIndex, MatchInfo, ec_block_at};
+use super::{BifrostIndex, MatchInfo};
 
 pub(super) fn bias_hexamer_for_match(index: &BifrostIndex, best_match: MatchInfo) -> Option<usize> {
-    let blocks = index.ec_blocks.get(best_match.unitig_id)?;
-    let (lb, ub) = ec_block_at(blocks, best_match.unitig_pos as u32)?;
+    let block_idx = index
+        .flat_ec
+        .block_index_for_position(best_match.unitig_id, best_match.unitig_pos)?;
+    let (lb, ub) = index
+        .flat_ec
+        .block_bounds(best_match.unitig_id, block_idx)?;
     let contig_start = lb as isize;
     let contig_len = (ub as isize) - contig_start;
     let pos = best_match.unitig_pos as isize - contig_start;

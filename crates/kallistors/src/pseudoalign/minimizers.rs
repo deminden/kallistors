@@ -63,6 +63,44 @@ pub(super) fn minimizers_for_kmer(seq: &[u8], g: usize) -> Option<Vec<([u8; 8], 
     if best.is_empty() { None } else { Some(best) }
 }
 
+pub(super) fn minimizers_for_kmer_into(
+    seq: &[u8],
+    g: usize,
+    out: &mut Vec<([u8; 8], usize)>,
+) -> bool {
+    let Some((start, end)) = strict_bounds(seq.len(), g) else {
+        out.clear();
+        return false;
+    };
+    out.clear();
+    let mut best_hash: Option<u64> = None;
+    for pos in start..=end {
+        let slice = &seq[pos..pos + g];
+        let Some(h) = rep_hash(slice) else {
+            out.clear();
+            return false;
+        };
+        let Some(bytes) = encode_minimizer_rep(slice) else {
+            out.clear();
+            return false;
+        };
+        match best_hash {
+            None => {
+                best_hash = Some(h);
+                out.push((bytes, pos));
+            }
+            Some(min) if h < min => {
+                best_hash = Some(h);
+                out.clear();
+                out.push((bytes, pos));
+            }
+            Some(min) if h == min => out.push((bytes, pos)),
+            _ => {}
+        }
+    }
+    !out.is_empty()
+}
+
 pub(super) fn minimizers_ranked_for_kmer(
     seq: &[u8],
     g: usize,

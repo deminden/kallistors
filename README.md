@@ -1,8 +1,16 @@
 # kallistors
-
 kallistors: a Rust implementation of kallisto-style pseudoalignment and quantification.
 
-## Compatibility notes (v0.2.1)
+## At A Glance
+- Exact full-file paired-end parity with `kallisto` on the checked-in real dataset:
+  `n_pseudoaligned = 4244771`, `n_unique = 276251`.
+- Current full-file benchmark on `7950X3D`, `-t 32`:
+  `kallisto 56.24s`, `kallistors 68.63s` (`+12.39s`, about `1.22x` slower).
+- Uses the `zlib-rs` gzip backend for faster compressed FASTQ input.
+- Uses packed/reusable FASTQ batches plus long-lived worker `EcCounts` state to reduce allocation
+  and threaded handoff overhead.
+
+## Compatibility notes (v0.2.2)
 
 This is a minimal reimplementation (at current stage). Known differences vs kallisto today:
 - No index builder yet (load-only).
@@ -13,8 +21,11 @@ This is a minimal reimplementation (at current stage). Known differences vs kall
 
 Current real-data status:
 - Paired-end parity is exact on deterministic prefixes through `262144` pairs from the checked-in real dataset under `data/`.
-- Full-file paired-end quant is still slightly off from `kallisto` on the same index and reads.
-- Full-file startup/runtime is still materially slower than `kallisto`; the remaining gap is mostly in index loading/materialization.
+- Full-file paired-end quant now matches `kallisto` exactly on the same checked-in index and reads:
+  `n_pseudoaligned = 4244771`, `n_unique = 276251`.
+- Full-file startup/runtime is still slower than `kallisto`, but the gap is much smaller after the
+  loader and packed FASTQ batch work:
+  `kallisto 56.24s` vs `kallistors 68.63s` on the checked-in benchmark (`+12.39s`, about `1.22x` slower).
 
 Sequence-specific bias correction is optional and enabled only with `--bias`.
 
@@ -60,15 +71,17 @@ Notes:
 - `--bias` requires `--transcripts` to provide the transcript FASTA.
 ```
 
-### Kallisto alignment parity (recent changes)
-- Bifrost path mirrors kallisto minimizer traversal with minhash candidates and canonicalized minimizers.
-- Orientation-aware minimizer offsets (forward/rev) and relaxed window checks around minimizer positions.
-- If exact minimizer anchoring fails, match candidates are scanned across the valid minimizer window
-  (`rel_pos - (k-g) .. rel_pos`) before rejection.
-- Online intersection tracking with `intersection_empty` skip parity.
-- Jump logic records a hit before skipping to match kallisto’s jump behavior.
-- Special/overcrowded minimizers handled via D-list / special unitig checks, with upstream-style
-  Bifrost fallback for overcrowded minimizers instead of a global exact-kmer fallback.
+### Recent Compatibility And Performance Work
+- Full-file paired-end parity now matches `kallisto` exactly on the checked-in real dataset.
+- The last full-file mismatch was fixed with a narrow Bifrost-style retry on probe/backoff misses
+  after prior evidence exists.
+- The loader now uses a much cheaper minimizer count/fill path, which removed most of the old
+  startup penalty.
+- `flate2` now uses the `zlib-rs` backend.
+- The threaded path now transports reads as packed/reusable FASTQ batches with one contiguous
+  backing buffer plus per-record offsets instead of allocating owned FASTQ payloads per read.
+- Threaded workers accumulate directly into long-lived `EcCounts` state instead of rebuilding and
+  merging fresh per-batch count maps.
 
 
 ### Real-data benchmark (current checked-in dataset)
@@ -93,15 +106,23 @@ kallisto_src/build/src/kallisto quant \
   "data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade (2).gz"
 ```
 
-Latest results (2026-04-15, Linux x86_64, `7950X3D`, `-t 32`):
+Latest results (2026-04-18, Linux x86_64, `7950X3D`, `-t 32`):
 - Full-file paired quant:
-  `kallisto` wall `59.21s`
-  `kallistors` wall `190.76s`
+  `kallisto` wall `56.24s`
+  `kallistors` wall `68.63s`
 - Full-file `run_info.json`:
   `kallisto` `n_pseudoaligned = 4244771`, `n_unique = 276251`
-  `kallistors` `n_pseudoaligned = 4244773`, `n_unique = 276251`
+  `kallistors` `n_pseudoaligned = 4244771`, `n_unique = 276251`
 - Deterministic paired-prefix parity:
   exact through `262144` pairs on `data/subsets/`
+
+Current `kallistors` stage timings on the same full-file run:
+- `index_header_parse 2.113s`
+- `graph_decode 6.859s`
+- `minimizer_count_pass 1.390s`
+- `minimizer_fill_pass 9.002s`
+- `fastq_read_decompress 34.613s`
+- `pseudoalign 47.39s`
 
 ### Parity tests
 - Synthetic parity: `variants_parity` allows a 1-read drift in aligned count; EC sets must match when aligned.

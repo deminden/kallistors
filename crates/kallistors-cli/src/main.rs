@@ -81,6 +81,8 @@ enum Commands {
         #[arg(long, default_value_t = 1)]
         threads: usize,
         #[arg(long)]
+        timings: bool,
+        #[arg(long)]
         debug_out: Option<std::path::PathBuf>,
         #[arg(long, default_value_t = 100)]
         debug_max: usize,
@@ -132,6 +134,8 @@ enum Commands {
         out_dir: std::path::PathBuf,
         #[arg(short = 't', long, default_value_t = 1)]
         threads: usize,
+        #[arg(long)]
+        timings: bool,
         #[arg(long)]
         single: bool,
         #[arg(short = 'l', long = "fragment-length")]
@@ -253,6 +257,55 @@ enum Commands {
         #[arg(long)]
         rf_stranded: bool,
     },
+    #[command(about = "DEBUG: compare baseline vs fast-path traces on selected reads")]
+    TraceCompare {
+        #[arg(long)]
+        index: std::path::PathBuf,
+        #[arg(long)]
+        reads: std::path::PathBuf,
+        #[arg(long)]
+        reads2: Option<std::path::PathBuf>,
+        #[arg(long)]
+        read_list: std::path::PathBuf,
+        #[arg(long)]
+        out: std::path::PathBuf,
+        #[arg(long)]
+        kallisto_enum: bool,
+        #[arg(long)]
+        kallisto_strict: bool,
+        #[arg(long)]
+        kallisto_local_fallback: bool,
+        #[arg(long)]
+        kallisto_fallback: bool,
+        #[arg(long)]
+        discard_special_only: bool,
+        #[arg(long)]
+        skip_overcrowded_minimizer: bool,
+        #[arg(long)]
+        kallisto_direct_kmer: bool,
+        #[arg(long)]
+        kallisto_bifrost_find: bool,
+        #[arg(long)]
+        kallisto_sparse_hits: bool,
+        #[arg(long, value_enum, default_value_t = Strand::Unstranded)]
+        strand: Strand,
+        #[arg(long)]
+        fragment_length: Option<f64>,
+        #[arg(long)]
+        single_overhang: bool,
+        #[arg(long, default_value_t = 1)]
+        min_range: usize,
+        #[arg(long)]
+        union: bool,
+        #[arg(long)]
+        no_jump: bool,
+        #[arg(long)]
+        dfk_onlist: bool,
+        #[arg(long)]
+        fr_stranded: bool,
+        #[arg(long)]
+        rf_stranded: bool,
+    },
     #[command(about = "DEBUG: lookup minimizer in MPH index")]
     MinimizerLookup {
         #[arg(long)]
@@ -333,6 +386,7 @@ fn main() -> Result<()> {
             reads2,
             out,
             threads,
+            timings,
             debug_out,
             debug_max,
             strand,
@@ -361,6 +415,7 @@ fn main() -> Result<()> {
             reads2.as_deref(),
             &out,
             threads,
+            timings,
             debug_out.as_deref(),
             debug_max,
             match strand {
@@ -392,6 +447,7 @@ fn main() -> Result<()> {
             index,
             out_dir,
             threads,
+            timings,
             single,
             bias,
             transcripts,
@@ -436,6 +492,7 @@ fn main() -> Result<()> {
             kallisto_bifrost_find,
             kallisto_sparse_hits,
             threads,
+            timings,
             pseudobam,
             genomebam,
         }),
@@ -520,6 +577,59 @@ fn main() -> Result<()> {
             dfk_onlist,
             fr_stranded,
             rf_stranded,
+        ),
+        Commands::TraceCompare {
+            index,
+            reads,
+            reads2,
+            read_list,
+            out,
+            kallisto_enum,
+            kallisto_strict,
+            kallisto_local_fallback,
+            kallisto_fallback,
+            discard_special_only,
+            skip_overcrowded_minimizer,
+            kallisto_direct_kmer,
+            kallisto_bifrost_find,
+            kallisto_sparse_hits,
+            strand,
+            fragment_length,
+            single_overhang,
+            min_range,
+            union,
+            no_jump,
+            dfk_onlist,
+            fr_stranded,
+            rf_stranded,
+        } => commands::trace_compare::run(
+            &index,
+            &reads,
+            reads2.as_deref(),
+            &read_list,
+            &out,
+            match strand {
+                Strand::Unstranded => kallistors::pseudoalign::Strand::Unstranded,
+                Strand::Forward => kallistors::pseudoalign::Strand::Forward,
+                Strand::Reverse => kallistors::pseudoalign::Strand::Reverse,
+            },
+            fragment_length,
+            single_overhang,
+            min_range,
+            union,
+            no_jump,
+            dfk_onlist,
+            fr_stranded,
+            rf_stranded,
+            kallisto_enum,
+            kallisto_strict,
+            kallisto_local_fallback,
+            kallisto_fallback,
+            discard_special_only,
+            skip_overcrowded_minimizer,
+            kallisto_direct_kmer,
+            kallisto_bifrost_find,
+            kallisto_sparse_hits,
         ),
     }
 }
