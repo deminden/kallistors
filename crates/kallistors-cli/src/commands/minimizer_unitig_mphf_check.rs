@@ -111,7 +111,7 @@ pub fn run(index: PathBuf, unitigs: PathBuf, out: Option<PathBuf>) -> Result<()>
         let hit = mphf.lookup(&rep).is_some();
         rows.push((rep, count, hit));
     }
-    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.1));
 
     let mut out_writer: Box<dyn Write> = match out {
         Some(path) => Box::new(std::io::BufWriter::new(File::create(path)?)),
