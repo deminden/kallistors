@@ -14,10 +14,7 @@ fn produce_batches<R: PackedBatchSource>(
     reader: &mut R,
     tx: &Sender<Result<PackedFastqBatch>>,
 ) -> Result<()> {
-    loop {
-        let Some(batch) = reader.next_packed_batch(super::BATCH_SIZE)? else {
-            break;
-        };
+    while let Some(batch) = reader.next_packed_batch(super::BATCH_SIZE)? {
         if tx.send(Ok(batch)).is_err() {
             return Ok(());
         }

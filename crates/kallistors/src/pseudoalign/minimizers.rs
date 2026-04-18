@@ -120,7 +120,7 @@ pub(super) fn minimizers_ranked_for_kmer(
     if all.is_empty() {
         return None;
     }
-    all.sort_by(|a, b| a.0.cmp(&b.0));
+    all.sort_by_key(|a| a.0);
     let mut out = Vec::new();
     let mut seen = 0usize;
     let mut current_hash: Option<u64> = None;
