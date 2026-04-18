@@ -238,4 +238,4 @@ Pull requests are encouraged, especially for:
 
 ## License
 
-This project is licensed under the BSD-2-Clause (Simplified BSD) License. See `LICENSE`.
+This project is licensed under the MIT License. See `LICENSE`.
