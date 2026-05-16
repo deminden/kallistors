@@ -31,7 +31,7 @@ pub fn pseudoalign_paired_naive<R1: ReadSource, R2: ReadSource>(
             (Some(a), Some(b)) => {
                 let a = a?;
                 let b = b?;
-                if std::env::var_os("KALLISTORS_RESET_ALL_CACHES_PER_READ").is_some() {
+                if super::reset_all_caches_per_read() {
                     super::reset_thread_local_caches();
                 }
                 reads_processed += 1;
@@ -282,7 +282,7 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
         .unwrap_or_else(|| vec![0u32; super::MAX_FRAG_LEN as usize]);
 
     for (a, b) in left_batch.records().zip(right_batch.records()) {
-        if std::env::var_os("KALLISTORS_RESET_ALL_CACHES_PER_READ").is_some() {
+        if super::reset_all_caches_per_read() {
             super::reset_thread_local_caches();
         }
         counts.reads_processed = counts.reads_processed.saturating_add(1);

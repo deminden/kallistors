@@ -11,7 +11,7 @@ This checklist is ordered. Do not proceed to the next item until the current ite
 - [x] Parse and report number of targets and total length (match `kallisto inspect` + transcript FASTA)
 
 Acceptance test:
-- `kallisto inspect data/synthetic.idx` matches `kallistors-cli index-info` for all reported fields.
+- `kallisto inspect data/synthetic.idx` matches `kallistors index-info` for all reported fields.
 
 ## Phase B: EC data parity
 - [x] Parse EC mapping and emit list in kallisto-compatible order (debug-only)
@@ -68,8 +68,8 @@ Notes:
   `crates/kallistors/tests/paired_parity.rs`.
 - Later real-data paired mismatches came from overcrowded minimizer handling.
 - Current status:
-  exact on paired deterministic prefixes through `262144` pairs on `data/subsets/`
-  full-file paired quant still differs by `2` pseudoaligned pairs
+  exact on paired deterministic prefixes through `262144` pairs on `data/subsets/` with
+  `--threads 32`; full-file paired quant is exact on the checked-in real dataset.
 
 ## Phase F: Loader performance parity with original `kallisto`
 - [x] Stop rebuilding the minimizer map as `Vec<Vec<u64>>`; switch to a flat contiguous minimizer store
@@ -84,7 +84,7 @@ Notes:
 - [x] Replace per-occurrence atomic minimizer counting with buffered local batch counting that mirrors upstream `readBinaryIndex(...)` batching while preserving the existing exact storage write path
 
 Acceptance test:
-- On `data/gencode.v49_kallisto.idx`, `kallistors-cli quant` should spend most of its wall time in
+- On `data/gencode.v49_kallisto.idx`, `kallistors quant` should spend most of its wall time in
   pseudoalignment/EM rather than loader startup, and the gap to `kallisto quant` on the same
   1024-read subset should shrink materially without using an on-disk cache.
 
@@ -126,16 +126,17 @@ Notes:
 - Remaining search-side gap is still in candidate validation and pathological fallback handling,
   not in loader timing or EC merge.
 - Current full-file benchmark on the checked-in real dataset (`-t 32`):
-  `kallisto` wall `56.61s`
-  `kallistors` wall `81.85s`
+  `kallisto` wall `57.14s`
+  `kallistors` wall `70.73s`
   `kallistors` stage timings:
-  `index_header_parse 2.113s`
-  `graph_decode 6.859s`
-  `minimizer_count_pass 1.390s`
-  `minimizer_fill_pass 9.002s`
-  `fastq_read_decompress 34.613s`
-  `pseudoalign 45.433s`
-  `em 10.100s`
+  `index_header_parse 2.183s`
+  `graph_decode 6.855s`
+  `minimizer_count_pass 1.358s`
+  `minimizer_fill_pass 9.062s`
+  `fastq_read_decompress 29.023s`
+  `pseudoalign 36.610s`
+  `ec_merge 0.192s`
+  `em 8.075s`
 
 ## Phase G: Mirror remaining upstream search-loop optimizations
 - [ ] Replace per-k-mer minimizer recomputation with a rolling `minHashIterator`-style state for the common quant path
@@ -151,8 +152,8 @@ Notes:
 Acceptance test:
 - On the checked-in paired real dataset, the common search path should stop rebuilding minimizer
   candidates for every adjacent k-mer window, full-file `pseudoalign` time should drop materially
-  from the current `83.624s`, and the deterministic paired ladder should remain exact through
-  `262144` while the full-file drift does not worsen.
+  from the current `36.610s`, and the deterministic paired ladder should remain exact through
+  `262144` while full-file run-info parity stays exact.
 
 Strategy:
 - Start with iterator-state reuse, because upstream Bifrost search is built around `minHashIterator`
@@ -215,7 +216,7 @@ Notes:
   - internal investigation flags in `PseudoalignOptions` driven by environment variables
     (`KALLISTORS_TRACE_FAST_PATH`, `KALLISTORS_FAST_DELTA_*`) so experimental fast-path deltas
     can be enabled without changing default CLI behavior
-  - `kallistors-cli trace-compare` to run baseline vs fast-path traces side-by-side on selected
+  - `kallistors trace-compare` to run baseline vs fast-path traces side-by-side on selected
     reads or read pairs and emit structured diffs for probe positions, minimizer candidates, jump
     decisions, and final ECs
   - `scripts/real_subset_parity.py --fast-env ...` to reproduce a mismatched subset under an
@@ -271,6 +272,10 @@ Input-path work:
   wall with exact real-data parity (`4,244,771` pseudoaligned, `276,251`
   unique); this is a major improvement over `82.85s` (`-14.22s`, about
   `-17.2%`)
-- current remaining gap to upstream `kallisto -t 32` (`56.24s`) is now mostly
-  in pseudoalignment proper rather than loader startup or per-record FASTQ
+- a later optimization pass improved full-file paired quant from `77.60s` to
+  `70.73s` wall (`-6.87s`, about `-8.9%`) while preserving exact full-file
+  run-info parity and exact deterministic paired-prefix parity through `262144`
+  with `--threads 32`
+- current remaining gap to upstream `kallisto -t 32` (`57.14s`) is mostly in
+  pseudoalignment/decompression rather than loader startup or per-record FASTQ
   allocation/copying

@@ -5,7 +5,7 @@ mod commands;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "kallistors-cli",
+    name = "kallistors",
     version,
     about = "kallistors command line interface"
 )]

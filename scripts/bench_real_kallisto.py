@@ -81,7 +81,7 @@ def main() -> None:
     parser.add_argument("--fragment-length", type=int, default=200)
     parser.add_argument("--fragment-length-sd", type=int, default=20)
     parser.add_argument("--kallisto-bin", default="kallisto")
-    parser.add_argument("--kallistors-bin", default="kallistors-cli")
+    parser.add_argument("--kallistors-bin", default="kallistors")
     parser.add_argument("--out", default="bench_latest.md")
     args = parser.parse_args()
 
@@ -93,7 +93,7 @@ def main() -> None:
     if shutil.which(args.kallisto_bin) is None:
         raise SystemExit(f"kallisto not found: {args.kallisto_bin}")
     if shutil.which(args.kallistors_bin) is None:
-        raise SystemExit(f"kallistors-cli not found: {args.kallistors_bin}")
+        raise SystemExit(f"kallistors not found: {args.kallistors_bin}")
 
     with tempfile.TemporaryDirectory(prefix="kallistors-bench-") as tmp:
         k_out = os.path.join(tmp, "kallisto")
@@ -139,7 +139,7 @@ def main() -> None:
 
         o_result, o_wall, o_cpu = run_command(kallistors_cmd)
         if o_result.returncode != 0:
-            raise SystemExit(f"kallistors-cli failed: {o_result.stderr.strip()}")
+            raise SystemExit(f"kallistors failed: {o_result.stderr.strip()}")
 
         with open(os.path.join(k_out, "run_info.json"), "r", encoding="utf-8") as handle:
             k_info = json.load(handle)

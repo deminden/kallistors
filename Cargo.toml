@@ -1,7 +1,6 @@
 [workspace]
 members = [
   "crates/kallistors",
-  "crates/kallistors-cli",
 ]
 resolver = "2"
 

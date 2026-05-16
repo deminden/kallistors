@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use boomphf::Mphf;
 
@@ -74,6 +75,13 @@ pub(super) use utils::{add_ec_count, merge_ec_counts};
 const KMER_BYTES_CANDIDATES: [usize; 4] = [8, 16, 24, 32];
 const BATCH_SIZE: usize = 10_000;
 const MAX_FRAG_LEN: i64 = 1000;
+static RESET_ALL_CACHES_PER_READ: OnceLock<bool> = OnceLock::new();
+
+#[inline]
+fn reset_all_caches_per_read() -> bool {
+    *RESET_ALL_CACHES_PER_READ
+        .get_or_init(|| std::env::var_os("KALLISTORS_RESET_ALL_CACHES_PER_READ").is_some())
+}
 
 pub fn build_bifrost_index_with_kmer(path: &Path) -> Result<BifrostIndex> {
     let mut index = build_bifrost_index(path)?;

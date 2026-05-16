@@ -25,7 +25,7 @@ pub fn pseudoalign_single_end<R: ReadSource>(
 
     while let Some(record) = reader.next_record() {
         let record = record?;
-        if std::env::var_os("KALLISTORS_RESET_ALL_CACHES_PER_READ").is_some() {
+        if super::reset_all_caches_per_read() {
             super::reset_thread_local_caches();
         }
         reads_processed += 1;
@@ -203,7 +203,7 @@ pub(crate) fn pseudoalign_single_end_bifrost_batch_into(
     ec_map: &mut HashMap<Vec<u32>, usize>,
 ) {
     for record in batch.records() {
-        if std::env::var_os("KALLISTORS_RESET_ALL_CACHES_PER_READ").is_some() {
+        if super::reset_all_caches_per_read() {
             super::reset_thread_local_caches();
         }
         counts.reads_processed = counts.reads_processed.saturating_add(1);
@@ -296,7 +296,7 @@ fn pseudoalign_single_end_bifrost_inner<R: ReadSource>(
 
     while let Some(record) = reader.next_record() {
         let record = record?;
-        if std::env::var_os("KALLISTORS_RESET_ALL_CACHES_PER_READ").is_some() {
+        if super::reset_all_caches_per_read() {
             super::reset_thread_local_caches();
         }
         reads_processed += 1;

@@ -17,6 +17,19 @@ const ALPHA_CHANGE_LIMIT: f64 = 1e-2;
 const ALPHA_CHANGE: f64 = 1e-2;
 const TOLERANCE: f64 = f64::from_bits(1);
 
+struct EmMultiEc {
+    start: usize,
+    len: usize,
+    count: f64,
+}
+
+struct EmWork {
+    singleton_ecs: Vec<(usize, f64)>,
+    multi_ecs: Vec<EmMultiEc>,
+    multi_transcripts: Vec<usize>,
+    multi_weights: Vec<f64>,
+}
+
 pub struct QuantOptions {
     pub mean_fragment_length: f64,
     pub fragment_length_sd: f64,
@@ -296,7 +309,7 @@ pub fn em_quantify(
     let mut alpha = vec![1.0 / num_trans as f64; num_trans];
     let mut next_alpha = vec![0.0f64; num_trans];
 
-    let mut weights = calc_weights(&input.ec_list, &input.counts, &eff_lens);
+    let mut em_work = prepare_em_work(input, &eff_lens);
 
     let mut final_round = false;
     for iter in 0..options.max_iter {
@@ -315,34 +328,27 @@ pub fn em_quantify(
             );
             eff_lens = updated_eff;
             post_bias = Some(bias_model);
-            weights = calc_weights(&input.ec_list, &input.counts, &eff_lens);
+            refresh_multi_weights(&mut em_work, &eff_lens);
         }
 
-        for (ec_id, ec) in input.ec_list.classes.iter().enumerate() {
-            if ec.len() == 1 {
-                next_alpha[ec[0] as usize] = input.counts[ec_id] as f64;
-            }
+        for &(tr, count) in &em_work.singleton_ecs {
+            next_alpha[tr] = count;
         }
 
-        for (ec_id, ec) in input.ec_list.classes.iter().enumerate() {
-            if ec.len() <= 1 {
-                continue;
-            }
-            let count = input.counts[ec_id] as f64;
-            if count == 0.0 {
-                continue;
-            }
-            let wv = &weights[ec_id];
+        for ec in &em_work.multi_ecs {
+            let range = ec.start..ec.start + ec.len;
             let mut denom = 0.0;
-            for (i, &tr) in ec.iter().enumerate() {
-                denom += alpha[tr as usize] * wv[i];
+            for i in range.clone() {
+                let tr = em_work.multi_transcripts[i];
+                denom += alpha[tr] * em_work.multi_weights[i];
             }
             if denom < TOLERANCE {
                 continue;
             }
-            let scale = count / denom;
-            for (i, &tr) in ec.iter().enumerate() {
-                next_alpha[tr as usize] += wv[i] * alpha[tr as usize] * scale;
+            let scale = ec.count / denom;
+            for i in range {
+                let tr = em_work.multi_transcripts[i];
+                next_alpha[tr] += em_work.multi_weights[i] * alpha[tr] * scale;
             }
         }
 
@@ -399,6 +405,49 @@ pub fn em_quantify(
     })
 }
 
+fn prepare_em_work(input: &EcCountsInput, eff_lens: &[f64]) -> EmWork {
+    let mut singleton_ecs = Vec::new();
+    let mut multi_ecs = Vec::new();
+    let mut multi_transcripts = Vec::new();
+    let mut multi_weights = Vec::new();
+    for (ec_id, ec) in input.ec_list.classes.iter().enumerate() {
+        let count = input.counts.get(ec_id).copied().unwrap_or(0) as f64;
+        if ec.len() == 1 {
+            let tr = ec[0] as usize;
+            singleton_ecs.push((tr, count));
+        } else if ec.len() > 1 && count != 0.0 {
+            let start = multi_transcripts.len();
+            for &tr in ec {
+                let tr = tr as usize;
+                let len = eff_lens.get(tr).copied().unwrap_or(1.0);
+                multi_transcripts.push(tr);
+                multi_weights.push(count / len);
+            }
+            multi_ecs.push(EmMultiEc {
+                start,
+                len: ec.len(),
+                count,
+            });
+        }
+    }
+    EmWork {
+        singleton_ecs,
+        multi_ecs,
+        multi_transcripts,
+        multi_weights,
+    }
+}
+
+fn refresh_multi_weights(work: &mut EmWork, eff_lens: &[f64]) {
+    for ec in &work.multi_ecs {
+        for i in ec.start..ec.start + ec.len {
+            let tr = work.multi_transcripts[i];
+            let len = eff_lens.get(tr).copied().unwrap_or(1.0);
+            work.multi_weights[i] = ec.count / len;
+        }
+    }
+}
+
 fn calc_eff_lens(lengths: &[u32], means: &[f64]) -> Vec<f64> {
     let mut eff = Vec::with_capacity(lengths.len());
     for (i, &len) in lengths.iter().enumerate() {
@@ -449,20 +498,6 @@ fn trunc_gaussian_fld(start: usize, stop: usize, mean: f64, sd: f64) -> Vec<f64>
         }
     }
     mean_fl
-}
-
-fn calc_weights(ec_list: &EcList, counts: &[u32], eff_lens: &[f64]) -> Vec<Vec<f64>> {
-    let mut out = Vec::with_capacity(ec_list.classes.len());
-    for (ec_id, ec) in ec_list.classes.iter().enumerate() {
-        let count = counts.get(ec_id).copied().unwrap_or(0) as f64;
-        let mut wv = Vec::with_capacity(ec.len());
-        for &tr in ec {
-            let len = eff_lens.get(tr as usize).copied().unwrap_or(1.0);
-            wv.push(count / len);
-        }
-        out.push(wv);
-    }
-    out
 }
 
 fn update_eff_lens(

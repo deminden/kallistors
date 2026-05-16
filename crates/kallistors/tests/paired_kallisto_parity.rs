@@ -288,7 +288,7 @@ fn run_kallistors_quant(
     reads1: &Path,
     reads2: &Path,
 ) -> std::io::Result<std::process::ExitStatus> {
-    if let Ok(bin) = std::env::var("CARGO_BIN_EXE_kallistors-cli") {
+    if let Ok(bin) = std::env::var("CARGO_BIN_EXE_kallistors") {
         Command::new(bin)
             .arg("quant")
             .arg("-i")
@@ -302,7 +302,7 @@ fn run_kallistors_quant(
         Command::new("cargo")
             .arg("run")
             .arg("-p")
-            .arg("kallistors-cli")
+            .arg("kallistors")
             .arg("--quiet")
             .arg("--")
             .arg("quant")

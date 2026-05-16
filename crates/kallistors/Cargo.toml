@@ -1,17 +1,25 @@
 [package]
 name = "kallistors"
-version = "0.2.2"
+version = "0.2.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+autobins = false
+
+[[bin]]
+name = "kallistors"
+path = "src/main.rs"
 
 [dependencies]
-thiserror = "2.0.17"
-croaring-sys = "4.4.1"
+anyhow = "1.0.102"
+clap = { version = "4.6.1", features = ["derive"] }
+thiserror = "2.0.18"
+croaring-sys = "4.7.0"
 boomphf = "0.6.0"
-flate2 = { version = "1.1.2", default-features = false, features = ["zlib-rs"] }
+flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
 rayon = "1.12.0"
 crossbeam-channel = "0.5.15"
+time = { version = "0.3.47", features = ["formatting", "local-offset"] }
 
 [dev-dependencies]
-tempfile = "3.24.0"
+tempfile = "3.27.0"

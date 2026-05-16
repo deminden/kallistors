@@ -225,8 +225,14 @@ def main() -> None:
     parser.add_argument("--mode", choices=("single", "paired"), default="single")
     parser.add_argument("--fragment-length", type=int, default=200)
     parser.add_argument("--fragment-length-sd", type=int, default=20)
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=max(1, os.cpu_count() or 1),
+        help="threads to pass to both kallisto and kallistors quant",
+    )
     parser.add_argument("--kallisto-bin", default="./kallisto_src/build/src/kallisto")
-    parser.add_argument("--kallistors-bin", default="./target/release/kallistors-cli")
+    parser.add_argument("--kallistors-bin", default="./target/release/kallistors")
     parser.add_argument("--report", default="data/subsets/parity_report.tsv")
     parser.add_argument(
         "--fast-env",
@@ -286,7 +292,7 @@ def main() -> None:
                 "-o",
                 str(k_out),
                 "-t",
-                "1",
+                str(max(1, args.threads)),
             ]
             ours_cmd = [
                 str(kallistors_bin),
@@ -296,7 +302,7 @@ def main() -> None:
                 "-o",
                 str(o_out),
                 "-t",
-                "1",
+                str(max(1, args.threads)),
             ]
 
             if args.mode == "single":
