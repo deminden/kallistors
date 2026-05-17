@@ -2,6 +2,7 @@ pub mod ec_compare;
 pub mod ec_export;
 pub mod ec_from_index;
 pub mod ec_stats;
+pub mod index;
 pub mod index_ec_dump;
 pub mod index_info;
 pub mod minimizer_bitmap_scan;

@@ -284,3 +284,32 @@ Input-path work:
   (`59.12s` wall in the latest local run); current remaining optimization work is
   mostly in pseudoalignment/decompression/EM rather than loader startup or
   per-record FASTQ allocation/copying
+
+## Phase H: Pure Rust index builder
+- [x] Add `kallistors index` CLI and `kallistors::index::build_index` library entry point
+- [x] Match kallisto defaults and validation for `k`, minimizer length, duplicate transcript names,
+  and `ec_max_size`
+- [x] Read plain/gz FASTA, normalize sequence content, replace ambiguous bases deterministically,
+  clip terminal poly-A runs, and preserve original transcript lengths
+- [x] Build a compacted de Bruijn graph and deterministic unitig/k-mer map for `k <= 31`
+- [x] Write v13-compatible graph metadata, minimizer metadata, BooPHF payloads, EC/node blocks,
+  transcript metadata, and an on-list of real transcripts
+- [x] Validate reduced real-subset quant parity against upstream-built indexes
+- [x] Validate upstream `kallisto quant` on a `kallistors index` output
+- [x] Validate large real-transcriptome build/load on `data/gencode.v49.transcripts.fa.gz`
+- [x] Add `scripts/bench_index_build.py` for kallisto-vs-kallistors index build reports
+- [x] Optimize graph generation memory by using one-buffer parallel k-mer collection, dense k-mer
+  lookup, compact edge-state storage, and early release of graph-only caches before EC payload build
+- [ ] Broaden real-transcriptome validation beyond the current GENCODE and reduced-subset runs
+- [ ] Revisit special minimizer metadata and overcrowding behavior if future real cases expose
+  compatibility gaps
+- [ ] Continue speed work only behind parity checks; prior outgoing-neighbor cache experiments were
+  rejected after producing invalid/truncated artifacts
+
+Latest large-build reference run:
+- Input: `data/gencode.v49.transcripts.fa.gz`
+- Upstream: `6:24.81`, peak RSS `12175612KB`, index size `878M`
+- `kallistors index -t 8 --timings`: `2:02.23`, peak RSS `9975360KB`, index size `894M`
+- The generated index loads in both `kallistors index-info` and upstream `kallisto inspect`
+- Synthetic paired-read parity is exact when quantifying with either `kallistors quant` or upstream
+  `kallisto quant` against the `kallistors`-built index

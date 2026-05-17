@@ -77,3 +77,49 @@ python3 scripts/real_subset_parity.py \
   --fast-env KALLISTORS_FAST_DELTA_BOUNDED_INCREMENTAL_SCAN=1 \
   --trace-out /tmp/kallistors-trace-compare.tsv
 ```
+
+## Index builder validation
+
+Build and inspect a reduced real-transcript index:
+
+```bash
+cargo build --release
+target/release/kallistors index \
+  -i /tmp/reduced.kallistors.idx \
+  -t 4 \
+  --timings \
+  data/subsets/reduced_64_transcripts.fa.gz
+
+target/release/kallistors index-info --index /tmp/reduced.kallistors.idx
+./kallisto_src/build/src/kallisto inspect /tmp/reduced.kallistors.idx
+```
+
+Run a large GENCODE build benchmark:
+
+```bash
+/usr/bin/time -o /tmp/kallistors-index.time -f 'elapsed=%E maxrss=%MKB' \
+  target/release/kallistors index \
+  -i /tmp/gencode.kallistors.idx \
+  -t 8 \
+  --timings \
+  data/gencode.v49.transcripts.fa.gz
+```
+
+Compare against upstream and write a Markdown report:
+
+```bash
+python3 scripts/bench_index_build.py \
+  --fasta data/gencode.v49.transcripts.fa.gz \
+  --threads 8 \
+  --kallisto-bin ./kallisto_src/build/src/kallisto \
+  --kallistors-bin ./target/release/kallistors \
+  --out target/validation/index_build_benchmark.md
+```
+
+For compatibility validation, run paired quant on the same reads with:
+- an upstream `kallisto index` output
+- a `kallistors index` output loaded by `kallistors quant`
+- a `kallistors index` output loaded by upstream `kallisto quant`
+
+The expected first-order check is exact `run_info.json` count parity. `abundance.tsv` comparisons
+use the same tolerance-based diff workflow described above.

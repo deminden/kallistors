@@ -4,7 +4,8 @@ Generated: 2026-05-17
 ## Environment
 - OS: Linux x86_64
 - CPU: AMD Ryzen 9 7950X3D
-- Threads used: 32
+- Threads used for quant: 32
+- Threads used for `kallistors index`: 8
 - Build: release profile with fat LTO and `.cargo/config.toml` `target-cpu=native`
 
 ## Inputs
@@ -15,6 +16,54 @@ Generated: 2026-05-17
 - Reference transcripts: `data/gencode.v49.transcripts.fa.gz`
 - Index: `data/gencode.v49_kallisto.idx`
 - Threads: `-t 32`
+
+## Index build benchmark
+
+Input:
+- Reference transcripts: `data/gencode.v49.transcripts.fa.gz`
+- `kallistors index` threads: `-t 8`
+
+Commands:
+```bash
+/usr/bin/time -o /tmp/kallisto-index.time -f 'elapsed=%E maxrss=%MKB' \
+  kallisto_src/build/src/kallisto index \
+  -i /tmp/gencode.kallisto.idx \
+  data/gencode.v49.transcripts.fa.gz
+
+/usr/bin/time -o /tmp/kallistors-index.time -f 'elapsed=%E maxrss=%MKB' \
+  ./target/release/kallistors index \
+  -i /tmp/gencode.kallistors.idx \
+  -t 8 \
+  --timings \
+  data/gencode.v49.transcripts.fa.gz
+```
+
+Timings:
+- kallisto: elapsed `6:24.81`, peak RSS `12175612KB`, index size `878M`
+- kallistors: elapsed `2:02.23`, peak RSS `9975360KB`, index size `894M`
+
+Current `kallistors index` stage timings:
+- `fasta_parse 2.447s`
+- `graph_build 94.535s`
+- `ec_build 8.725s`
+- `minimizer_mphf 11.147s`
+- `write 7.609s`
+- `total 121.950s`
+
+Delta vs local upstream `kallisto index` on this run:
+- Wall time: `6:24.81 -> 2:02.23`, about `3.15x` faster.
+- Peak RSS: `12175612KB -> 9975360KB`, about `18%` lower for `kallistors`.
+
+Compatibility checks:
+- `kallistors index-info` reports version `13`, `k = 31`, minimizer length `23`,
+  `2186692` unitigs, `186746210` k-mers, `533740` transcripts, and total transcript length
+  `946309864`.
+- Upstream `kallisto inspect` accepts the generated index and reports matching headline metadata.
+- Synthetic paired-read quant parity is exact against the upstream-built GENCODE index through both
+  `kallistors quant` and upstream `kallisto quant`.
+
+Use `scripts/bench_index_build.py` to regenerate an index-build report for a new machine, FASTA, or
+thread count.
 
 ## Benchmark (no debug flags)
 Commands:

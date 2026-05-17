@@ -1,6 +1,11 @@
 //! Index loading and data structures.
 
 pub mod bifrost;
+pub mod builder;
+mod graph_build;
+mod writer;
+
+pub use builder::{IndexBuildOptions, IndexBuildReport, build_index, build_index_with_report};
 
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};

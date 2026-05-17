@@ -20,6 +20,25 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     Version,
+    #[command(about = "Build a kallisto-compatible transcriptome index")]
+    Index {
+        #[arg(short = 'i', long = "index")]
+        output: std::path::PathBuf,
+        #[arg(short = 'k', long = "kmer-size", default_value_t = 31)]
+        k: usize,
+        #[arg(short = 'm', long = "min-size")]
+        minimizer_len: Option<usize>,
+        #[arg(short = 't', long = "threads", default_value_t = 1)]
+        threads: usize,
+        #[arg(long)]
+        timings: bool,
+        #[arg(long)]
+        make_unique: bool,
+        #[arg(short = 'e', long = "ec-max-size", default_value_t = -1)]
+        ec_max_size: i32,
+        #[arg(required = true)]
+        fasta: Vec<std::path::PathBuf>,
+    },
     IndexInfo {
         #[arg(long)]
         index: std::path::PathBuf,
@@ -349,6 +368,25 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Version => commands::version::run(),
+        Commands::Index {
+            output,
+            k,
+            minimizer_len,
+            threads,
+            timings,
+            make_unique,
+            ec_max_size,
+            fasta,
+        } => commands::index::run(commands::index::Args {
+            output,
+            k,
+            minimizer_len,
+            threads,
+            timings,
+            make_unique,
+            ec_max_size,
+            fasta,
+        }),
         Commands::IndexInfo { index } => commands::index_info::run(&index),
         Commands::IndexEcDump {
             index,
