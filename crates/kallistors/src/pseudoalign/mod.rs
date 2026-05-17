@@ -73,7 +73,7 @@ pub use threaded::{
 pub(super) use utils::{add_ec_count, merge_ec_counts};
 
 const KMER_BYTES_CANDIDATES: [usize; 4] = [8, 16, 24, 32];
-const BATCH_SIZE: usize = 10_000;
+const BATCH_SIZE: usize = 12_000;
 const MAX_FRAG_LEN: i64 = 1000;
 static RESET_ALL_CACHES_PER_READ: OnceLock<bool> = OnceLock::new();
 

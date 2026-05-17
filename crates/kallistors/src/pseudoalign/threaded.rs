@@ -4,17 +4,17 @@ use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender, bounded};
 
-use crate::io::{PackedBatchSource, PackedFastqBatch, ReadSource};
+use crate::io::{PackedSeqBatch, PackedSeqBatchSource, ReadSource};
 use crate::timing::{self, Stage};
 use crate::{Error, Result};
 
 use super::{BifrostIndex, EcCounts, FragmentFilter, PseudoalignOptions, Strand};
 
-fn produce_batches<R: PackedBatchSource>(
+fn produce_batches<R: PackedSeqBatchSource>(
     reader: &mut R,
-    tx: &Sender<Result<PackedFastqBatch>>,
+    tx: &Sender<Result<PackedSeqBatch>>,
 ) -> Result<()> {
-    while let Some(batch) = reader.next_packed_batch(super::BATCH_SIZE)? {
+    while let Some(batch) = reader.next_packed_seq_batch(super::BATCH_SIZE)? {
         if tx.send(Ok(batch)).is_err() {
             return Ok(());
         }
@@ -23,8 +23,8 @@ fn produce_batches<R: PackedBatchSource>(
 }
 
 fn recv_batch(
-    rx: &Receiver<Result<PackedFastqBatch>>,
-) -> std::result::Result<Option<PackedFastqBatch>, Error> {
+    rx: &Receiver<Result<PackedSeqBatch>>,
+) -> std::result::Result<Option<PackedSeqBatch>, Error> {
     match rx.recv() {
         Ok(Ok(batch)) => Ok(Some(batch)),
         Ok(Err(err)) => Err(err),
@@ -33,7 +33,7 @@ fn recv_batch(
 }
 
 pub fn pseudoalign_single_end_bifrost_with_options_threaded<
-    R: ReadSource + PackedBatchSource + Send,
+    R: ReadSource + PackedSeqBatchSource + Send,
 >(
     index: &BifrostIndex,
     reader: &mut R,
@@ -54,8 +54,8 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
     let mut final_error: Option<Error> = None;
 
     thread::scope(|scope| {
-        let (producer_tx, producer_rx) = bounded::<Result<PackedFastqBatch>>(threads * 2);
-        let (work_tx, work_rx) = bounded::<PackedFastqBatch>(threads * 2);
+        let (producer_tx, producer_rx) = bounded::<Result<PackedSeqBatch>>(threads * 2);
+        let (work_tx, work_rx) = bounded::<PackedSeqBatch>(threads * 2);
         let mut handles = Vec::with_capacity(threads);
 
         let read_start = Instant::now();
@@ -144,8 +144,8 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
 }
 
 pub fn pseudoalign_paired_bifrost_with_options_threaded<
-    R1: ReadSource + PackedBatchSource + Send,
-    R2: ReadSource + PackedBatchSource + Send,
+    R1: ReadSource + PackedSeqBatchSource + Send,
+    R2: ReadSource + PackedSeqBatchSource + Send,
 >(
     index: &BifrostIndex,
     reader1: &mut R1,
@@ -166,9 +166,9 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
     let mut final_error: Option<Error> = None;
 
     thread::scope(|scope| {
-        let (left_tx, left_rx) = bounded::<Result<PackedFastqBatch>>(threads * 2);
-        let (right_tx, right_rx) = bounded::<Result<PackedFastqBatch>>(threads * 2);
-        let (work_tx, work_rx) = bounded::<(PackedFastqBatch, PackedFastqBatch)>(threads * 2);
+        let (left_tx, left_rx) = bounded::<Result<PackedSeqBatch>>(threads * 2);
+        let (right_tx, right_rx) = bounded::<Result<PackedSeqBatch>>(threads * 2);
+        let (work_tx, work_rx) = bounded::<(PackedSeqBatch, PackedSeqBatch)>(threads * 2);
         let mut handles = Vec::with_capacity(threads);
 
         let read_start = Instant::now();

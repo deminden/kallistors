@@ -1,5 +1,19 @@
 use super::KmerEcIndex;
 
+const INVALID_BASE_CODE: u8 = 4;
+const BASE_CODES: [u8; 256] = {
+    let mut codes = [INVALID_BASE_CODE; 256];
+    codes[b'A' as usize] = 0;
+    codes[b'a' as usize] = 0;
+    codes[b'C' as usize] = 1;
+    codes[b'c' as usize] = 1;
+    codes[b'G' as usize] = 2;
+    codes[b'g' as usize] = 2;
+    codes[b'T' as usize] = 3;
+    codes[b't' as usize] = 3;
+    codes
+};
+
 pub(crate) fn ec_has_offlist(ec: &[u32], onlist: &[bool]) -> bool {
     for &t in ec {
         let idx = t as usize;
@@ -112,27 +126,17 @@ pub(crate) fn merge_sorted_unique(a: &mut Vec<u32>, b: &[u32]) {
 
 pub(crate) fn encode_kmer_pair(seq: &[u8]) -> Option<(u64, u64)> {
     let mut fwd = 0u64;
-    for &b in seq {
-        let v = match b {
-            b'A' | b'a' => 0u64,
-            b'C' | b'c' => 1u64,
-            b'G' | b'g' => 2u64,
-            b'T' | b't' => 3u64,
-            _ => return None,
-        };
-        fwd = (fwd << 2) | v;
-    }
     let mut rev = 0u64;
-    for &b in seq.iter().rev() {
-        let v = match b {
-            b'A' | b'a' => 0u64,
-            b'C' | b'c' => 1u64,
-            b'G' | b'g' => 2u64,
-            b'T' | b't' => 3u64,
-            _ => return None,
-        };
-        let comp = 3 - v;
-        rev = (rev << 2) | comp;
+    let mut rev_shift = 0u32;
+    for &b in seq {
+        let v = BASE_CODES[b as usize];
+        if v == INVALID_BASE_CODE {
+            return None;
+        }
+        let v = u64::from(v);
+        fwd = (fwd << 2) | v;
+        rev |= (3 - v) << rev_shift;
+        rev_shift += 2;
     }
     Some((fwd, rev))
 }

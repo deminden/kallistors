@@ -37,10 +37,21 @@ struct PackedFastqRecord {
     qual: PackedSpan,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PackedSeqRecord {
+    seq: PackedSpan,
+}
+
 #[derive(Debug, Clone)]
 pub struct PackedFastqBatch {
     storage: Vec<u8>,
     records: Vec<PackedFastqRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackedSeqBatch {
+    storage: Vec<u8>,
+    records: Vec<PackedSeqRecord>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -51,8 +62,17 @@ pub struct PackedFastqRecordRef<'a> {
     pub qual: &'a [u8],
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PackedSeqRecordRef<'a> {
+    pub seq: &'a [u8],
+}
+
 pub trait PackedBatchSource {
     fn next_packed_batch(&mut self, batch_size: usize) -> Result<Option<PackedFastqBatch>>;
+}
+
+pub trait PackedSeqBatchSource {
+    fn next_packed_seq_batch(&mut self, batch_size: usize) -> Result<Option<PackedSeqBatch>>;
 }
 
 impl PackedFastqBatch {
@@ -78,6 +98,48 @@ impl PackedFastqBatch {
             plus: self.slice(record.plus),
             qual: self.slice(record.qual),
         })
+    }
+
+    fn slice(&self, span: PackedSpan) -> &[u8] {
+        let start = span.start as usize;
+        let end = start + span.len as usize;
+        &self.storage[start..end]
+    }
+}
+
+impl PackedSeqBatch {
+    fn with_capacity(records: usize, bytes: usize) -> Self {
+        Self {
+            storage: Vec::with_capacity(bytes),
+            records: Vec::with_capacity(records),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn records(&self) -> impl Iterator<Item = PackedSeqRecordRef<'_>> + '_ {
+        self.records.iter().map(|record| PackedSeqRecordRef {
+            seq: self.slice(record.seq),
+        })
+    }
+
+    pub fn seq(&self, idx: usize) -> &[u8] {
+        self.slice(self.records[idx].seq)
+    }
+
+    pub(crate) unsafe fn seq_unchecked(&self, idx: usize) -> &[u8] {
+        // Callers iterate below `len()`, so the record index is in bounds.
+        let span = unsafe { self.records.get_unchecked(idx).seq };
+        let start = span.start as usize;
+        let end = start + span.len as usize;
+        // Spans are produced from this storage by `read_line_span_into`.
+        unsafe { self.storage.get_unchecked(start..end) }
     }
 
     fn slice(&self, span: PackedSpan) -> &[u8] {
@@ -177,6 +239,12 @@ impl<R: BufRead> FastqReader<R> {
             len: len as u32,
         }))
     }
+
+    fn read_line_discard_into(&mut self, out: &mut Vec<u8>) -> Result<bool> {
+        out.clear();
+        let bytes = self.reader.read_until(b'\n', out)?;
+        Ok(bytes != 0)
+    }
 }
 
 impl<R: BufRead> ReadSource for FastqReader<R> {
@@ -238,6 +306,33 @@ impl<R: BufRead> PackedBatchSource for FastqReader<R> {
                 plus,
                 qual,
             });
+        }
+        if batch.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(batch))
+        }
+    }
+}
+
+impl<R: BufRead> PackedSeqBatchSource for FastqReader<R> {
+    fn next_packed_seq_batch(&mut self, batch_size: usize) -> Result<Option<PackedSeqBatch>> {
+        let mut batch = PackedSeqBatch::with_capacity(batch_size, batch_size * 300);
+        let mut discard = Vec::with_capacity(512);
+        while batch.records.len() < batch_size {
+            if !self.read_line_discard_into(&mut discard)? {
+                break;
+            }
+            let Some(seq) = self.read_line_span_into(&mut batch.storage)? else {
+                return Err(Error::InvalidFormat("truncated FASTQ".into()));
+            };
+            if !self.read_line_discard_into(&mut discard)? {
+                return Err(Error::InvalidFormat("truncated FASTQ".into()));
+            }
+            if !self.read_line_discard_into(&mut discard)? {
+                return Err(Error::InvalidFormat("truncated FASTQ".into()));
+            }
+            batch.records.push(PackedSeqRecord { seq });
         }
         if batch.is_empty() {
             Ok(None)

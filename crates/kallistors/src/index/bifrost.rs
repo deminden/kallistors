@@ -30,6 +30,19 @@ const WYHASH_SECRET: [u64; 4] = [
     0x8ebc6af09c88c6e3,
     0x589965cc75374cc3,
 ];
+const INVALID_BASE_CODE: u8 = 4;
+const BASE_CODES: [u8; 256] = {
+    let mut codes = [INVALID_BASE_CODE; 256];
+    codes[b'A' as usize] = 0;
+    codes[b'a' as usize] = 0;
+    codes[b'C' as usize] = 1;
+    codes[b'c' as usize] = 1;
+    codes[b'G' as usize] = 2;
+    codes[b'g' as usize] = 2;
+    codes[b'T' as usize] = 3;
+    codes[b't' as usize] = 3;
+    codes
+};
 
 #[derive(Clone)]
 pub struct BooPhf {
@@ -347,30 +360,22 @@ pub fn minimizer_hash(key: &[u8; 8], seed: u64) -> u64 {
 }
 
 fn encode_word_pair(seq: &[u8]) -> Option<(u64, u64)> {
+    if seq.is_empty() {
+        return Some((0, 0));
+    }
     let mut fwd = 0u64;
+    let mut rev = 0u64;
+    let last = seq.len() - 1;
     for (i, &b) in seq.iter().enumerate() {
-        let v = match b {
-            b'A' | b'a' => 0u64,
-            b'C' | b'c' => 1u64,
-            b'G' | b'g' => 2u64,
-            b'T' | b't' => 3u64,
-            _ => return None,
-        };
+        let v = BASE_CODES[b as usize];
+        if v == INVALID_BASE_CODE {
+            return None;
+        }
+        let v = u64::from(v);
         let shift = 62 - ((i & 0x1f) << 1);
         fwd |= v << shift;
-    }
-    let mut rev = 0u64;
-    for (i, &b) in seq.iter().rev().enumerate() {
-        let v = match b {
-            b'A' | b'a' => 0u64,
-            b'C' | b'c' => 1u64,
-            b'G' | b'g' => 2u64,
-            b'T' | b't' => 3u64,
-            _ => return None,
-        };
-        let comp = 3 - v;
-        let shift = 62 - ((i & 0x1f) << 1);
-        rev |= comp << shift;
+        let rev_shift = 62 - (((last - i) & 0x1f) << 1);
+        rev |= (3 - v) << rev_shift;
     }
     Some((fwd, rev))
 }

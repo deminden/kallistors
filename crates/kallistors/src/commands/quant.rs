@@ -95,7 +95,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
     let load_positional_info = filter
         .map(|v| !v.single_overhang && v.fragment_length > 0)
         .unwrap_or(false);
-    let index = if load_positional_info || !single {
+    let index = if load_positional_info {
         if args.kallisto_direct_kmer {
             kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(&args.index, true)
         } else if args.kallisto_fallback {
@@ -171,21 +171,10 @@ pub fn run(args: QuantArgs) -> Result<()> {
         .map_err(|err| anyhow!("pseudoalign failed: {err}"))?
     };
 
-    let index_meta = kallistors::index::Index::load(&args.index)?;
-    let lengths = index_meta
-        .transcripts
-        .iter()
-        .map(|t| t.length)
-        .collect::<Vec<_>>();
-
     let transcript_seqs = if args.bias {
         Some(kallistors::quant::load_transcript_sequences(
             args.transcripts.as_ref().unwrap(),
-            &index_meta
-                .transcripts
-                .iter()
-                .map(|t| t.name.clone())
-                .collect::<Vec<_>>(),
+            &index.transcript_names,
         )?)
     } else {
         None
@@ -196,19 +185,29 @@ pub fn run(args: QuantArgs) -> Result<()> {
     } else {
         estimate_paired_fragment_lengths(&ec_counts).unwrap_or((200.0, 20.0))
     };
+    let unique = kallistors::pseudoalign::unique_pseudoaligned_reads(&ec_counts);
+    let kallistors::pseudoalign::EcCounts {
+        ec_list,
+        counts,
+        reads_processed,
+        reads_aligned,
+        bias,
+        fragment_length_stats: _,
+        fragment_length_hist: _,
+    } = ec_counts;
+    let ec_class_count = ec_list.len();
+    let ec_input = kallistors::quant::EcCountsInput {
+        ec_list: kallistors::ec::EcList { classes: ec_list },
+        counts,
+    };
 
     let result = {
         let _em_timing = kallistors::timing::scoped(kallistors::timing::Stage::Em);
         kallistors::quant::em_quantify(
-            &kallistors::quant::EcCountsInput {
-                ec_list: kallistors::ec::EcList {
-                    classes: ec_counts.ec_list.clone(),
-                },
-                counts: ec_counts.counts.clone(),
-            },
-            &lengths,
+            &ec_input,
+            &index.transcript_lengths,
             transcript_seqs.as_deref(),
-            ec_counts.bias.as_ref(),
+            bias.as_ref(),
             kallistors::quant::QuantOptions {
                 mean_fragment_length,
                 fragment_length_sd,
@@ -222,33 +221,41 @@ pub fn run(args: QuantArgs) -> Result<()> {
     fs::create_dir_all(&args.out_dir)?;
     let abundance_path = args.out_dir.join("abundance.tsv");
     let run_info_path = args.out_dir.join("run_info.json");
-    kallistors::quant::write_abundance_tsv(&abundance_path, &index_meta, &result)?;
+    let target_names = index
+        .transcript_names
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    kallistors::quant::write_abundance_tsv_from_parts(
+        &abundance_path,
+        &target_names,
+        &index.transcript_lengths,
+        &result,
+    )?;
 
-    let unique = kallistors::pseudoalign::unique_pseudoaligned_reads(&ec_counts);
-    let p_pseudoaligned = percent(ec_counts.reads_aligned, ec_counts.reads_processed);
-    let p_unique = percent(unique, ec_counts.reads_processed);
+    let p_pseudoaligned = percent(reads_aligned, reads_processed);
+    let p_unique = percent(unique, reads_processed);
     let run_info = kallistors::quant::RunInfo {
-        n_targets: index_meta.transcripts.len(),
+        n_targets: index.transcript_names.len(),
         n_bootstraps: 0,
-        n_processed: ec_counts.reads_processed,
-        n_pseudoaligned: ec_counts.reads_aligned,
+        n_processed: reads_processed,
+        n_pseudoaligned: reads_aligned,
         n_unique: unique,
         p_pseudoaligned,
         p_unique,
         kallisto_version: format!("kallistors {}", env!("CARGO_PKG_VERSION")),
-        index_version: index_meta.index_version,
-        kmer_length: index_meta.k,
+        index_version: index.index_version,
+        kmer_length: index.k as u32,
         start_time,
         call: std::env::args().collect::<Vec<_>>().join(" "),
     };
     run_info.write_json(&run_info_path)?;
-    let _ = ec_counts.fragment_length_hist;
 
     println!(
         "processed: {}, aligned: {}, ecs: {}, time: {:.2?}",
-        ec_counts.reads_processed,
-        ec_counts.reads_aligned,
-        ec_counts.ec_list.len(),
+        reads_processed,
+        reads_aligned,
+        ec_class_count,
         start.elapsed()
     );
     if timings_enabled {

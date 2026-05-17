@@ -3,25 +3,38 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::ops::Index;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::ThreadPool;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
 use crate::index::bifrost::{BooPhf, read_bitcontainer_values};
-use crate::index::{parse_graph_section, read_block_array_blocks};
+use crate::index::read_block_array_blocks;
 use crate::timing::{self, Stage};
 use crate::{Error, Result};
 
 use super::ec::encode_kmer_pair;
 use super::io::{read_i32_le, read_u32_le, read_u64_le};
-use super::{KMER_BYTES_CANDIDATES, KmerEcIndex, read_onlist_with_lengths};
+use super::{KmerEcIndex, read_onlist_with_lengths};
 
 pub type KmerPosIndex = HashMap<u64, Vec<(usize, usize, bool)>>;
 
 const LOAD_BATCH_POSITIONS: usize = 1 << 20;
 const LOAD_MIN_PAR_CHUNK: usize = 1 << 14;
+const INVALID_BASE_CODE: u8 = 4;
+const BASE_CODES: [u8; 256] = {
+    let mut codes = [INVALID_BASE_CODE; 256];
+    codes[b'A' as usize] = 0;
+    codes[b'a' as usize] = 0;
+    codes[b'C' as usize] = 1;
+    codes[b'c' as usize] = 1;
+    codes[b'G' as usize] = 2;
+    codes[b'g' as usize] = 2;
+    codes[b'T' as usize] = 3;
+    codes[b't' as usize] = 3;
+    codes
+};
 
 pub(crate) struct EncodedMinimizerStore {
     offsets: Vec<usize>,
@@ -151,6 +164,13 @@ impl EncodedBaseStore {
         };
 
         Self { offsets, values }
+    }
+
+    #[inline]
+    pub(crate) fn len(&self, seq_idx: usize) -> Option<usize> {
+        let start = *self.offsets.get(seq_idx)?;
+        let end = *self.offsets.get(seq_idx + 1)?;
+        Some(end - start)
     }
 
     #[inline]
@@ -330,6 +350,7 @@ impl Index<usize> for MinzPositionIndex {
 }
 
 pub struct BifrostIndex {
+    pub index_version: u64,
     pub k: usize,
     pub g: usize,
     pub unitigs: Vec<Vec<u8>>,
@@ -415,12 +436,9 @@ fn build_bifrost_index_with_positions_threaded_impl(
     let file = File::open(path).map_err(|_| Error::MissingFile(path.to_path_buf()))?;
     let mut reader = BufReader::new(file);
 
-    let _index_version = read_u64_le(&mut reader)?;
+    let index_version = read_u64_le(&mut reader)?;
     let dbg_size = read_u64_le(&mut reader)?;
     let dbg_start = reader.stream_position()?;
-    let graph_meta = parse_graph_section(&mut reader, dbg_start, dbg_size, &KMER_BYTES_CANDIDATES)?;
-    let kmer_bytes = graph_meta.kmer_bytes;
-    reader.seek(SeekFrom::Start(dbg_start))?;
     drop(_header_timing);
 
     let _graph_timing = timing::scoped(Stage::GraphDecode);
@@ -439,6 +457,7 @@ fn build_bifrost_index_with_positions_threaded_impl(
             "k/g > 32 not supported in Bifrost path".into(),
         ));
     }
+    let kmer_bytes = 8usize;
 
     let v_unitigs_sz = read_u64_le(&mut reader)? as usize;
     let mut unitigs = Vec::with_capacity(v_unitigs_sz);
@@ -563,12 +582,13 @@ fn build_bifrost_index_with_positions_threaded_impl(
         Vec::new()
     };
     let mut flat_ec = FlatEcIndex::new(node_count);
+    let mut node_buf = Vec::new();
     for _ in 0..node_count {
         reader.seek(SeekFrom::Current(k as i64))?;
         let node_size = read_u32_le(&mut reader)? as usize;
-        let mut buf = vec![0u8; node_size];
-        reader.read_exact(&mut buf)?;
-        let mut cur = std::io::Cursor::new(buf.as_slice());
+        node_buf.resize(node_size, 0);
+        reader.read_exact(&mut node_buf)?;
+        let mut cur = std::io::Cursor::new(node_buf.as_slice());
         let _node_id = read_u32_le(&mut cur)?;
         let blocks = if load_positional_info {
             crate::index::read_block_array_blocks_with_positions(&mut cur)?
@@ -656,6 +676,7 @@ fn build_bifrost_index_with_positions_threaded_impl(
     let onlist = read_onlist_with_lengths(&mut reader)?;
 
     Ok(BifrostIndex {
+        index_version,
         k,
         g,
         unitigs,
@@ -687,26 +708,25 @@ struct KmerLoadContext<'a> {
 }
 
 fn base_code(base: u8) -> Option<u64> {
-    match base {
-        b'A' | b'a' => Some(0),
-        b'C' | b'c' => Some(1),
-        b'G' | b'g' => Some(2),
-        b'T' | b't' => Some(3),
-        _ => None,
+    let code = BASE_CODES[base as usize];
+    if code == INVALID_BASE_CODE {
+        None
+    } else {
+        Some(u64::from(code))
     }
 }
 
 fn encode_word_pair(seq: &[u8]) -> Option<(u64, u64)> {
+    if seq.is_empty() {
+        return Some((0, 0));
+    }
     let mut fwd = 0u64;
+    let mut rev = 0u64;
+    let last = seq.len() - 1;
     for (i, &base) in seq.iter().enumerate() {
         let code = base_code(base)?;
         fwd |= code << (62 - ((i & 0x1f) << 1));
-    }
-
-    let mut rev = 0u64;
-    for (i, &base) in seq.iter().rev().enumerate() {
-        let code = base_code(base)?;
-        rev |= (3 - code) << (62 - ((i & 0x1f) << 1));
+        rev |= (3 - code) << (62 - (((last - i) & 0x1f) << 1));
     }
     Some((fwd, rev))
 }
@@ -740,9 +760,11 @@ fn compute_minimizer_reps_into(seq: &[u8], g: usize, out: &mut [[u8; 8]]) {
     out[0] = fwd.min(rev).to_le_bytes();
 
     for (dst, &base) in out.iter_mut().skip(1).zip(&seq[g..]) {
-        let Some(code) = base_code(base) else {
+        let code = BASE_CODES[base as usize];
+        if code == INVALID_BASE_CODE {
             return;
-        };
+        }
+        let code = u64::from(code);
         let comp = 3 - code;
         fwd = ((fwd << 2) & high_mask) | (code << tail_shift);
         rev = ((rev >> 2) & high_mask) | (comp << 62);
@@ -753,13 +775,7 @@ fn compute_minimizer_reps_into(seq: &[u8], g: usize, out: &mut [[u8; 8]]) {
 fn encode_bases_into(seq: &[u8], out: &mut [u8]) {
     debug_assert_eq!(seq.len(), out.len());
     for (src, dst) in seq.iter().zip(out.iter_mut()) {
-        *dst = match *src {
-            b'A' | b'a' => 0,
-            b'C' | b'c' => 1,
-            b'G' | b'g' => 2,
-            b'T' | b't' => 3,
-            _ => 0,
-        };
+        *dst = BASE_CODES[*src as usize] & 3;
     }
 }
 
@@ -918,12 +934,7 @@ fn populate_unitig_minimizer_storage(
         .copied()
         .map(AtomicUsize::new)
         .collect::<Vec<_>>();
-    let values = minz_positions
-        .values
-        .iter()
-        .copied()
-        .map(AtomicU64::new)
-        .collect::<Vec<_>>();
+    let values_ptr = minz_positions.values.as_mut_ptr() as usize;
     pool.install(|| {
         bmp_unitigs.par_iter().enumerate().for_each(|(i, bitmap)| {
             let mut state = states[i];
@@ -937,14 +948,15 @@ fn populate_unitig_minimizer_storage(
                 {
                     let pos_id = ((state.unitig_id as u64) << 32) | rel as u64;
                     let slot = cursors[idx as usize].fetch_add(1, Ordering::Relaxed);
-                    values[slot].store(pos_id, Ordering::Relaxed);
+                    // SAFETY: the precomputed bucket counts make each fetched slot unique,
+                    // so parallel workers never write the same position.
+                    unsafe {
+                        (values_ptr as *mut u64).add(slot).write(pos_id);
+                    }
                 }
             }
         });
     });
-    for (dst, src) in minz_positions.values.iter_mut().zip(values) {
-        *dst = src.into_inner();
-    }
     for (dst, src) in minz_cursors.iter_mut().zip(cursors) {
         *dst = src.into_inner();
     }
@@ -1028,12 +1040,7 @@ fn populate_kmer_minimizer_storage(
         .copied()
         .map(AtomicUsize::new)
         .collect::<Vec<_>>();
-    let values = minz_positions
-        .values
-        .iter()
-        .copied()
-        .map(AtomicU64::new)
-        .collect::<Vec<_>>();
+    let values_ptr = minz_positions.values.as_mut_ptr() as usize;
     pool.install(|| {
         bmp_km.par_iter().enumerate().for_each(|(i, bitmap)| {
             let base = (i as u64) << 32;
@@ -1046,14 +1053,15 @@ fn populate_kmer_minimizer_storage(
                 {
                     let pos_id = ((km_id as u64) << 32) | 0x8000_0000 | km_pos as u64;
                     let slot = cursors[idx as usize].fetch_add(1, Ordering::Relaxed);
-                    values[slot].store(pos_id, Ordering::Relaxed);
+                    // SAFETY: the precomputed bucket counts make each fetched slot unique,
+                    // so parallel workers never write the same position.
+                    unsafe {
+                        (values_ptr as *mut u64).add(slot).write(pos_id);
+                    }
                 }
             }
         });
     });
-    for (dst, src) in minz_positions.values.iter_mut().zip(values) {
-        *dst = src.into_inner();
-    }
     for (dst, src) in minz_cursors.iter_mut().zip(cursors) {
         *dst = src.into_inner();
     }

@@ -5,13 +5,13 @@ kallistors: a Rust implementation of kallisto-style pseudoalignment and quantifi
 - Exact full-file paired-end `run_info.json` count parity with `kallisto` on the checked-in real
   dataset: `n_processed = 4408640`, `n_pseudoaligned = 4244771`, `n_unique = 276251`.
 - Last measured full-file benchmark on `7950X3D`, `-t 32`:
-  `kallisto 57.14s`, `kallistors 70.73s` (`+13.59s`, about `1.24x` slower). See
+  `kallisto 59.12s`, `kallistors 30.76s` (`1.92x` faster, about `48%` less wall time). See
   [bench_latest.md](bench_latest.md) for the benchmark record.
 - Uses the `zlib-rs` gzip backend for faster compressed FASTQ input.
 - Uses packed/reusable FASTQ batches plus long-lived worker `EcCounts` state to reduce allocation
   and threaded handoff overhead.
 
-## Compatibility notes (v0.2.3)
+## Compatibility notes (v0.2.4)
 
 This is a focused reimplementation at the current stage, not a drop-in replacement for `kallisto`.
 
@@ -31,8 +31,8 @@ Current real-data status:
   real dataset under `data/` with `--threads 32`.
 - Full-file paired-end quant has exact `run_info.json` count parity on the same checked-in index and
   reads.
-- Full-file runtime is still slower than `kallisto`; current timings and stage measurements are in
-  [bench_latest.md](bench_latest.md).
+- Full-file runtime is currently faster than local upstream `kallisto`; current timings and stage
+  measurements are in [bench_latest.md](bench_latest.md).
 - `abundance.tsv` is validated with floating-point tolerances where tests compare estimates. The
   README does not claim bit-for-bit abundance parity.
 
@@ -94,7 +94,11 @@ Notes:
   metadata in contiguous arrays.
 - Small direct-mapped hot lookup caches for MPHF minimizer lookup and EC block lookup were enlarged
   to reduce collision misses in the common path.
-
+- Quant now reuses transcript metadata already loaded by the Bifrost index path instead of reloading
+  index metadata and cloning EC tables before EM.
+- The Bifrost loader skips redundant graph pre-scanning on the supported `k <= 32` path, lazily
+  allocates shade metadata, reuses graph-node buffers, and avoids paired positional payload loading
+  when paired fragment estimation only needs flat EC block bounds.
 
 ### Real-data benchmark (current checked-in dataset)
 The detailed benchmark record lives in [bench_latest.md](bench_latest.md). The commands below are
@@ -121,9 +125,10 @@ kallisto_src/build/src/kallisto quant \
   "data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade (2).gz"
 ```
 
-Last measured result: `kallisto 57.14s`, `kallistors 70.73s` on 2026-05-16, Linux x86_64,
-`7950X3D`, `-t 32`. Stage timings in [bench_latest.md](bench_latest.md) are instrumentation
-timings for individual phases and should not be treated as additive wall-clock components.
+Last measured result: `kallisto 59.12s`, `kallistors 30.76s` on 2026-05-17, Linux x86_64,
+`7950X3D`, `-t 32`, with exact `run_info.json` counts. Stage timings in
+[bench_latest.md](bench_latest.md) are instrumentation timings for individual phases and should
+not be treated as additive wall-clock components.
 
 ### Parity tests
 - Synthetic parity: `variants_parity` requires exact aligned-count parity with `kallisto`.

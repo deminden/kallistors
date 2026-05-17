@@ -3,6 +3,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 mod commands;
 
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "kallistors",

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::bias::BiasCounts;
-use crate::io::{PackedFastqBatch, ReadSource};
+use crate::io::{PackedSeqBatch, ReadSource};
 use crate::{Error, Result};
 
 use super::{
@@ -265,8 +265,8 @@ pub fn trace_read_pair_bifrost(
 
 pub(crate) fn pseudoalign_paired_bifrost_batch_into(
     index: &BifrostIndex,
-    left_batch: PackedFastqBatch,
-    right_batch: PackedFastqBatch,
+    left_batch: PackedSeqBatch,
+    right_batch: PackedSeqBatch,
     strand: Strand,
     options: PseudoalignOptions,
     counts: &mut EcCounts,
@@ -281,14 +281,16 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
         .take()
         .unwrap_or_else(|| vec![0u32; super::MAX_FRAG_LEN as usize]);
 
-    for (a, b) in left_batch.records().zip(right_batch.records()) {
+    for idx in 0..left_batch.len() {
+        let a_seq = unsafe { left_batch.seq_unchecked(idx) };
+        let b_seq = unsafe { right_batch.seq_unchecked(idx) };
         if super::reset_all_caches_per_read() {
             super::reset_thread_local_caches();
         }
         counts.reads_processed = counts.reads_processed.saturating_add(1);
 
-        let mut ec1 = super::ec_for_read_bifrost(index, a.seq, strand, None, options);
-        let mut ec2 = super::ec_for_read_bifrost(index, b.seq, strand, None, options);
+        let mut ec1 = super::ec_for_read_bifrost(index, a_seq, strand, None, options);
+        let mut ec2 = super::ec_for_read_bifrost(index, b_seq, strand, None, options);
         if ec1.is_none() && ec2.is_none() {
             continue;
         }

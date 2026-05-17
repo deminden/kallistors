@@ -24,7 +24,7 @@ struct EmMultiEc {
 }
 
 struct EmWork {
-    singleton_ecs: Vec<(usize, f64)>,
+    singleton_alpha: Vec<f64>,
     multi_ecs: Vec<EmMultiEc>,
     multi_transcripts: Vec<usize>,
     multi_weights: Vec<f64>,
@@ -105,17 +105,38 @@ impl RunInfo {
 
 /// Write kallisto-compatible `abundance.tsv`.
 pub fn write_abundance_tsv(path: &Path, index: &Index, result: &QuantResult) -> Result<()> {
+    let names = index
+        .transcripts
+        .iter()
+        .map(|tr| tr.name.as_str())
+        .collect::<Vec<_>>();
+    let lengths = index
+        .transcripts
+        .iter()
+        .map(|tr| tr.length)
+        .collect::<Vec<_>>();
+    write_abundance_tsv_from_parts(path, &names, &lengths, result)
+}
+
+/// Write kallisto-compatible `abundance.tsv` from already loaded transcript metadata.
+pub fn write_abundance_tsv_from_parts(
+    path: &Path,
+    target_names: &[&str],
+    target_lengths: &[u32],
+    result: &QuantResult,
+) -> Result<()> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
     writeln!(writer, "target_id\tlength\teff_length\test_counts\ttpm")?;
-    for (i, tr) in index.transcripts.iter().enumerate() {
+    for (i, name) in target_names.iter().enumerate() {
+        let length = target_lengths.get(i).copied().unwrap_or(0);
         let eff_len = result.eff_lengths.get(i).copied().unwrap_or(0.0);
         let est = result.est_counts.get(i).copied().unwrap_or(0.0);
         let tpm = result.tpm.get(i).copied().unwrap_or(0.0);
         writeln!(
             writer,
             "{}\t{}\t{}\t{}\t{}",
-            tr.name, tr.length, eff_len, est, tpm
+            name, length, eff_len, est, tpm
         )?;
     }
     Ok(())
@@ -331,9 +352,7 @@ pub fn em_quantify(
             refresh_multi_weights(&mut em_work, &eff_lens);
         }
 
-        for &(tr, count) in &em_work.singleton_ecs {
-            next_alpha[tr] = count;
-        }
+        next_alpha.copy_from_slice(&em_work.singleton_alpha);
 
         for ec in &em_work.multi_ecs {
             let range = ec.start..ec.start + ec.len;
@@ -361,7 +380,6 @@ pub fn em_quantify(
                 }
             }
             alpha[i] = next_alpha[i];
-            next_alpha[i] = 0.0;
         }
 
         let stop_em = chcount == 0 && iter > options.min_rounds;
@@ -406,7 +424,7 @@ pub fn em_quantify(
 }
 
 fn prepare_em_work(input: &EcCountsInput, eff_lens: &[f64]) -> EmWork {
-    let mut singleton_ecs = Vec::new();
+    let mut singleton_alpha = vec![0.0f64; eff_lens.len()];
     let mut multi_ecs = Vec::new();
     let mut multi_transcripts = Vec::new();
     let mut multi_weights = Vec::new();
@@ -414,7 +432,9 @@ fn prepare_em_work(input: &EcCountsInput, eff_lens: &[f64]) -> EmWork {
         let count = input.counts.get(ec_id).copied().unwrap_or(0) as f64;
         if ec.len() == 1 {
             let tr = ec[0] as usize;
-            singleton_ecs.push((tr, count));
+            if tr < singleton_alpha.len() {
+                singleton_alpha[tr] = count;
+            }
         } else if ec.len() > 1 && count != 0.0 {
             let start = multi_transcripts.len();
             for &tr in ec {
@@ -431,7 +451,7 @@ fn prepare_em_work(input: &EcCountsInput, eff_lens: &[f64]) -> EmWork {
         }
     }
     EmWork {
-        singleton_ecs,
+        singleton_alpha,
         multi_ecs,
         multi_transcripts,
         multi_weights,

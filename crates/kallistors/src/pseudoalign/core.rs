@@ -36,9 +36,16 @@ struct MphfCacheEntry {
     state: u8,
 }
 
-#[derive(Default)]
 struct MphfLookupCache {
-    entries: [MphfCacheEntry; 32],
+    entries: [MphfCacheEntry; 128],
+}
+
+impl Default for MphfLookupCache {
+    fn default() -> Self {
+        Self {
+            entries: [MphfCacheEntry::default(); 128],
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -51,19 +58,19 @@ struct BlockLookupCacheEntry {
 }
 
 struct BlockLookupCache {
-    entries: [BlockLookupCacheEntry; 16],
+    entries: [BlockLookupCacheEntry; 128],
 }
 
 impl BlockLookupCache {
     fn new() -> Self {
         Self {
-            entries: [BlockLookupCacheEntry::default(); 16],
+            entries: [BlockLookupCacheEntry::default(); 128],
         }
     }
 
     #[inline]
     fn slot(unitig_id: usize, pos: usize) -> usize {
-        (unitig_id ^ pos) & 15
+        (unitig_id ^ pos) & 127
     }
 
     #[inline]
@@ -103,13 +110,13 @@ struct MinimizerCandidateCache {
 impl MinimizerCandidateCache {
     fn new() -> Self {
         Self {
-            entries: vec![MinimizerCandidateCacheEntry::default(); 1 << 14],
+            entries: vec![MinimizerCandidateCacheEntry::default(); 1 << 16],
         }
     }
 
     #[inline]
     fn slot(&self, key: u64) -> usize {
-        (key as usize) & (self.entries.len() - 1)
+        (key ^ (key >> 32)) as usize & (self.entries.len() - 1)
     }
 
     #[inline]
@@ -168,7 +175,7 @@ impl FastKmerMatchCache {
 
     #[inline]
     fn slot(&self, key: u64) -> usize {
-        (key as usize) & (self.entries.len() - 1)
+        (key ^ (key >> 32)) as usize & (self.entries.len() - 1)
     }
 
     #[inline]
@@ -302,11 +309,8 @@ fn minimizer_candidates_cached_into_with_code(
     g: usize,
     fwd_code: u64,
     out: &mut Vec<([u8; 8], usize)>,
+    cache_disabled: bool,
 ) -> bool {
-    let cache_disabled = env_flag(
-        &DISABLE_MINIMIZER_CACHE,
-        "KALLISTORS_DISABLE_MINIMIZER_CACHE",
-    );
     if !cache_disabled {
         let hit = MINIMIZER_CANDIDATE_CACHE.with(|tl| {
             let cache = tl.borrow();
@@ -420,7 +424,7 @@ fn match_unitig_candidate_encoded(
     allow_rev: bool,
     allow_relaxed: bool,
 ) -> Option<(usize, bool, bool, bool)> {
-    let unitig_len = index.unitigs[unitig_id].len();
+    let unitig_len = index.encoded_unitigs.unitig_bases.len(unitig_id)?;
     if unitig_len < index.k {
         return None;
     }
@@ -719,8 +723,15 @@ fn match_kmer_at_pos_fast_uncached_with_codes(
     cache: &mut MphfLookupCache,
     allow_relaxed: bool,
     allow_tail_minimizer: bool,
+    minimizer_cache_disabled: bool,
 ) -> Option<FastKmerMatch> {
-    if !minimizer_candidates_cached_into_with_code(kmer, index.g, read_fwd, min_candidates) {
+    if !minimizer_candidates_cached_into_with_code(
+        kmer,
+        index.g,
+        read_fwd,
+        min_candidates,
+        minimizer_cache_disabled,
+    ) {
         return None;
     }
     let tail_candidate = minimizer_tail_for_kmer(kmer, index.g);
@@ -857,19 +868,8 @@ fn match_kmer_at_pos_fast_uncached_with_candidates(
 }
 
 #[inline]
-fn fast_match_cache_key_from_codes(
-    fwd: u64,
-    rev: u64,
-    allow_forward: bool,
-    allow_rev: bool,
-    allow_relaxed: bool,
-) -> (u64, u64) {
-    let mut key = fwd;
-    key ^= rev.rotate_left(17);
-    key ^= u64::from(allow_forward as u8) << 62;
-    key ^= u64::from(allow_rev as u8) << 61;
-    key ^= u64::from(allow_relaxed as u8) << 60;
-    (key, fwd.min(rev))
+fn fast_match_cache_key_from_codes(fwd: u64, rev: u64) -> u64 {
+    fwd ^ rev.rotate_left(17)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -885,17 +885,12 @@ fn match_kmer_at_pos_fast_with_codes(
     cache: &mut MphfLookupCache,
     allow_relaxed: bool,
     allow_tail_minimizer: bool,
+    minimizer_cache_disabled: bool,
+    match_cache_disabled: bool,
 ) -> Option<FastKmerMatch> {
-    let (cache_key, _canonical_code) = fast_match_cache_key_from_codes(
-        read_fwd,
-        read_rev,
-        allow_forward,
-        allow_rev,
-        allow_relaxed,
-    );
+    let cache_key = fast_match_cache_key_from_codes(read_fwd, read_rev);
     let flags = ((allow_forward as u8) << 2) | ((allow_rev as u8) << 1) | (allow_relaxed as u8);
-    let cache_disabled = env_flag(&DISABLE_MATCH_CACHE, "KALLISTORS_DISABLE_MATCH_CACHE");
-    if !cache_disabled
+    if !match_cache_disabled
         && let Some(cached) = FAST_KMER_MATCH_CACHE.with(|tl| tl.borrow().get(cache_key, flags))
     {
         return cached;
@@ -912,8 +907,9 @@ fn match_kmer_at_pos_fast_with_codes(
         cache,
         allow_relaxed,
         allow_tail_minimizer,
+        minimizer_cache_disabled,
     );
-    if !cache_disabled {
+    if !match_cache_disabled {
         FAST_KMER_MATCH_CACHE.with(|tl| tl.borrow_mut().put(cache_key, flags, matched));
     }
     matched
@@ -945,6 +941,12 @@ fn ec_for_read_bifrost_fast(
     let mut online_intersection: Vec<u32> = Vec::new();
     let mut has_online_intersection = false;
     let mut backoff_until: Option<usize> = None;
+    let mut fallback_rev_buf: Vec<u8> = Vec::new();
+    let minimizer_cache_disabled = env_flag(
+        &DISABLE_MINIMIZER_CACHE,
+        "KALLISTORS_DISABLE_MINIMIZER_CACHE",
+    );
+    let match_cache_disabled = env_flag(&DISABLE_MATCH_CACHE, "KALLISTORS_DISABLE_MATCH_CACHE");
     let mut pos = 0usize;
     let last_pos = seq.len() - index.k;
     while pos <= last_pos {
@@ -989,6 +991,7 @@ fn ec_for_read_bifrost_fast(
                 index.g,
                 read_fwd,
                 &mut min_candidates,
+                minimizer_cache_disabled,
             ) {
                 pos += 1;
                 continue;
@@ -1020,7 +1023,6 @@ fn ec_for_read_bifrost_fast(
                 });
             }
         }
-        let mut fallback_rev_buf: Vec<u8> = Vec::new();
         let matched = if let Some(matched) = match_kmer_at_pos_fast_uncached_with_codes(
             index,
             kmer,
@@ -1033,6 +1035,7 @@ fn ec_for_read_bifrost_fast(
             &mut cache,
             true,
             !in_backoff,
+            minimizer_cache_disabled,
         ) {
             matched
         } else if !options.kallisto_strict
@@ -1193,6 +1196,8 @@ fn ec_for_read_bifrost_fast(
                         &mut cache,
                         true,
                         !in_backoff,
+                        minimizer_cache_disabled,
+                        match_cache_disabled,
                     )
                 });
                 let current_ec = ec_slice(index, uid, block_idx);
@@ -1256,6 +1261,8 @@ fn ec_for_read_bifrost_fast(
                                         &mut cache,
                                         true,
                                         !in_backoff,
+                                        minimizer_cache_disabled,
+                                        match_cache_disabled,
                                     )
                                 })
                             {
@@ -1406,6 +1413,8 @@ fn ec_for_read_bifrost_fast(
                                         &mut cache,
                                         options.investigation.candidate_reuse,
                                         !in_backoff,
+                                        minimizer_cache_disabled,
+                                        match_cache_disabled,
                                     )
                                 });
                             if let Some(scan_hit) = scan_hit {

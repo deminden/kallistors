@@ -608,9 +608,10 @@ pub(crate) fn read_sparse_vector_with_positions<R: Read>(
     let v_size = read_u64_le(reader)? as usize;
     let mut mins = Vec::with_capacity(v_size);
     let mut strands = Vec::with_capacity(v_size);
+    let mut pbuf = Vec::new();
     for _ in 0..v_size {
         let p_size = read_u64_le(reader)? as usize;
-        let mut pbuf = vec![0u8; p_size];
+        pbuf.resize(p_size, 0);
         reader.read_exact(&mut pbuf)?;
         let (min, max) = unsafe { deserialize_roaring_minmax(&pbuf) }
             .ok_or_else(|| Error::InvalidFormat("failed to deserialize roaring bitmap".into()))?;

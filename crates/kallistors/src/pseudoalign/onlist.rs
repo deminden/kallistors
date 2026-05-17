@@ -52,24 +52,40 @@ pub(super) fn read_onlist_with_lengths<R: Read>(reader: &mut R) -> Result<Onlist
         }
         lengths.push(len as u32);
     }
-    let mut names = Vec::with_capacity(num_trans);
-    let mut shade_to_color = vec![None; num_trans];
-    let mut shade_sequences = vec![false; num_trans];
-    let mut name_to_index: HashMap<String, usize> = HashMap::new();
+    let mut names: Vec<String> = Vec::with_capacity(num_trans);
+    let mut shade_to_color = Vec::new();
+    let mut shade_sequences = Vec::new();
+    let mut name_to_index: Option<HashMap<String, usize>> = None;
     let mut use_shade = false;
     for idx in 0..num_trans {
         let name_len = read_u64_le(reader)? as usize;
         let mut buf = vec![0u8; name_len];
         reader.read_exact(&mut buf)?;
-        let name = String::from_utf8_lossy(&buf).into_owned();
+        let name = match String::from_utf8(buf) {
+            Ok(name) => name,
+            Err(err) => String::from_utf8_lossy(err.as_bytes()).into_owned(),
+        };
         if let Some((base, _variant)) = split_shade_name(&name) {
-            use_shade = true;
+            if !use_shade {
+                use_shade = true;
+                shade_to_color = vec![None; num_trans];
+                shade_sequences = vec![false; num_trans];
+            }
             shade_sequences[idx] = true;
-            if let Some(color_idx) = name_to_index.get(base) {
+            let map = name_to_index.get_or_insert_with(|| {
+                let mut map = HashMap::with_capacity(names.len());
+                for (name_idx, prior_name) in names.iter().enumerate() {
+                    if split_shade_name(prior_name).is_none() {
+                        map.entry(prior_name.clone()).or_insert(name_idx);
+                    }
+                }
+                map
+            });
+            if let Some(color_idx) = map.get(base) {
                 shade_to_color[idx] = Some(*color_idx as u32);
             }
-        } else {
-            name_to_index.entry(name.clone()).or_insert(idx);
+        } else if let Some(map) = name_to_index.as_mut() {
+            map.entry(name.clone()).or_insert(idx);
         }
         names.push(name);
     }

@@ -85,8 +85,8 @@ Notes:
 
 Acceptance test:
 - On `data/gencode.v49_kallisto.idx`, `kallistors quant` should spend most of its wall time in
-  pseudoalignment/EM rather than loader startup, and the gap to `kallisto quant` on the same
-  1024-read subset should shrink materially without using an on-disk cache.
+  pseudoalignment/EM rather than loader startup, and full-file `-t 32` runtime should stay at or
+  below local upstream `kallisto` without using an on-disk cache.
 
 Notes:
 - Upstream `kallisto`/Bifrost loads minimizer occurrences directly into `MinimizerIndex` during
@@ -123,20 +123,22 @@ Notes:
 - Tried a quant-only loader shortcut that omitted nested `ec_blocks` and kept only the flattened EC
   representation. It looked fine on tiny subsets but regressed larger paired parity, so normal
   quant/pseudoalign commands were switched back to the standard builder.
-- Remaining search-side gap is still in candidate validation and pathological fallback handling,
-  not in loader timing or EC merge.
-- Current full-file benchmark on the checked-in real dataset (`-t 32`):
-  `kallisto` wall `57.14s`
-  `kallistors` wall `70.73s`
+- Current full-file benchmark on the checked-in real dataset (`-t 32`) is faster than local
+  upstream `kallisto` while preserving exact run-info counts:
+  `kallisto` wall `59.12s`
+  `kallistors` wall `30.76s`
   `kallistors` stage timings:
-  `index_header_parse 2.183s`
-  `graph_decode 6.855s`
-  `minimizer_count_pass 1.358s`
-  `minimizer_fill_pass 9.062s`
-  `fastq_read_decompress 29.023s`
-  `pseudoalign 36.610s`
-  `ec_merge 0.192s`
-  `em 8.075s`
+  `index_header_parse 0.000s`
+  `graph_decode 3.872s`
+  `minimizer_count_pass 0.842s`
+  `minimizer_fill_pass 5.454s`
+  `fastq_read_decompress 9.568s`
+  `pseudoalign 12.678s`
+  `ec_merge 0.125s`
+  `em 7.731s`
+- Remaining performance work is still mostly in pseudoalignment, FASTQ decompression, and EM;
+  future search-loop work should preserve exact default run-info parity even if experimental
+  variants temporarily drift behind flags.
 
 ## Phase G: Mirror remaining upstream search-loop optimizations
 - [ ] Replace per-k-mer minimizer recomputation with a rolling `minHashIterator`-style state for the common quant path
@@ -276,6 +278,9 @@ Input-path work:
   `70.73s` wall (`-6.87s`, about `-8.9%`) while preserving exact full-file
   run-info parity and exact deterministic paired-prefix parity through `262144`
   with `--threads 32`
-- current remaining gap to upstream `kallisto -t 32` (`57.14s`) is mostly in
-  pseudoalignment/decompression rather than loader startup or per-record FASTQ
-  allocation/copying
+- subsequent loader/quant passes improved the same full-file paired benchmark to
+  `30.76s` wall while preserving exact run-info parity
+- the current full-file result is faster than upstream `kallisto -t 32`
+  (`59.12s` wall in the latest local run); current remaining optimization work is
+  mostly in pseudoalignment/decompression/EM rather than loader startup or
+  per-record FASTQ allocation/copying

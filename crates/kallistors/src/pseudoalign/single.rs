@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::Result;
 use crate::bias::BiasCounts;
-use crate::io::{PackedFastqBatch, ReadSource};
+use crate::io::{PackedSeqBatch, ReadSource};
 
 use super::{
     BifrostIndex, DebugFailReason, DebugReport, EcCounts, FragmentFilter, KmerEcIndex,
@@ -195,21 +195,21 @@ pub fn pseudoalign_single_end_bifrost_with_options<R: ReadSource>(
 
 pub(crate) fn pseudoalign_single_end_bifrost_batch_into(
     index: &BifrostIndex,
-    batch: PackedFastqBatch,
+    batch: PackedSeqBatch,
     strand: Strand,
     filter: Option<FragmentFilter>,
     options: PseudoalignOptions,
     counts: &mut EcCounts,
     ec_map: &mut HashMap<Vec<u32>, usize>,
 ) {
-    for record in batch.records() {
+    for idx in 0..batch.len() {
+        let seq = unsafe { batch.seq_unchecked(idx) };
         if super::reset_all_caches_per_read() {
             super::reset_thread_local_caches();
         }
         counts.reads_processed = counts.reads_processed.saturating_add(1);
 
-        let Some(mut read_ec) =
-            super::ec_for_read_bifrost(index, record.seq, strand, None, options)
+        let Some(mut read_ec) = super::ec_for_read_bifrost(index, seq, strand, None, options)
         else {
             continue;
         };

@@ -6,6 +6,43 @@ const REP_HASH_VALS: [u64; 4] = [
     10060236952204337488,
     7783083932390163561,
 ];
+const INVALID_BASE_CODE: u8 = 4;
+const HASH_CODES: [u8; 256] = {
+    let mut codes = [INVALID_BASE_CODE; 256];
+    codes[b'A' as usize] = 0;
+    codes[b'a' as usize] = 0;
+    codes[b'C' as usize] = 1;
+    codes[b'c' as usize] = 1;
+    codes[b'T' as usize] = 2;
+    codes[b't' as usize] = 2;
+    codes[b'G' as usize] = 3;
+    codes[b'g' as usize] = 3;
+    codes
+};
+const HASH_COMP_CODES: [u8; 256] = {
+    let mut codes = [INVALID_BASE_CODE; 256];
+    codes[b'T' as usize] = 0;
+    codes[b't' as usize] = 0;
+    codes[b'G' as usize] = 1;
+    codes[b'g' as usize] = 1;
+    codes[b'A' as usize] = 2;
+    codes[b'a' as usize] = 2;
+    codes[b'C' as usize] = 3;
+    codes[b'c' as usize] = 3;
+    codes
+};
+const COMP_BASES: [u8; 256] = {
+    let mut bases = [0; 256];
+    bases[b'A' as usize] = b'T';
+    bases[b'a' as usize] = b'T';
+    bases[b'C' as usize] = b'G';
+    bases[b'c' as usize] = b'G';
+    bases[b'G' as usize] = b'C';
+    bases[b'g' as usize] = b'C';
+    bases[b'T' as usize] = b'A';
+    bases[b't' as usize] = b'A';
+    bases
+};
 
 #[inline]
 fn bifrost_neighbor_bounds(k: usize, g: usize) -> Option<(usize, usize)> {
@@ -267,13 +304,10 @@ pub(super) fn fill_revcomp(seq: &[u8], out: &mut Vec<u8>) -> bool {
     out.clear();
     out.reserve(seq.len());
     for &b in seq.iter().rev() {
-        let comp = match b {
-            b'A' | b'a' => b'T',
-            b'C' | b'c' => b'G',
-            b'G' | b'g' => b'C',
-            b'T' | b't' => b'A',
-            _ => return false,
-        };
+        let comp = COMP_BASES[b as usize];
+        if comp == 0 {
+            return false;
+        }
         out.push(comp);
     }
     true
@@ -284,17 +318,18 @@ fn rep_hash(seq: &[u8]) -> Option<u64> {
     let mut ht = 0u64;
     let len = seq.len();
     for i in 0..len {
-        let b = seq[i];
-        if !matches!(b, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't') {
+        let f = HASH_CODES[seq[i] as usize];
+        if f == INVALID_BASE_CODE {
             return None;
         }
         h = h.rotate_left(1);
         ht = ht.rotate_left(1);
-        let f = ((b & 6) >> 1) as usize;
-        let rb = seq[len - 1 - i];
-        let r = (((rb ^ 4) & 6) >> 1) as usize;
-        h ^= REP_HASH_VALS[f];
-        ht ^= REP_HASH_VALS[r];
+        let r = HASH_COMP_CODES[seq[len - 1 - i] as usize];
+        if r == INVALID_BASE_CODE {
+            return None;
+        }
+        h ^= REP_HASH_VALS[f as usize];
+        ht ^= REP_HASH_VALS[r as usize];
     }
     let mut hashes = [h, ht];
     if hashes[1] < hashes[0] {

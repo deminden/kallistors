@@ -1,10 +1,11 @@
 # Real-data benchmark vs kallisto
-Generated: 2026-05-16
+Generated: 2026-05-17
 
 ## Environment
 - OS: Linux x86_64
 - CPU: AMD Ryzen 9 7950X3D
 - Threads used: 32
+- Build: release profile with fat LTO and `.cargo/config.toml` `target-cpu=native`
 
 ## Inputs
 - Reads:
@@ -30,8 +31,8 @@ kallisto_src/build/src/kallisto quant \
 ```
 
 Timings:
-- kallisto: real 57.14s
-- kallistors: real 70.73s, user 1163.61s, sys 16.25s
+- kallisto: real 59.12s, user 161.25s, sys 7.12s
+- kallistors: real 30.76s, user 404.40s, sys 9.31s
 
 run_info:
 - kallisto `n_pseudoaligned`: 4244771 / 4408640
@@ -40,19 +41,21 @@ run_info:
 - kallistors `n_unique`: 276251
 
 Current `kallistors` stage timings:
-- `index_header_parse 2.183s`
-- `graph_decode 6.855s`
-- `minimizer_count_pass 1.358s`
-- `minimizer_fill_pass 9.062s`
-- `fastq_read_decompress 29.023s`
-- `pseudoalign 36.610s`
-- `ec_merge 0.192s`
-- `em 8.075s`
+- `index_header_parse 0.000s`
+- `graph_decode 3.872s`
+- `minimizer_count_pass 0.842s`
+- `minimizer_fill_pass 5.454s`
+- `fastq_read_decompress 9.568s`
+- `pseudoalign 12.678s`
+- `ec_merge 0.125s`
+- `em 7.731s`
 
-Delta vs the pre-optimization `kallistors` control from this round of work:
-- Wall time: `77.60s -> 70.73s`, `6.87s` faster, about `8.9%`.
-- Pseudoalign stage: `41.488s -> 36.610s`, about `11.8%`.
-- EM stage: `9.673s -> 8.075s`, about `16.5%`.
+Delta vs local upstream `kallisto` on this run:
+- Wall time: `59.12s -> 30.76s`, `28.36s` faster for `kallistors`.
+- Speedup: about `1.92x` faster, or about `48%` less wall time.
+
+Delta vs the previous public `kallistors` benchmark:
+- Wall time: `70.73s -> 30.76s`, `39.97s` faster, about `56.5%`.
 
 ## Read-level parity
 - Full-file paired parity is exact against `kallisto` on the checked-in real dataset.
@@ -72,3 +75,8 @@ Delta vs the pre-optimization `kallistors` control from this round of work:
   weight metadata in contiguous arrays.
 - Tiny hot direct-mapped lookup caches for MPHF minimizer lookup and EC block lookup were enlarged
   to reduce collisions in the common path.
+- Quant reuses transcript metadata already loaded by the Bifrost index path and moves EC
+  classes/counts into EM instead of cloning them.
+- The Bifrost loader skips the redundant graph pre-scan on the supported `k <= 32` path, lazily
+  allocates shade metadata, reuses graph-node payload buffers, and avoids paired positional payload
+  loading when paired fragment estimation only needs flat EC block bounds.
