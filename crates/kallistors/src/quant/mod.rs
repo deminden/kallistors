@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
@@ -11,11 +11,9 @@ use crate::ec::EcList;
 use crate::index::Index;
 use crate::pseudoalign::StrandSpecific;
 use crate::{Error, Result};
-use hdf5::types::TypeDescriptor;
-use hdf5_sys::h5d::H5Dwrite;
-use hdf5_sys::h5p::H5P_DEFAULT;
-use hdf5_sys::h5s::H5S_ALL;
-use hdf5_sys::h5t::{H5T_C_S1, H5Tclose, H5Tcopy, H5Tset_size};
+use hdf5_pure::FileBuilder;
+use hdf5_pure::datatype::{CharacterSet, Datatype, StringPadding};
+use hdf5_pure::type_builders::DatasetBuilder;
 
 const MIN_ALPHA: f64 = 1e-8;
 const ALPHA_LIMIT: f64 = 1e-7;
@@ -165,97 +163,94 @@ pub fn write_abundance_tsv_from_parts(
 }
 
 pub fn write_abundance_h5(path: &Path, output: H5QuantOutput<'_>) -> Result<()> {
-    let file = hdf5::File::create(path).map_err(h5_error)?;
-    let aux = file.create_group("aux").map_err(h5_error)?;
-    let bootstrap = if output.bootstrap_est_counts.is_empty() {
-        None
-    } else {
-        Some(file.create_group("bootstrap").map_err(h5_error)?)
-    };
+    let mut file = FileBuilder::new();
+    let mut aux = file.create_group("aux");
 
-    write_h5_f64(&file, "est_counts", &output.result.est_counts)?;
+    write_h5_f64(file.create_dataset("est_counts"), &output.result.est_counts);
     write_h5_i32(
-        &aux,
-        "num_bootstrap",
+        aux.create_dataset("num_bootstrap"),
         &[
             i32::try_from(output.bootstrap_est_counts.len()).map_err(|_| {
                 Error::InvalidFormat("too many bootstrap samples for HDF5 output".into())
             })?,
         ],
-    )?;
+    );
     write_h5_i32(
-        &aux,
-        "num_processed",
+        aux.create_dataset("num_processed"),
         &[i32::try_from(output.reads_processed).map_err(|_| {
             Error::InvalidFormat("n_processed exceeds kallisto-compatible HDF5 range".into())
         })?],
-    )?;
+    );
     write_h5_i32(
-        &aux,
-        "fld",
+        aux.create_dataset("fld"),
         &output
             .fragment_length_hist
             .map(u32_slice_to_i32)
             .transpose()?
             .unwrap_or_default(),
-    )?;
+    );
     let bias_observed = match output.bias_observed {
         Some(values) => Cow::Owned(u32_slice_to_i32(values)?),
         None => Cow::Owned(vec![1; KALLISTO_BIAS_LEN]),
     };
-    write_h5_i32(&aux, "bias_observed", &bias_observed)?;
+    write_h5_i32(aux.create_dataset("bias_observed"), &bias_observed);
 
     let bias_normalized = match output.result.post_bias.as_deref() {
         Some(values) => Cow::Borrowed(values),
         None => Cow::Owned(vec![1.0; KALLISTO_BIAS_LEN]),
     };
-    write_h5_f64(&aux, "bias_normalized", &bias_normalized)?;
-    write_h5_string_vec(&aux, "kallisto_version", &[output.kallisto_version])?;
+    write_h5_f64(aux.create_dataset("bias_normalized"), &bias_normalized);
+    write_h5_string_vec(
+        aux.create_dataset("kallisto_version"),
+        &[output.kallisto_version],
+    );
     write_h5_i32(
-        &aux,
-        "index_version",
+        aux.create_dataset("index_version"),
         &[i32::try_from(output.index_version).map_err(|_| {
             Error::InvalidFormat("index version exceeds kallisto-compatible HDF5 range".into())
         })?],
-    )?;
-    write_h5_string_vec(&aux, "call", &[output.call])?;
-    write_h5_string_vec(&aux, "start_time", &[output.start_time])?;
-    write_h5_string_vec(&aux, "ids", output.target_names)?;
-    write_h5_f64(&aux, "eff_lengths", &output.result.eff_lengths)?;
-    write_h5_i32(&aux, "lengths", &u32_slice_to_i32(output.target_lengths)?)?;
+    );
+    write_h5_string_vec(aux.create_dataset("call"), &[output.call]);
+    write_h5_string_vec(aux.create_dataset("start_time"), &[output.start_time]);
+    write_h5_string_vec(aux.create_dataset("ids"), output.target_names);
+    write_h5_f64(
+        aux.create_dataset("eff_lengths"),
+        &output.result.eff_lengths,
+    );
+    write_h5_i32(
+        aux.create_dataset("lengths"),
+        &u32_slice_to_i32(output.target_lengths)?,
+    );
+    file.add_group(aux.finish());
 
-    if let Some(bootstrap) = bootstrap {
+    if !output.bootstrap_est_counts.is_empty() {
+        let mut bootstrap = file.create_group("bootstrap");
         for (idx, counts) in output.bootstrap_est_counts.iter().enumerate() {
-            write_h5_f64(&bootstrap, &format!("bs{idx}"), counts)?;
+            write_h5_f64(bootstrap.create_dataset(&format!("bs{idx}")), counts);
         }
+        file.add_group(bootstrap.finish());
     }
 
+    let bytes = file.finish().map_err(h5_error)?;
+    fs::write(path, bytes)?;
     Ok(())
 }
 
-fn write_h5_f64(group: &hdf5::Group, name: &str, values: &[f64]) -> Result<()> {
-    let builder = group.new_dataset::<f64>().shape(values.len());
-    let dataset = if values.is_empty() {
-        builder.no_chunk().create(name)
-    } else {
-        builder.chunk(values.len()).deflate(6).create(name)
-    }
-    .map_err(h5_error)?;
-    dataset.write(values).map_err(h5_error)
+fn write_h5_f64(dataset: &mut DatasetBuilder, values: &[f64]) {
+    dataset
+        .with_f64_data(values)
+        .with_shape(&[values.len() as u64]);
+    set_h5_chunking(dataset, values.len());
 }
 
-fn write_h5_i32(group: &hdf5::Group, name: &str, values: &[i32]) -> Result<()> {
-    let builder = group.new_dataset::<i32>().shape(values.len());
-    let dataset = if values.is_empty() {
-        builder.no_chunk().create(name)
-    } else {
-        builder.chunk(values.len()).deflate(6).create(name)
-    }
-    .map_err(h5_error)?;
-    dataset.write(values).map_err(h5_error)
+fn write_h5_i32(dataset: &mut DatasetBuilder, values: &[i32]) {
+    dataset
+        .with_i32_data(values)
+        .with_shape(&[values.len() as u64]);
+    set_h5_chunking(dataset, values.len());
 }
 
-fn write_h5_string_vec(group: &hdf5::Group, name: &str, values: &[&str]) -> Result<()> {
+fn write_h5_string_vec(dataset: &mut DatasetBuilder, values: &[&str]) {
     let width = values
         .iter()
         .map(|value| value.len())
@@ -263,49 +258,28 @@ fn write_h5_string_vec(group: &hdf5::Group, name: &str, values: &[&str]) -> Resu
         .unwrap_or(0)
         .saturating_add(1)
         .max(1);
-    let bytes = fixed_string_bytes(values, width);
-    let builder = group
-        .new_dataset_builder()
-        .empty_as(&TypeDescriptor::FixedAscii(width))
-        .shape(values.len());
-    let dataset = if values.is_empty() {
-        builder.no_chunk().create(name)
-    } else {
-        builder.chunk(values.len()).deflate(6).create(name)
-    }
-    .map_err(h5_error)?;
-    if values.is_empty() {
-        return Ok(());
-    }
+    dataset
+        .with_compound_data(
+            fixed_ascii_type(width),
+            fixed_string_bytes(values, width),
+            values.len() as u64,
+        )
+        .with_shape(&[values.len() as u64]);
+    set_h5_chunking(dataset, values.len());
+}
 
-    let type_id = unsafe { H5Tcopy(*H5T_C_S1) };
-    if type_id < 0 {
-        return Err(Error::InvalidFormat(
-            "HDF5 output failed: could not copy string datatype".into(),
-        ));
+fn set_h5_chunking(dataset: &mut DatasetBuilder, len: usize) {
+    if len > 0 {
+        dataset.with_chunks(&[len as u64]).with_deflate(6);
     }
-    let set_size_status = unsafe { H5Tset_size(type_id, width) };
-    let write_status = if set_size_status >= 0 {
-        unsafe {
-            H5Dwrite(
-                dataset.id(),
-                type_id,
-                H5S_ALL,
-                H5S_ALL,
-                H5P_DEFAULT,
-                bytes.as_ptr().cast(),
-            )
-        }
-    } else {
-        -1
-    };
-    let close_status = unsafe { H5Tclose(type_id) };
-    if set_size_status < 0 || write_status < 0 || close_status < 0 {
-        return Err(Error::InvalidFormat(
-            "HDF5 output failed while writing fixed string dataset".into(),
-        ));
+}
+
+fn fixed_ascii_type(width: usize) -> Datatype {
+    Datatype::String {
+        size: width as u32,
+        padding: StringPadding::NullTerminate,
+        charset: CharacterSet::Ascii,
     }
-    Ok(())
 }
 
 fn fixed_string_bytes(values: &[&str], width: usize) -> Vec<u8> {
@@ -329,7 +303,7 @@ fn u32_slice_to_i32(values: &[u32]) -> Result<Vec<i32>> {
         .collect()
 }
 
-fn h5_error(err: hdf5::Error) -> Error {
+fn h5_error(err: hdf5_pure::Error) -> Error {
     Error::InvalidFormat(format!("HDF5 output failed: {err}"))
 }
 

@@ -42,10 +42,10 @@ Current real-data status:
 - `abundance.tsv` is validated with floating-point tolerances where tests compare estimates. The
   README does not claim bit-for-bit abundance parity.
 - H5 output is readable by upstream `kallisto h5dump` and uses kallisto-compatible default bias
-  datasets when sequence bias is disabled. Building H5 support requires system HDF5 development
-  headers/libraries, for example `libhdf5-dev` on Ubuntu. Bootstrap dataset layout is compatible,
-  but bootstrap sample values are not yet expected to be byte-identical to upstream kallisto
-  because the RNG/sampling path still differs.
+  datasets when sequence bias is disabled. H5 writing uses a pure Rust writer, so building
+  `kallistors` does not require system HDF5 development headers/libraries. Bootstrap dataset
+  layout is compatible, but bootstrap sample values are not yet expected to be byte-identical to
+  upstream kallisto because the RNG/sampling path still differs.
 
 Sequence-specific bias correction is optional and enabled only with `--bias`.
 The index builder currently targets nucleotide transcript FASTA. It intentionally rejects kallisto
@@ -120,8 +120,9 @@ Notes:
 ### Recent Compatibility And Performance Work
 - Added a pure Rust `kallistors index` builder and `kallistors::index::build_index` library entry
   point for kallisto v13-compatible nucleotide transcript indexes.
-- Added quant bootstrap sampling with kallisto-style H5 output, upstream-readable HDF5 metadata,
-  kallisto-compatible default bias datasets, and optional plaintext `bs_abundance_*.tsv` files.
+- Added quant bootstrap sampling with pure Rust kallisto-style H5 output, upstream-readable HDF5
+  metadata, kallisto-compatible default bias datasets, and optional plaintext
+  `bs_abundance_*.tsv` files.
 - The builder reads plain or gzipped FASTA, normalizes sequences with kallisto-compatible ambiguous
   base replacement and poly-A clipping, rejects duplicate transcript names unless `--make-unique`
   is used, and preserves original transcript lengths in index metadata.
