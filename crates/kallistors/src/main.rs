@@ -174,8 +174,12 @@ enum Commands {
         bias: bool,
         #[arg(long)]
         transcripts: Option<std::path::PathBuf>,
+        #[arg(short = 'b', long = "bootstrap-samples", default_value_t = 0)]
+        bootstrap_samples: usize,
         #[arg(long, default_value_t = 42)]
         seed: u64,
+        #[arg(long)]
+        plaintext: bool,
         #[arg(long)]
         kallisto_enum: bool,
         #[arg(long)]
@@ -492,12 +496,14 @@ fn main() -> Result<()> {
             single,
             bias,
             transcripts,
+            bootstrap_samples,
             fragment_length,
             fragment_length_sd,
             single_overhang,
             fr_stranded,
             rf_stranded,
             seed,
+            plaintext,
             kallisto_enum,
             kallisto_strict,
             kallisto_local_fallback,
@@ -522,7 +528,9 @@ fn main() -> Result<()> {
             rf_stranded,
             bias,
             transcripts,
+            bootstrap_samples,
             seed,
+            plaintext,
             kallisto_enum,
             kallisto_strict,
             kallisto_local_fallback,

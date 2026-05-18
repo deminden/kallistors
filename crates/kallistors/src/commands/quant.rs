@@ -16,7 +16,9 @@ pub struct QuantArgs {
     pub rf_stranded: bool,
     pub bias: bool,
     pub transcripts: Option<PathBuf>,
+    pub bootstrap_samples: usize,
     pub seed: u64,
+    pub plaintext: bool,
     pub kallisto_enum: bool,
     pub kallisto_strict: bool,
     pub kallisto_local_fallback: bool,
@@ -32,7 +34,6 @@ pub struct QuantArgs {
 }
 
 pub fn run(args: QuantArgs) -> Result<()> {
-    let _ = args.seed;
     if args.fr_stranded && args.rf_stranded {
         return Err(anyhow!(
             "--fr-stranded and --rf-stranded are mutually exclusive"
@@ -193,7 +194,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
         reads_aligned,
         bias,
         fragment_length_stats: _,
-        fragment_length_hist: _,
+        fragment_length_hist,
     } = ec_counts;
     let ec_class_count = ec_list.len();
     let ec_input = kallistors::quant::EcCountsInput {
@@ -201,6 +202,13 @@ pub fn run(args: QuantArgs) -> Result<()> {
         counts,
     };
 
+    let quant_options = kallistors::quant::QuantOptions {
+        mean_fragment_length,
+        fragment_length_sd,
+        bias: args.bias,
+        strand_specific,
+        ..kallistors::quant::QuantOptions::default()
+    };
     let result = {
         let _em_timing = kallistors::timing::scoped(kallistors::timing::Stage::Em);
         kallistors::quant::em_quantify(
@@ -208,13 +216,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
             &index.transcript_lengths,
             transcript_seqs.as_deref(),
             bias.as_ref(),
-            kallistors::quant::QuantOptions {
-                mean_fragment_length,
-                fragment_length_sd,
-                bias: args.bias,
-                strand_specific,
-                ..kallistors::quant::QuantOptions::default()
-            },
+            quant_options,
         )?
     };
 
@@ -233,11 +235,59 @@ pub fn run(args: QuantArgs) -> Result<()> {
         &result,
     )?;
 
+    let bootstrap_results = if args.bootstrap_samples == 0 {
+        Vec::new()
+    } else {
+        kallistors::quant::bootstrap_quantify(
+            &ec_input,
+            &result.eff_lengths,
+            args.bootstrap_samples,
+            args.seed,
+            quant_options,
+        )?
+    };
+
+    if args.bootstrap_samples > 0 && args.plaintext {
+        for (idx, bootstrap) in bootstrap_results.iter().enumerate() {
+            let path = args.out_dir.join(format!("bs_abundance_{idx}.tsv"));
+            kallistors::quant::write_abundance_tsv_from_parts(
+                &path,
+                &target_names,
+                &index.transcript_lengths,
+                bootstrap,
+            )?;
+        }
+    }
+
+    if !args.plaintext {
+        let h5_path = args.out_dir.join("abundance.h5");
+        let bootstrap_counts = bootstrap_results
+            .iter()
+            .map(|res| res.est_counts.as_slice())
+            .collect::<Vec<_>>();
+        kallistors::quant::write_abundance_h5(
+            &h5_path,
+            kallistors::quant::H5QuantOutput {
+                target_names: &target_names,
+                target_lengths: &index.transcript_lengths,
+                result: &result,
+                bootstrap_est_counts: &bootstrap_counts,
+                reads_processed,
+                fragment_length_hist: fragment_length_hist.as_deref(),
+                bias_observed: bias.as_ref().map(|counts| counts.counts.as_slice()),
+                index_version: index.index_version,
+                kallisto_version: &format!("kallistors {}", env!("CARGO_PKG_VERSION")),
+                call: &std::env::args().collect::<Vec<_>>().join(" "),
+                start_time: &start_time,
+            },
+        )?;
+    }
+
     let p_pseudoaligned = percent(reads_aligned, reads_processed);
     let p_unique = percent(unique, reads_processed);
     let run_info = kallistors::quant::RunInfo {
         n_targets: index.transcript_names.len(),
-        n_bootstraps: 0,
+        n_bootstraps: args.bootstrap_samples,
         n_processed: reads_processed,
         n_pseudoaligned: reads_aligned,
         n_unique: unique,

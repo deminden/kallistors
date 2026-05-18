@@ -14,7 +14,7 @@ kallistors: a Rust implementation of kallisto-style pseudoalignment and quantifi
 - Uses packed/reusable FASTQ batches plus long-lived worker `EcCounts` state to reduce allocation
   and threaded handoff overhead.
 
-## Compatibility notes (v0.3.0)
+## Compatibility notes (v0.3.1)
 
 This is a focused reimplementation at the current stage, not a drop-in replacement for `kallisto`.
 
@@ -25,7 +25,7 @@ This is a focused reimplementation at the current stage, not a drop-in replaceme
 | Paired-end quant | Exact `run_info.json` count parity on the checked-in paired dataset |
 | Single-end quant | Implemented, with synthetic and selected parity coverage |
 | Sequence-specific bias correction | Optional with `--bias` and `--transcripts` |
-| Bootstrap / H5 output | Not implemented |
+| Bootstrap / H5 output | Supported for quant; `abundance.h5` is written by default, plaintext bootstrap TSVs with `--plaintext` |
 | Long-read, UMI/BUS/technology modes, fusion detection | Not implemented |
 | CLI option coverage | Partial |
 
@@ -41,11 +41,15 @@ Current real-data status:
   not byte-identical to upstream indexes.
 - `abundance.tsv` is validated with floating-point tolerances where tests compare estimates. The
   README does not claim bit-for-bit abundance parity.
+- H5 output is readable by upstream `kallisto h5dump` and uses kallisto-compatible default bias
+  datasets when sequence bias is disabled. Bootstrap dataset layout is compatible, but bootstrap
+  sample values are not yet expected to be byte-identical to upstream kallisto because the
+  RNG/sampling path still differs.
 
 Sequence-specific bias correction is optional and enabled only with `--bias`.
 The index builder currently targets nucleotide transcript FASTA. It intentionally rejects kallisto
 features outside that supported builder surface, including amino-acid mode, distinguish mode,
-d-list-specific behavior, and H5/bootstrap concerns.
+d-list-specific behavior, and technology-specific modes.
 
 ## Usage
 
@@ -68,6 +72,22 @@ kallistors quant \
     -o out_dir \
     reads_1.fq reads_2.fq
 
+# Quantify with bootstrap samples written to abundance.h5, the default binary output
+kallistors quant \
+    -i path/to/index.idx \
+    -o out_dir \
+    -b 100 \
+    --seed 42 \
+    reads_1.fq reads_2.fq
+
+# Quantify with plaintext bootstrap outputs instead of H5
+kallistors quant \
+    -i path/to/index.idx \
+    -o out_dir \
+    -b 100 \
+    --plaintext \
+    reads_1.fq reads_2.fq
+
 # Quantify (single-end)
 kallistors quant \
     -i path/to/index.idx \
@@ -87,7 +107,11 @@ kallistors pseudoalign \
 
 Notes:
 - Paired-end quant estimates fragment length mean/sd from pseudoaligned pairs.
-- Quant writes `abundance.tsv` and `run_info.json` in `out_dir` (matching kallisto field names).
+- Quant writes `abundance.tsv`, `run_info.json`, and, unless `--plaintext` is set, `abundance.h5`
+  in `out_dir` (matching kallisto field names and upstream-readable HDF5 structure).
+- Bootstrap samples use `-b/--bootstrap-samples`; H5 stores bootstrap count vectors under
+  `/bootstrap/bs*`, while `--plaintext` writes `bs_abundance_*.tsv`. Bootstrap H5 layout is
+  compatible, but exact upstream bootstrap sample values are not currently claimed.
 - `--bias` requires `--transcripts` to provide the transcript FASTA.
 - `kallistors index` defaults to `k = 31`, `threads = 1`, and kallisto-compatible minimizer length
   selection when `-m/--min-size` is omitted.
@@ -95,6 +119,8 @@ Notes:
 ### Recent Compatibility And Performance Work
 - Added a pure Rust `kallistors index` builder and `kallistors::index::build_index` library entry
   point for kallisto v13-compatible nucleotide transcript indexes.
+- Added quant bootstrap sampling with kallisto-style H5 output, upstream-readable HDF5 metadata,
+  kallisto-compatible default bias datasets, and optional plaintext `bs_abundance_*.tsv` files.
 - The builder reads plain or gzipped FASTA, normalizes sequences with kallisto-compatible ambiguous
   base replacement and poly-A clipping, rejects duplicate transcript names unless `--make-unique`
   is used, and preserves original transcript lengths in index metadata.

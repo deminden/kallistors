@@ -1,5 +1,6 @@
 //! Quantification routines (EM over ECs with optional sequence bias).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -10,12 +11,18 @@ use crate::ec::EcList;
 use crate::index::Index;
 use crate::pseudoalign::StrandSpecific;
 use crate::{Error, Result};
+use hdf5::types::TypeDescriptor;
+use hdf5_sys::h5d::H5Dwrite;
+use hdf5_sys::h5p::H5P_DEFAULT;
+use hdf5_sys::h5s::H5S_ALL;
+use hdf5_sys::h5t::{H5T_C_S1, H5Tclose, H5Tcopy, H5Tset_size};
 
 const MIN_ALPHA: f64 = 1e-8;
 const ALPHA_LIMIT: f64 = 1e-7;
 const ALPHA_CHANGE_LIMIT: f64 = 1e-2;
 const ALPHA_CHANGE: f64 = 1e-2;
 const TOLERANCE: f64 = f64::from_bits(1);
+const KALLISTO_BIAS_LEN: usize = 4096;
 
 struct EmMultiEc {
     start: usize,
@@ -30,6 +37,7 @@ struct EmWork {
     multi_weights: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct QuantOptions {
     pub mean_fragment_length: f64,
     pub fragment_length_sd: f64,
@@ -57,6 +65,20 @@ pub struct QuantResult {
     pub tpm: Vec<f64>,
     pub eff_lengths: Vec<f64>,
     pub post_bias: Option<Vec<f64>>,
+}
+
+pub struct H5QuantOutput<'a> {
+    pub target_names: &'a [&'a str],
+    pub target_lengths: &'a [u32],
+    pub result: &'a QuantResult,
+    pub bootstrap_est_counts: &'a [&'a [f64]],
+    pub reads_processed: u64,
+    pub fragment_length_hist: Option<&'a [u32]>,
+    pub bias_observed: Option<&'a [u32]>,
+    pub index_version: u64,
+    pub kallisto_version: &'a str,
+    pub call: &'a str,
+    pub start_time: &'a str,
 }
 
 /// Run metadata matching kallisto's `run_info.json` fields.
@@ -140,6 +162,175 @@ pub fn write_abundance_tsv_from_parts(
         )?;
     }
     Ok(())
+}
+
+pub fn write_abundance_h5(path: &Path, output: H5QuantOutput<'_>) -> Result<()> {
+    let file = hdf5::File::create(path).map_err(h5_error)?;
+    let aux = file.create_group("aux").map_err(h5_error)?;
+    let bootstrap = if output.bootstrap_est_counts.is_empty() {
+        None
+    } else {
+        Some(file.create_group("bootstrap").map_err(h5_error)?)
+    };
+
+    write_h5_f64(&file, "est_counts", &output.result.est_counts)?;
+    write_h5_i32(
+        &aux,
+        "num_bootstrap",
+        &[
+            i32::try_from(output.bootstrap_est_counts.len()).map_err(|_| {
+                Error::InvalidFormat("too many bootstrap samples for HDF5 output".into())
+            })?,
+        ],
+    )?;
+    write_h5_i32(
+        &aux,
+        "num_processed",
+        &[i32::try_from(output.reads_processed).map_err(|_| {
+            Error::InvalidFormat("n_processed exceeds kallisto-compatible HDF5 range".into())
+        })?],
+    )?;
+    write_h5_i32(
+        &aux,
+        "fld",
+        &output
+            .fragment_length_hist
+            .map(u32_slice_to_i32)
+            .transpose()?
+            .unwrap_or_default(),
+    )?;
+    let bias_observed = match output.bias_observed {
+        Some(values) => Cow::Owned(u32_slice_to_i32(values)?),
+        None => Cow::Owned(vec![1; KALLISTO_BIAS_LEN]),
+    };
+    write_h5_i32(&aux, "bias_observed", &bias_observed)?;
+
+    let bias_normalized = match output.result.post_bias.as_deref() {
+        Some(values) => Cow::Borrowed(values),
+        None => Cow::Owned(vec![1.0; KALLISTO_BIAS_LEN]),
+    };
+    write_h5_f64(&aux, "bias_normalized", &bias_normalized)?;
+    write_h5_string_vec(&aux, "kallisto_version", &[output.kallisto_version])?;
+    write_h5_i32(
+        &aux,
+        "index_version",
+        &[i32::try_from(output.index_version).map_err(|_| {
+            Error::InvalidFormat("index version exceeds kallisto-compatible HDF5 range".into())
+        })?],
+    )?;
+    write_h5_string_vec(&aux, "call", &[output.call])?;
+    write_h5_string_vec(&aux, "start_time", &[output.start_time])?;
+    write_h5_string_vec(&aux, "ids", output.target_names)?;
+    write_h5_f64(&aux, "eff_lengths", &output.result.eff_lengths)?;
+    write_h5_i32(&aux, "lengths", &u32_slice_to_i32(output.target_lengths)?)?;
+
+    if let Some(bootstrap) = bootstrap {
+        for (idx, counts) in output.bootstrap_est_counts.iter().enumerate() {
+            write_h5_f64(&bootstrap, &format!("bs{idx}"), counts)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn write_h5_f64(group: &hdf5::Group, name: &str, values: &[f64]) -> Result<()> {
+    let builder = group.new_dataset::<f64>().shape(values.len());
+    let dataset = if values.is_empty() {
+        builder.no_chunk().create(name)
+    } else {
+        builder.chunk(values.len()).deflate(6).create(name)
+    }
+    .map_err(h5_error)?;
+    dataset.write(values).map_err(h5_error)
+}
+
+fn write_h5_i32(group: &hdf5::Group, name: &str, values: &[i32]) -> Result<()> {
+    let builder = group.new_dataset::<i32>().shape(values.len());
+    let dataset = if values.is_empty() {
+        builder.no_chunk().create(name)
+    } else {
+        builder.chunk(values.len()).deflate(6).create(name)
+    }
+    .map_err(h5_error)?;
+    dataset.write(values).map_err(h5_error)
+}
+
+fn write_h5_string_vec(group: &hdf5::Group, name: &str, values: &[&str]) -> Result<()> {
+    let width = values
+        .iter()
+        .map(|value| value.len())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+        .max(1);
+    let bytes = fixed_string_bytes(values, width);
+    let builder = group
+        .new_dataset_builder()
+        .empty_as(&TypeDescriptor::FixedAscii(width))
+        .shape(values.len());
+    let dataset = if values.is_empty() {
+        builder.no_chunk().create(name)
+    } else {
+        builder.chunk(values.len()).deflate(6).create(name)
+    }
+    .map_err(h5_error)?;
+    if values.is_empty() {
+        return Ok(());
+    }
+
+    let type_id = unsafe { H5Tcopy(*H5T_C_S1) };
+    if type_id < 0 {
+        return Err(Error::InvalidFormat(
+            "HDF5 output failed: could not copy string datatype".into(),
+        ));
+    }
+    let set_size_status = unsafe { H5Tset_size(type_id, width) };
+    let write_status = if set_size_status >= 0 {
+        unsafe {
+            H5Dwrite(
+                dataset.id(),
+                type_id,
+                H5S_ALL,
+                H5S_ALL,
+                H5P_DEFAULT,
+                bytes.as_ptr().cast(),
+            )
+        }
+    } else {
+        -1
+    };
+    let close_status = unsafe { H5Tclose(type_id) };
+    if set_size_status < 0 || write_status < 0 || close_status < 0 {
+        return Err(Error::InvalidFormat(
+            "HDF5 output failed while writing fixed string dataset".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn fixed_string_bytes(values: &[&str], width: usize) -> Vec<u8> {
+    let mut out = vec![0u8; values.len() * width];
+    for (row, value) in values.iter().enumerate() {
+        let start = row * width;
+        let bytes = value.as_bytes();
+        out[start..start + bytes.len()].copy_from_slice(bytes);
+    }
+    out
+}
+
+fn u32_slice_to_i32(values: &[u32]) -> Result<Vec<i32>> {
+    values
+        .iter()
+        .map(|&value| {
+            i32::try_from(value).map_err(|_| {
+                Error::InvalidFormat("value exceeds kallisto-compatible HDF5 range".into())
+            })
+        })
+        .collect()
+}
+
+fn h5_error(err: hdf5::Error) -> Error {
+    Error::InvalidFormat(format!("HDF5 output failed: {err}"))
 }
 
 pub struct EcCountsInput {
@@ -330,7 +521,7 @@ pub fn em_quantify(
     let mut alpha = vec![1.0 / num_trans as f64; num_trans];
     let mut next_alpha = vec![0.0f64; num_trans];
 
-    let mut em_work = prepare_em_work(input, &eff_lens);
+    let mut em_work = prepare_em_work(&input.ec_list.classes, &input.counts, &eff_lens);
 
     let mut final_round = false;
     for iter in 0..options.max_iter {
@@ -423,13 +614,109 @@ pub fn em_quantify(
     })
 }
 
-fn prepare_em_work(input: &EcCountsInput, eff_lens: &[f64]) -> EmWork {
+pub fn bootstrap_quantify(
+    input: &EcCountsInput,
+    eff_lens: &[f64],
+    bootstrap_samples: usize,
+    seed: u64,
+    options: QuantOptions,
+) -> Result<Vec<QuantResult>> {
+    if input.ec_list.classes.len() != input.counts.len() {
+        return Err(Error::InvalidFormat(
+            "EC list and counts length mismatch".into(),
+        ));
+    }
+
+    let mut seed_rng = SplitMix64::new(seed);
+    let mut out = Vec::with_capacity(bootstrap_samples);
+    for _ in 0..bootstrap_samples {
+        let mut sample_rng = SplitMix64::new(seed_rng.next_u64());
+        let counts = sample_ec_counts(&input.counts, &mut sample_rng);
+        out.push(em_quantify_fixed_eff_lens(
+            &input.ec_list.classes,
+            &counts,
+            eff_lens,
+            options.max_iter,
+            options.min_rounds,
+        ));
+    }
+    Ok(out)
+}
+
+fn em_quantify_fixed_eff_lens(
+    ec_classes: &[Vec<u32>],
+    counts: &[u32],
+    eff_lens: &[f64],
+    max_iter: usize,
+    min_rounds: usize,
+) -> QuantResult {
+    let num_trans = eff_lens.len();
+    let mut alpha = vec![1.0 / num_trans as f64; num_trans];
+    let mut next_alpha = vec![0.0f64; num_trans];
+    let em_work = prepare_em_work(ec_classes, counts, eff_lens);
+
+    let mut final_round = false;
+    for iter in 0..max_iter {
+        next_alpha.copy_from_slice(&em_work.singleton_alpha);
+
+        for ec in &em_work.multi_ecs {
+            let range = ec.start..ec.start + ec.len;
+            let mut denom = 0.0;
+            for i in range.clone() {
+                let tr = em_work.multi_transcripts[i];
+                denom += alpha[tr] * em_work.multi_weights[i];
+            }
+            if denom < TOLERANCE {
+                continue;
+            }
+            let scale = ec.count / denom;
+            for i in range {
+                let tr = em_work.multi_transcripts[i];
+                next_alpha[tr] += em_work.multi_weights[i] * alpha[tr] * scale;
+            }
+        }
+
+        let mut chcount = 0;
+        for i in 0..num_trans {
+            if next_alpha[i] > ALPHA_CHANGE_LIMIT {
+                let rel = (next_alpha[i] - alpha[i]).abs() / next_alpha[i];
+                if rel > ALPHA_CHANGE {
+                    chcount += 1;
+                }
+            }
+            alpha[i] = next_alpha[i];
+        }
+
+        let stop_em = chcount == 0 && iter > min_rounds;
+        if final_round {
+            break;
+        }
+        if stop_em {
+            final_round = true;
+            for val in &mut alpha {
+                if *val < ALPHA_LIMIT / 10.0 {
+                    *val = 0.0;
+                }
+            }
+        }
+    }
+
+    let tpm = counts_to_tpm(&alpha, eff_lens);
+    QuantResult {
+        est_counts: alpha,
+        tpm,
+        eff_lengths: eff_lens.to_vec(),
+        post_bias: None,
+    }
+}
+
+fn prepare_em_work(ec_classes: &[Vec<u32>], counts: &[u32], eff_lens: &[f64]) -> EmWork {
     let mut singleton_alpha = vec![0.0f64; eff_lens.len()];
     let mut multi_ecs = Vec::new();
     let mut multi_transcripts = Vec::new();
     let mut multi_weights = Vec::new();
-    for (ec_id, ec) in input.ec_list.classes.iter().enumerate() {
-        let count = input.counts.get(ec_id).copied().unwrap_or(0) as f64;
+    for (ec_id, ec) in ec_classes.iter().enumerate() {
+        let count = counts.get(ec_id).copied().unwrap_or(0) as f64;
         if ec.len() == 1 {
             let tr = ec[0] as usize;
             if tr < singleton_alpha.len() {
@@ -455,6 +742,76 @@ fn prepare_em_work(input: &EcCountsInput, eff_lens: &[f64]) -> EmWork {
         multi_ecs,
         multi_transcripts,
         multi_weights,
+    }
+}
+
+fn sample_ec_counts(counts: &[u32], rng: &mut SplitMix64) -> Vec<u32> {
+    let total = counts.iter().map(|&v| u64::from(v)).sum::<u64>();
+    let mut sampled = vec![0u32; counts.len()];
+    if total == 0 {
+        return sampled;
+    }
+
+    let mut cumulative = Vec::with_capacity(counts.len());
+    let mut running = 0u64;
+    for &count in counts {
+        running = running.saturating_add(u64::from(count));
+        cumulative.push(running);
+    }
+
+    for _ in 0..total {
+        let draw = rng.gen_range(total);
+        let idx = cumulative.partition_point(|&bound| bound <= draw);
+        if let Some(slot) = sampled.get_mut(idx) {
+            *slot = slot.saturating_add(1);
+        }
+    }
+    sampled
+}
+
+fn counts_to_tpm(est_counts: &[f64], eff_lens: &[f64]) -> Vec<f64> {
+    let mut tpm = vec![0.0; est_counts.len()];
+    let mut total_mass = 0.0;
+    for i in 0..est_counts.len() {
+        let eff_len = eff_lens.get(i).copied().unwrap_or(0.0);
+        if eff_len > 0.0 {
+            tpm[i] = est_counts[i] / eff_len;
+            total_mass += tpm[i];
+        }
+    }
+    if total_mass > 0.0 {
+        for val in &mut tpm {
+            *val = *val / total_mass * 1_000_000.0;
+        }
+    }
+    tpm
+}
+
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn gen_range(&mut self, upper: u64) -> u64 {
+        let zone = u64::MAX - u64::MAX % upper;
+        loop {
+            let value = self.next_u64();
+            if value < zone {
+                return value % upper;
+            }
+        }
     }
 }
 
