@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 
 use crate::bias::BiasCounts;
-use crate::io::{PackedSeqBatch, ReadSource};
+use crate::io::{FastqRecord, PackedSeqBatch, ReadSource};
 use crate::{Error, Result};
 
 use super::{
@@ -457,6 +459,7 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
     } else {
         None
     };
+    let mut final_trace = PairedFinalTraceWriter::from_env()?;
 
     loop {
         let r1 = reader1.next_record();
@@ -477,6 +480,17 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                 let ec2 = super::ec_for_read_bifrost(index, &b.seq, strand, dbg2.as_mut(), options);
 
                 if ec1.is_none() && ec2.is_none() {
+                    if let Some(trace) = final_trace.as_mut() {
+                        trace.write(PairedFinalTraceRow {
+                            read_id: reads_processed - 1,
+                            left: &a,
+                            right: &b,
+                            merged_ec: None,
+                            reason: "no_hits",
+                            left_ec: None,
+                            right_ec: None,
+                        })?;
+                    }
                     if let Some(r) = report.as_deref_mut() {
                         let (state, header) = if dbg1
                             .as_ref()
@@ -553,6 +567,17 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                 if ec1.as_ref().is_some_and(|v| v.hard_reject_pair)
                     || ec2.as_ref().is_some_and(|v| v.hard_reject_pair)
                 {
+                    if let Some(trace) = final_trace.as_mut() {
+                        trace.write(PairedFinalTraceRow {
+                            read_id: reads_processed - 1,
+                            left: &a,
+                            right: &b,
+                            merged_ec: None,
+                            reason: "hard_reject_pair",
+                            left_ec: ec1.as_ref().map(|v| v.ec.as_slice()),
+                            right_ec: ec2.as_ref().map(|v| v.ec.as_slice()),
+                        })?;
+                    }
                     if let Some(r) = report.as_deref_mut() {
                         let mut header = Vec::new();
                         header.extend_from_slice(&a.header);
@@ -604,6 +629,17 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                     }
                 }
                 if merged.is_empty() {
+                    if let Some(trace) = final_trace.as_mut() {
+                        trace.write(PairedFinalTraceRow {
+                            read_id: reads_processed - 1,
+                            left: &a,
+                            right: &b,
+                            merged_ec: None,
+                            reason: "intersection_empty",
+                            left_ec: ec1.as_ref().map(|v| v.ec.as_slice()),
+                            right_ec: ec2.as_ref().map(|v| v.ec.as_slice()),
+                        })?;
+                    }
                     if let Some(r) = report.as_deref_mut() {
                         let mut header = Vec::new();
                         header.extend_from_slice(&a.header);
@@ -686,6 +722,17 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                 }
 
                 reads_aligned += 1;
+                if let Some(trace) = final_trace.as_mut() {
+                    trace.write(PairedFinalTraceRow {
+                        read_id: reads_processed - 1,
+                        left: &a,
+                        right: &b,
+                        merged_ec: Some(merged.as_slice()),
+                        reason: "ok",
+                        left_ec: ec1.as_ref().map(|v| v.ec.as_slice()),
+                        right_ec: ec2.as_ref().map(|v| v.ec.as_slice()),
+                    })?;
+                }
                 let ec_id = match ec_map.get(&merged) {
                     Some(id) => *id,
                     None => {
@@ -710,6 +757,79 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
         fragment_length_stats: (frag_stats.count() > 0).then_some(frag_stats),
         fragment_length_hist: (frag_stats.count() > 0).then_some(frag_hist),
     })
+}
+
+struct PairedFinalTraceWriter {
+    writer: BufWriter<File>,
+}
+
+struct PairedFinalTraceRow<'a> {
+    read_id: u64,
+    left: &'a FastqRecord,
+    right: &'a FastqRecord,
+    merged_ec: Option<&'a [u32]>,
+    reason: &'a str,
+    left_ec: Option<&'a [u32]>,
+    right_ec: Option<&'a [u32]>,
+}
+
+impl PairedFinalTraceWriter {
+    fn from_env() -> Result<Option<Self>> {
+        let Some(path) = std::env::var_os("KALLISTORS_PAIRED_FINAL_TRACE") else {
+            return Ok(None);
+        };
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+        writeln!(
+            writer,
+            "read_id\tread_name1\tread_name2\taligned\treason\tmerged_ec\tleft_ec\tright_ec"
+        )?;
+        Ok(Some(Self { writer }))
+    }
+
+    fn write(&mut self, row: PairedFinalTraceRow<'_>) -> Result<()> {
+        writeln!(
+            self.writer,
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            row.read_id,
+            normalize_trace_header(&row.left.header),
+            normalize_trace_header(&row.right.header),
+            if row.merged_ec.is_some_and(|ec| !ec.is_empty()) {
+                1
+            } else {
+                0
+            },
+            row.reason,
+            format_trace_ec(row.merged_ec),
+            format_trace_ec(row.left_ec),
+            format_trace_ec(row.right_ec),
+        )?;
+        Ok(())
+    }
+}
+
+fn normalize_trace_header(header: &[u8]) -> String {
+    let text = String::from_utf8_lossy(header);
+    text.trim()
+        .strip_prefix('@')
+        .unwrap_or(text.trim())
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+fn format_trace_ec(ec: Option<&[u32]>) -> String {
+    let Some(ec) = ec else {
+        return "-".to_string();
+    };
+    if ec.is_empty() {
+        return "-".to_string();
+    }
+    ec.iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn estimate_fragment_length_for_pair(

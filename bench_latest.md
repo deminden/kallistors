@@ -1,131 +1,17 @@
-# Real-data benchmark vs kallisto
-Generated: 2026-05-17
+# Latest Benchmark Summary
 
-## Environment
-- OS: Linux x86_64
-- CPU: AMD Ryzen 9 7950X3D
-- Threads used for quant: 32
-- Threads used for `kallistors index`: 8
-- Build: release profile with fat LTO and `.cargo/config.toml` `target-cpu=native`
+The detailed benchmark record now lives in [docs/benchmarks.md](docs/benchmarks.md).
 
-## Inputs
-- Reads:
-  - `data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade.gz`
-  - `data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade (2).gz`
-- Read pairs: 4,408,640
-- Reference transcripts: `data/gencode.v49.transcripts.fa.gz`
-- Index: `data/gencode.v49_kallisto.idx`
-- Threads: `-t 32`
+Latest paired-end headline, measured on 2026-05-19 with one warmup and median of five measured
+runs on the checked-in full paired dataset:
 
-## Index build benchmark
+| tool | threads | median elapsed | median RSS |
+| --- | ---: | ---: | ---: |
+| kallisto | 32 | `55.81s` | `2784 MiB` |
+| kallistors | 32 | `32.79s` | `5504 MiB` |
 
-Input:
-- Reference transcripts: `data/gencode.v49.transcripts.fa.gz`
-- `kallistors index` threads: `-t 8`
-
-Commands:
-```bash
-/usr/bin/time -o /tmp/kallisto-index.time -f 'elapsed=%E maxrss=%MKB' \
-  kallisto_src/build/src/kallisto index \
-  -i /tmp/gencode.kallisto.idx \
-  data/gencode.v49.transcripts.fa.gz
-
-/usr/bin/time -o /tmp/kallistors-index.time -f 'elapsed=%E maxrss=%MKB' \
-  ./target/release/kallistors index \
-  -i /tmp/gencode.kallistors.idx \
-  -t 8 \
-  --timings \
-  data/gencode.v49.transcripts.fa.gz
-```
-
-Timings:
-- kallisto: elapsed `6:24.81`, peak RSS `12175612KB`, index size `878M`
-- kallistors: elapsed `2:02.23`, peak RSS `9975360KB`, index size `894M`
-
-Current `kallistors index` stage timings:
-- `fasta_parse 2.447s`
-- `graph_build 94.535s`
-- `ec_build 8.725s`
-- `minimizer_mphf 11.147s`
-- `write 7.609s`
-- `total 121.950s`
-
-Delta vs local upstream `kallisto index` on this run:
-- Wall time: `6:24.81 -> 2:02.23`, about `3.15x` faster.
-- Peak RSS: `12175612KB -> 9975360KB`, about `18%` lower for `kallistors`.
-
-Compatibility checks:
-- `kallistors index-info` reports version `13`, `k = 31`, minimizer length `23`,
-  `2186692` unitigs, `186746210` k-mers, `533740` transcripts, and total transcript length
-  `946309864`.
-- Upstream `kallisto inspect` accepts the generated index and reports matching headline metadata.
-- Synthetic paired-read quant parity is exact against the upstream-built GENCODE index through both
-  `kallistors quant` and upstream `kallisto quant`.
-
-Use `scripts/bench_index_build.py` to regenerate an index-build report for a new machine, FASTA, or
-thread count.
-
-## Benchmark (no debug flags)
-Commands:
-```bash
-kallisto_src/build/src/kallisto quant \
-  -i data/gencode.v49_kallisto.idx -o /tmp/kallisto_full -t 32 \
-  data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade.gz \
-  "data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade (2).gz"
-
-./target/release/kallistors quant \
-  -i data/gencode.v49_kallisto.idx -o /tmp/kallistors_full -t 32 \
-  data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade.gz \
-  "data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade (2).gz"
-```
-
-Timings:
-- kallisto: real 59.12s, user 161.25s, sys 7.12s
-- kallistors: real 30.76s, user 404.40s, sys 9.31s
-
-run_info:
-- kallisto `n_pseudoaligned`: 4244771 / 4408640
-- kallistors `n_pseudoaligned`: 4244771 / 4408640
-- kallisto `n_unique`: 276251
-- kallistors `n_unique`: 276251
-
-Current `kallistors` stage timings:
-- `index_header_parse 0.000s`
-- `graph_decode 3.872s`
-- `minimizer_count_pass 0.842s`
-- `minimizer_fill_pass 5.454s`
-- `fastq_read_decompress 9.568s`
-- `pseudoalign 12.678s`
-- `ec_merge 0.125s`
-- `em 7.731s`
-
-Delta vs local upstream `kallisto` on this run:
-- Wall time: `59.12s -> 30.76s`, `28.36s` faster for `kallistors`.
-- Speedup: about `1.92x` faster, or about `48%` less wall time.
-
-Delta vs the previous public `kallistors` benchmark:
-- Wall time: `70.73s -> 30.76s`, `39.97s` faster, about `56.5%`.
-
-## Read-level parity
-- Full-file paired parity is exact against `kallisto` on the checked-in real dataset.
-- Deterministic paired prefixes are exact through `262144` pairs in `data/subsets/` with
-  `--threads 32`.
-
-## Notable improvements behind this result
-- Bifrost-style retry on probe/backoff misses after prior evidence exists, fixing the last full-file paired mismatch.
-- `flate2` switched to the `zlib-rs` backend.
-- Threaded workers now accumulate directly into long-lived `EcCounts`.
-- Threaded FASTQ transport now uses packed/reusable batches with one contiguous byte buffer plus per-record offsets instead of owned `FastqRecord` payloads.
-- Fast pseudoalignment reuses encoded k-mer codes through minimizer candidate lookup, match-cache
-  keying, and jump/middle/scan probes.
-- Hot pseudoalignment environment flags are cached once per process instead of being looked up in
-  per-read/per-k-mer paths.
-- The EM loop pre-splits singleton/nonzero multi-transcript ECs and stores multi-EC transcript and
-  weight metadata in contiguous arrays.
-- Tiny hot direct-mapped lookup caches for MPHF minimizer lookup and EC block lookup were enlarged
-  to reduce collisions in the common path.
-- Quant reuses transcript metadata already loaded by the Bifrost index path and moves EC
-  classes/counts into EM instead of cloning them.
-- The Bifrost loader skips the redundant graph pre-scan on the supported `k <= 32` path, lazily
-  allocates shade metadata, reuses graph-node payload buffers, and avoids paired positional payload
-  loading when paired fragment estimation only needs flat EC block bounds.
+On the deterministic `1,048,576`-pair subset, kallistors reaches `1.45x` faster than kallisto at
+32 threads with exact `run_info.json` parity. The latest full-file paired count check is also exact:
+`4,408,640` processed, `4,244,771` pseudoaligned, `276,251` unique. Full multicore tables,
+single-end results, index-build results, methodology, and raw artifact paths are in
+[docs/benchmarks.md](docs/benchmarks.md).

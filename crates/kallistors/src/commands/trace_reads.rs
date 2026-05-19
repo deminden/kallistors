@@ -227,8 +227,15 @@ pub fn run(
             });
 
     let mut reader = kallistors::io::open_fastq_reader(reads)?;
+    let load_positional_info = filter
+        .map(|v| !v.single_overhang && v.fragment_length > 0)
+        .unwrap_or(false);
     let index = if kallisto_direct_kmer {
-        kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(index, false)?
+        kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(index, load_positional_info)?
+    } else if load_positional_info && kallisto_fallback {
+        kallistors::pseudoalign::build_bifrost_index_with_positions_and_kmer(index, true)?
+    } else if load_positional_info {
+        kallistors::pseudoalign::build_bifrost_index_with_positions(index, true)?
     } else if kallisto_fallback {
         kallistors::pseudoalign::build_bifrost_index_with_kmer(index)?
     } else {

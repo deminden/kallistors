@@ -889,7 +889,10 @@ fn match_kmer_at_pos_fast_with_codes(
     match_cache_disabled: bool,
 ) -> Option<FastKmerMatch> {
     let cache_key = fast_match_cache_key_from_codes(read_fwd, read_rev);
-    let flags = ((allow_forward as u8) << 2) | ((allow_rev as u8) << 1) | (allow_relaxed as u8);
+    let flags = ((allow_forward as u8) << 3)
+        | ((allow_rev as u8) << 2)
+        | ((allow_relaxed as u8) << 1)
+        | (allow_tail_minimizer as u8);
     if !match_cache_disabled
         && let Some(cached) = FAST_KMER_MATCH_CACHE.with(|tl| tl.borrow().get(cache_key, flags))
     {
@@ -1054,7 +1057,7 @@ fn ec_for_read_bifrost_fast(
                 options.kallisto_strict,
                 options.skip_overcrowded_minimizer,
                 true,
-                false,
+                true,
             )
         {
             FastKmerMatch {
@@ -1171,6 +1174,15 @@ fn ec_for_read_bifrost_fast(
             });
         }
         has_hit = true;
+        if !accept_for_stream && in_backoff {
+            let can_terminal_jump =
+                jump_distance_for_match(index, uid, block_idx, start, forward_strand)
+                    .is_some_and(|dist| pos.saturating_add(dist) >= last_pos);
+            if !can_terminal_jump {
+                pos += 1;
+                continue;
+            }
+        }
 
         let mut jump_to: Option<usize> = None;
         let mut force_break = false;
@@ -1183,7 +1195,7 @@ fn ec_for_read_bifrost_fast(
             if next_pos > pos {
                 let kmer_next = &seq[next_pos..next_pos + index.k];
                 let kmer_next_codes = encode_kmer_pair(kmer_next);
-                let next_hit = kmer_next_codes.and_then(|(next_fwd, next_rev)| {
+                let mut next_hit = kmer_next_codes.and_then(|(next_fwd, next_rev)| {
                     match_kmer_at_pos_fast_with_codes(
                         index,
                         kmer_next,
@@ -1200,11 +1212,39 @@ fn ec_for_read_bifrost_fast(
                         match_cache_disabled,
                     )
                 });
+                if next_hit.is_none()
+                    && in_backoff
+                    && let Some((unitig_id, start, used_revcomp, block_idx, matched_relaxed)) =
+                        match_kmer_at_pos(
+                            index,
+                            kmer_next,
+                            allow_forward_base,
+                            allow_rev_base,
+                            diff,
+                            &mut fallback_rev_buf,
+                            options.kallisto_direct_kmer,
+                            options.kallisto_enum,
+                            options.kallisto_strict,
+                            options.skip_overcrowded_minimizer,
+                            options.kallisto_bifrost_find,
+                            true,
+                        )
+                {
+                    next_hit = Some(FastKmerMatch {
+                        unitig_id,
+                        start,
+                        block_idx,
+                        used_revcomp,
+                        forward_strand: !used_revcomp,
+                        matched_relaxed,
+                    });
+                }
                 let current_ec = ec_slice(index, uid, block_idx);
                 let mut use_backoff = false;
                 if let Some(next_hit) = next_hit {
                     let uid2 = next_hit.unitig_id;
                     let block_idx2 = next_hit.block_idx;
+                    let next_relaxed = next_hit.matched_relaxed;
                     let next_ec = ec_slice(index, uid2, block_idx2);
                     if uid2 == uid && next_ec == current_ec {
                         if let Some(state) = dbg.as_deref_mut() {
@@ -1216,7 +1256,7 @@ fn ec_for_read_bifrost_fast(
                                 next_pos,
                                 in_backoff,
                                 next_hit_found: true,
-                                next_hit_relaxed: false,
+                                next_hit_relaxed: next_relaxed,
                                 next_hit_same_unitig: true,
                                 next_hit_same_ec: true,
                                 mid_hit_found: false,
@@ -1247,7 +1287,7 @@ fn ec_for_read_bifrost_fast(
                         let middle_pos = (pos + next_pos) / 2;
                         if middle_pos <= last_pos {
                             let kmer_mid = &seq[middle_pos..middle_pos + index.k];
-                            if let Some(mid_hit) =
+                            let mut mid_hit =
                                 encode_kmer_pair(kmer_mid).and_then(|(mid_fwd, mid_rev)| {
                                     match_kmer_at_pos_fast_with_codes(
                                         index,
@@ -1264,11 +1304,44 @@ fn ec_for_read_bifrost_fast(
                                         minimizer_cache_disabled,
                                         match_cache_disabled,
                                     )
-                                })
+                                });
+                            if mid_hit.is_none()
+                                && in_backoff
+                                && let Some((
+                                    unitig_id,
+                                    start,
+                                    used_revcomp,
+                                    block_idx,
+                                    matched_relaxed,
+                                )) = match_kmer_at_pos(
+                                    index,
+                                    kmer_mid,
+                                    allow_forward_base,
+                                    allow_rev_base,
+                                    diff,
+                                    &mut fallback_rev_buf,
+                                    options.kallisto_direct_kmer,
+                                    options.kallisto_enum,
+                                    options.kallisto_strict,
+                                    options.skip_overcrowded_minimizer,
+                                    options.kallisto_bifrost_find,
+                                    true,
+                                )
                             {
+                                mid_hit = Some(FastKmerMatch {
+                                    unitig_id,
+                                    start,
+                                    block_idx,
+                                    used_revcomp,
+                                    forward_strand: !used_revcomp,
+                                    matched_relaxed,
+                                });
+                            }
+                            if let Some(mid_hit) = mid_hit {
                                 let uid3 = mid_hit.unitig_id;
                                 let rev3 = mid_hit.used_revcomp;
                                 let block_idx3 = mid_hit.block_idx;
+                                let mid_relaxed = mid_hit.matched_relaxed;
                                 let mid_ec = ec_slice(index, uid3, block_idx3);
                                 let mid_matches_current = uid3 == uid && mid_ec == current_ec;
                                 let mid_matches_next = uid3 == uid2 && mid_ec == next_ec;
@@ -1282,11 +1355,11 @@ fn ec_for_read_bifrost_fast(
                                             next_pos,
                                             in_backoff,
                                             next_hit_found: true,
-                                            next_hit_relaxed: false,
+                                            next_hit_relaxed: next_relaxed,
                                             next_hit_same_unitig: uid2 == uid,
                                             next_hit_same_ec: next_ec == current_ec,
                                             mid_hit_found: true,
-                                            mid_hit_relaxed: false,
+                                            mid_hit_relaxed: mid_relaxed,
                                             mid_hit_matches_either: true,
                                             jumped: true,
                                             reason: "middle_confirms_jump",
@@ -1604,6 +1677,7 @@ pub(super) fn ec_for_read_bifrost(
     let mut hits: Vec<Hit> = Vec::new();
     let use_shade = index.use_shade && !options.do_union;
     let mut shade_scratch: Vec<u32> = Vec::new();
+    let mut next_shade_scratch: Vec<u32> = Vec::new();
     let mut online_intersection: Vec<u32> = Vec::new();
     let mut has_online_intersection = false;
     let mut saw_special_hit = false;
@@ -2241,6 +2315,15 @@ pub(super) fn ec_for_read_bifrost(
             });
         }
         has_hit = true;
+        if !accept_for_stream && in_backoff {
+            let can_terminal_jump =
+                jump_distance_for_match(index, uid, block_idx, start, forward_strand)
+                    .is_some_and(|dist| pos.saturating_add(dist) >= last_pos);
+            if !can_terminal_jump {
+                pos += 1;
+                continue;
+            }
+        }
 
         let mut jump_to: Option<usize> = None;
         let mut force_break = false;
@@ -2283,9 +2366,15 @@ pub(super) fn ec_for_read_bifrost(
                 if let Some((uid2, _start2, _rev2, block_idx2, next_relaxed)) = next_hit {
                     next_hit_found = true;
                     next_hit_relaxed = next_relaxed;
-                    let next_ec = ec_slice(index, uid2, block_idx2);
+                    let next_ec_raw = ec_slice(index, uid2, block_idx2);
+                    let next_ec = if use_shade {
+                        filter_shades(next_ec_raw, &index.shade_sequences, &mut next_shade_scratch);
+                        next_shade_scratch.as_slice()
+                    } else {
+                        next_ec_raw
+                    };
                     next_hit_same_unitig = uid2 == uid;
-                    next_hit_same_ec = next_ec == current_ec;
+                    next_hit_same_ec = next_ec_raw == current_ec;
                     if next_hit_same_unitig && next_hit_same_ec {
                         if next_pos >= last_pos {
                             synthetic_hit = Some(Hit {
@@ -3348,7 +3437,7 @@ pub(super) fn filter_ec_by_fragment(
     };
     let mut filtered = Vec::new();
     for &tr in ec {
-        let (pos, forward) = match find_position_in_transcript(
+        let positions = match find_positions_in_transcript(
             blocks,
             tr,
             best_match.unitig_pos,
@@ -3357,23 +3446,23 @@ pub(super) fn filter_ec_by_fragment(
             unitig_len,
             index.k,
         ) {
-            Some((pos, forward)) => (pos, forward),
-            None => {
-                filtered.push(tr);
-                continue;
-            }
+            Some(positions) => positions,
+            None => continue,
         };
         let len = index
             .transcript_lengths
             .get(tr as usize)
             .copied()
             .unwrap_or(0) as i64;
-        if forward {
-            if pos + fragment_length - 1 <= len {
+        for (pos, forward) in positions {
+            if forward && pos + fragment_length <= len {
                 filtered.push(tr);
+                break;
             }
-        } else if pos - fragment_length >= 0 {
-            filtered.push(tr);
+            if !forward && pos - fragment_length >= 0 {
+                filtered.push(tr);
+                break;
+            }
         }
     }
     filtered
@@ -3458,7 +3547,7 @@ fn filter_ec_for_hit(
     }
 }
 
-pub(super) fn find_position_in_transcript(
+pub(super) fn find_positions_in_transcript(
     blocks: &[crate::index::EcBlock],
     tr: u32,
     unitig_pos: usize,
@@ -3466,113 +3555,97 @@ pub(super) fn find_position_in_transcript(
     used_revcomp: bool,
     unitig_len: usize,
     k: usize,
-) -> Option<(i64, bool)> {
+) -> Option<Vec<(i64, bool)>> {
     let idx = unitig_pos as u32;
-    let mc = ec_block_at(blocks, idx)?;
     let ecs = ec_blocks_leading_vals(blocks, idx);
     if ecs.is_empty() {
         return None;
     }
     let v_ec = ecs.last().copied()?;
-    let rawpos = block_min_pos(v_ec, tr)?;
-    let trpos = (rawpos & 0x7fff_ffff) as i64;
-    let trsense = rawpos == (rawpos & 0x7fff_ffff);
+    let raw_positions = block_positions(v_ec, tr)?;
+    let mut positions = Vec::new();
+    raw_positions.for_each(|rawpos| {
+        if let Some(mapped) = map_transcript_position(
+            blocks,
+            tr,
+            rawpos,
+            unitig_pos,
+            read_pos,
+            used_revcomp,
+            unitig_len,
+            k,
+        ) {
+            positions.push(mapped);
+        }
+    });
+    Some(positions)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn map_transcript_position(
+    blocks: &[crate::index::EcBlock],
+    tr: u32,
+    rawpos: u32,
+    unitig_pos: usize,
+    read_pos: usize,
+    used_revcomp: bool,
+    unitig_len: usize,
+    k: usize,
+) -> Option<(i64, bool)> {
+    const POSITION_MASK: u32 = 0x7fff_ffff;
+    let trpos_raw = rawpos & POSITION_MASK;
+    if trpos_raw == POSITION_MASK {
+        return None;
+    }
+    let trpos = trpos_raw as i64;
+    let trsense = rawpos == trpos_raw;
 
     let csense = !used_revcomp;
     let um_dist = unitig_pos as i64;
     let um_size = unitig_len as i64;
     let p = read_pos as i64;
     let k = k as i64;
-    let mc_first = mc.0 as i64;
-    let mc_second = mc.1 as i64;
-    let _um_dist_block = um_dist - mc_first;
 
     if trsense {
-        if csense {
-            let mut padding = 0i64;
-            if trpos == 0 {
-                let mut mc_cur = mc;
-                for block in ecs.iter().rev().skip(1) {
-                    if !block_contains(block, tr) {
-                        padding = mc_cur.0 as i64;
-                        break;
-                    }
-                    mc_cur = prev_block_at(blocks, mc_cur.0)?;
-                }
-            }
-            let pos = trpos - p + um_dist + 1 - padding;
-            Some((pos, csense))
-        } else {
-            let mut mc_cur = mc;
-            let mut right_one = 0i64;
-            let mut left_one = 0i64;
-            let initial = mc_second;
-            for (i, block) in ecs.iter().enumerate().rev() {
-                if i == ecs.len() - 1 {
-                    right_one = mc_cur.1 as i64;
-                }
-                if !block_contains(block, tr) {
-                    left_one = mc_cur.1 as i64;
+        let mut padding = 0i64;
+        if trpos == 0 && blocks.len() > 1 {
+            let mut mc_cur = ec_block_at(blocks, unitig_pos as u32)?;
+            let ecs = ec_blocks_leading_vals(blocks, unitig_pos as u32);
+            for block in ecs.iter().rev().skip(1) {
+                if !block_contains(block, tr) || !block_contains_rawpos(block, tr, trpos_raw) {
+                    padding = mc_cur.0 as i64;
                     break;
-                } else if i == 0 {
-                    left_one = 0;
                 }
                 mc_cur = prev_block_at(blocks, mc_cur.0)?;
             }
-            let padding = -(left_one + right_one - um_size + k - 1);
-            let pos = trpos + p + k - (um_size - k - um_dist) + initial - 1 + padding;
-            Some((pos, csense))
         }
-    } else if csense {
-        let mut left_one = 0i64;
-        let mut right_one = 0i64;
-        let mut unmapped_len = 0i64;
-        let mut found_first_mapped = false;
-        let ecs_all = ec_blocks_leading_vals(blocks, u32::MAX);
-        let mut curr_mc = 0u32;
-        for block in ecs_all {
-            let mc_ = ec_block_at(blocks, curr_mc)?;
-            if !block_contains(block, tr) && found_first_mapped {
-                if unmapped_len == 0 {
-                    left_one = mc_.0 as i64;
-                }
-                right_one = mc_.1 as i64;
-                unmapped_len += mc_.1 as i64 - mc_.0 as i64;
-            }
-            if block_contains(block, tr) {
-                found_first_mapped = true;
-            }
-            curr_mc = mc_.1;
+        let mut pos = trpos + um_dist + 1 - padding;
+        if csense {
+            pos -= p;
+        } else {
+            pos += k - 1 + p;
         }
-        let mut start = 0i64;
-        start -= right_one - left_one;
-        start += um_size - k;
-        let pos = trpos + (-(um_dist - start)) + k + p;
-        Some((pos, !csense))
+        Some((pos, csense))
     } else {
-        let mut left_one = 0i64;
-        let mut right_one = 0i64;
-        let mut unmapped_len = 0i64;
-        let mut found_first_mapped = false;
-        let ecs_all = ec_blocks_leading_vals(blocks, u32::MAX);
-        let mut curr_mc = 0u32;
-        for block in ecs_all {
-            let mc_ = ec_block_at(blocks, curr_mc)?;
-            if !block_contains(block, tr) && found_first_mapped {
-                if unmapped_len == 0 {
-                    left_one = mc_.0 as i64;
+        let mut r_end = um_size - k;
+        if trpos == 0 && blocks.len() > 1 {
+            let mc = ec_block_at(blocks, unitig_pos as u32)?;
+            let ecs = ec_blocks_trailing_vals(blocks, mc.1);
+            let mut mc_cur = ec_block_at(blocks, mc.1)?;
+            for block in ecs {
+                if !block_contains(block, tr) || !block_contains_rawpos(block, tr, rawpos) {
+                    r_end = mc_cur.0 as i64 - 1;
+                    break;
                 }
-                right_one = mc_.1 as i64;
-                unmapped_len += mc_.1 as i64 - mc_.0 as i64;
+                mc_cur = ec_block_at(blocks, mc_cur.1)?;
             }
-            if block_contains(block, tr) {
-                found_first_mapped = true;
-            }
-            curr_mc = mc_.1;
         }
-        let unmapped_len = right_one - left_one;
-        let padding = um_size - um_dist - unmapped_len - k + 1;
-        let pos = trpos + padding - p;
+        let mut pos = trpos + (r_end - um_dist) + 1;
+        if csense {
+            pos += k - 1 + p;
+        } else {
+            pos -= p;
+        }
         Some((pos, !csense))
     }
 }
@@ -3595,6 +3668,23 @@ pub(super) fn ec_blocks_leading_vals(
         }
     }
     blocks[..lo].iter().collect()
+}
+
+pub(super) fn ec_blocks_trailing_vals(
+    blocks: &[crate::index::EcBlock],
+    idx: u32,
+) -> Vec<&crate::index::EcBlock> {
+    if blocks.is_empty() {
+        return Vec::new();
+    }
+    if blocks.len() == 1 {
+        return if blocks[0].lb >= idx {
+            vec![&blocks[0]]
+        } else {
+            Vec::new()
+        };
+    }
+    blocks.iter().filter(|block| block.lb >= idx).collect()
 }
 
 pub(super) fn block_index_for_position(
@@ -3660,8 +3750,12 @@ pub(super) fn block_contains(block: &crate::index::EcBlock, tr: u32) -> bool {
     block.ec.binary_search(&tr).is_ok()
 }
 
-pub(super) fn block_min_pos(block: &crate::index::EcBlock, tr: u32) -> Option<u32> {
+fn block_positions(block: &crate::index::EcBlock, tr: u32) -> Option<&crate::index::PositionSet> {
     let positions = block.positions.as_ref()?;
     let idx = block.ec.binary_search(&tr).ok()?;
-    positions.get(idx).copied()
+    positions.get(idx)
+}
+
+fn block_contains_rawpos(block: &crate::index::EcBlock, tr: u32, rawpos: u32) -> bool {
+    block_positions(block, tr).is_some_and(|positions| positions.contains(rawpos))
 }

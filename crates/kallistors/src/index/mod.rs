@@ -494,8 +494,52 @@ pub(crate) struct EcBlock {
     pub lb: u32,
     pub ub: u32,
     pub ec: Vec<u32>,
-    pub positions: Option<Vec<u32>>,
+    pub positions: Option<Vec<PositionSet>>,
     pub strands: Option<Vec<u8>>,
+}
+
+pub(crate) enum PositionSet {
+    Single(u32),
+    Many(Vec<u32>),
+}
+
+impl PositionSet {
+    fn from_values(mut values: Vec<u32>) -> Self {
+        match values.len() {
+            0 => Self::Many(values),
+            1 => Self::Single(values[0]),
+            _ => {
+                values.sort_unstable();
+                values.dedup();
+                Self::Many(values)
+            }
+        }
+    }
+
+    pub(crate) fn contains(&self, value: u32) -> bool {
+        match self {
+            Self::Single(raw) => *raw == value,
+            Self::Many(values) => values.binary_search(&value).is_ok(),
+        }
+    }
+
+    pub(crate) fn min_max(&self) -> Option<(u32, u32)> {
+        match self {
+            Self::Single(raw) => Some((*raw, *raw)),
+            Self::Many(values) => Some((*values.first()?, *values.last()?)),
+        }
+    }
+
+    pub(crate) fn for_each(&self, mut f: impl FnMut(u32)) {
+        match self {
+            Self::Single(raw) => f(*raw),
+            Self::Many(values) => {
+                for &raw in values {
+                    f(raw);
+                }
+            }
+        }
+    }
 }
 
 fn read_block_array_ecs<R: Read>(reader: &mut R) -> Result<Vec<Vec<u32>>> {
@@ -603,7 +647,7 @@ pub(crate) fn read_sparse_vector_ec<R: Read>(reader: &mut R) -> Result<Vec<u32>>
 
 pub(crate) fn read_sparse_vector_with_positions<R: Read>(
     reader: &mut R,
-) -> Result<(Vec<u32>, Vec<u32>, Vec<u8>)> {
+) -> Result<(Vec<u32>, Vec<PositionSet>, Vec<u8>)> {
     let roaring_size = read_u64_le(reader)? as usize;
     let mut buf = vec![0u8; roaring_size];
     reader.read_exact(&mut buf)?;
@@ -611,16 +655,19 @@ pub(crate) fn read_sparse_vector_with_positions<R: Read>(
         .ok_or_else(|| Error::InvalidFormat("failed to deserialize roaring bitmap".into()))?;
 
     let v_size = read_u64_le(reader)? as usize;
-    let mut mins = Vec::with_capacity(v_size);
+    let mut positions = Vec::with_capacity(v_size);
     let mut strands = Vec::with_capacity(v_size);
     let mut pbuf = Vec::new();
     for _ in 0..v_size {
         let p_size = read_u64_le(reader)? as usize;
         pbuf.resize(p_size, 0);
         reader.read_exact(&mut pbuf)?;
-        let (min, max) = unsafe { deserialize_roaring_minmax(&pbuf) }
+        let raw_positions = unsafe { deserialize_roaring_to_vec(&pbuf) }
             .ok_or_else(|| Error::InvalidFormat("failed to deserialize roaring bitmap".into()))?;
-        mins.push(min);
+        let raw_positions = PositionSet::from_values(raw_positions);
+        let (min, max) = raw_positions
+            .min_max()
+            .ok_or_else(|| Error::InvalidFormat("empty position bitmap".into()))?;
         let min_sense = (min & 0x7fff_ffff) == min;
         let max_sense = (max & 0x7fff_ffff) == max;
         let strand = if min_sense == max_sense {
@@ -628,6 +675,7 @@ pub(crate) fn read_sparse_vector_with_positions<R: Read>(
         } else {
             2
         };
+        positions.push(raw_positions);
         strands.push(strand);
     }
 
@@ -635,13 +683,13 @@ pub(crate) fn read_sparse_vector_with_positions<R: Read>(
     if ids.len() != v_size {
         ids.sort_unstable();
     }
-    if ids.len() != mins.len() {
+    if ids.len() != positions.len() {
         return Err(Error::InvalidFormat("sparse vector size mismatch".into()));
     }
     if ids.len() != strands.len() {
         return Err(Error::InvalidFormat("sparse vector size mismatch".into()));
     }
-    Ok((ids, mins, strands))
+    Ok((ids, positions, strands))
 }
 
 unsafe fn deserialize_roaring_to_vec(buf: &[u8]) -> Option<Vec<u32>> {
@@ -656,17 +704,4 @@ unsafe fn deserialize_roaring_to_vec(buf: &[u8]) -> Option<Vec<u32>> {
         roaring_bitmap_free(ptr);
     }
     Some(out)
-}
-
-unsafe fn deserialize_roaring_minmax(buf: &[u8]) -> Option<(u32, u32)> {
-    let ptr = unsafe { roaring_bitmap_deserialize(buf.as_ptr().cast()) };
-    if ptr.is_null() {
-        return None;
-    }
-    let min = unsafe { croaring_sys::roaring_bitmap_minimum(ptr) };
-    let max = unsafe { croaring_sys::roaring_bitmap_maximum(ptr) };
-    unsafe {
-        roaring_bitmap_free(ptr);
-    }
-    Some((min, max))
 }

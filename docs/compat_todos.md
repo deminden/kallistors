@@ -68,8 +68,10 @@ Notes:
   `crates/kallistors/tests/paired_parity.rs`.
 - Later real-data paired mismatches came from overcrowded minimizer handling.
 - Current status:
-  exact on paired deterministic prefixes through `262144` pairs on `data/subsets/` with
-  `--threads 32`; full-file paired quant is exact on the checked-in real dataset.
+  exact on the deterministic `1,048,576`-pair prefix across `1, 2, 4, 8, 16, 32`
+  threads; the latest full-file paired check is exact at `4,408,640` processed,
+  `4,244,771` pseudoaligned, and `276,251` unique. Current benchmark details are in
+  `docs/benchmarks.md`.
 
 ## Phase F: Loader performance parity with original `kallisto`
 - [x] Stop rebuilding the minimizer map as `Vec<Vec<u64>>`; switch to a flat contiguous minimizer store
@@ -123,22 +125,12 @@ Notes:
 - Tried a quant-only loader shortcut that omitted nested `ec_blocks` and kept only the flattened EC
   representation. It looked fine on tiny subsets but regressed larger paired parity, so normal
   quant/pseudoalign commands were switched back to the standard builder.
-- Current full-file benchmark on the checked-in real dataset (`-t 32`) is faster than local
-  upstream `kallisto` while preserving exact run-info counts:
-  `kallisto` wall `59.12s`
-  `kallistors` wall `30.76s`
-  `kallistors` stage timings:
-  `index_header_parse 0.000s`
-  `graph_decode 3.872s`
-  `minimizer_count_pass 0.842s`
-  `minimizer_fill_pass 5.454s`
-  `fastq_read_decompress 9.568s`
-  `pseudoalign 12.678s`
-  `ec_merge 0.125s`
-  `em 7.731s`
+- Current full-file median-of-5 benchmark on the checked-in real dataset (`-t 32`) is faster than
+  local upstream `kallisto`: `55.81s` for kallisto versus `32.79s` for kallistors (`1.70x`).
+  A post-fix full-file count check matches kallisto exactly; see `docs/benchmarks.md` for the raw
+  artifacts and multicore table.
 - Remaining performance work is still mostly in pseudoalignment, FASTQ decompression, and EM;
-  future search-loop work should preserve exact default run-info parity even if experimental
-  variants temporarily drift behind flags.
+  future search-loop work should keep both deterministic-prefix and full-file run-info parity exact.
 
 ## Phase G: Mirror remaining upstream search-loop optimizations
 - [ ] Replace per-k-mer minimizer recomputation with a rolling `minHashIterator`-style state for the common quant path
@@ -149,13 +141,14 @@ Notes:
 - [ ] Mirror upstream incremental fallback more literally after a failed jump: scan only the intended checkpoint windows up to the next stop, rather than dropping immediately into a broader compatibility-heavy path
 - [ ] Rework common-case bucket probing to stay as a single compact late-branch scan over raw entries, matching `packed_tiny_vector` semantics without introducing a slower typed side index
 - [ ] Delay `match_kmer_direct(...)` in the common path so it behaves like a true rare fallback instead of an eager branch on every overcrowded marker
-- [ ] After each search-loop change, rerun the deterministic real-data ladder through `262144` plus the full file; reject changes that improve wall time but move full-file parity away from exactness
+- [ ] After each search-loop change, rerun the deterministic real-data ladder through at least
+  `1,048,576` pairs plus the full file; reject changes that improve wall time but widen the
+  full-file run-info counts
 
 Acceptance test:
 - On the checked-in paired real dataset, the common search path should stop rebuilding minimizer
-  candidates for every adjacent k-mer window, full-file `pseudoalign` time should drop materially
-  from the current `36.610s`, and the deterministic paired ladder should remain exact through
-  `262144` while full-file run-info parity stays exact.
+  candidates for every adjacent k-mer window, the deterministic `1,048,576`-pair prefix should
+  remain exact across the multicore table, and full-file run-info parity should remain exact.
 
 Strategy:
 - Start with iterator-state reuse, because upstream Bifrost search is built around `minHashIterator`
@@ -242,6 +235,17 @@ Notes:
 - validation after the fix:
   - isolated pair `SRR13638690.2703620`: `1 -> 0` pseudoaligned
   - full file: exact parity restored at `4,244,771` pseudoaligned and `276,251` unique
+- Later paired backoff work preserved the false-positive guard and fixed the opposite
+  false-negative edge:
+  - `SRR13638690.1344261` stays unaligned, matching kallisto
+  - `SRR13638690.3238047` aligns, matching kallisto
+  - full file remains exact at `4,408,640` processed, `4,244,771` pseudoaligned,
+    and `276,251` unique
+  - the two reads are saved in
+    `crates/kallistors/tests/fixtures/paired_backoff_regression_*.fixture`
+  - the full-index regression test is opt-in via
+    `KALLISTORS_RUN_REAL_PAIRED_REGRESSION=1 cargo test -p kallistors --test real_paired_regression`
+    so regular CI does not load the large GENCODE index
 
 Input-path work:
 - switched `flate2` to the `zlib-rs` backend in `crates/kallistors/Cargo.toml`
@@ -278,12 +282,11 @@ Input-path work:
   `70.73s` wall (`-6.87s`, about `-8.9%`) while preserving exact full-file
   run-info parity and exact deterministic paired-prefix parity through `262144`
   with `--threads 32`
-- subsequent loader/quant passes improved the same full-file paired benchmark to
-  `30.76s` wall while preserving exact run-info parity
-- the current full-file result is faster than upstream `kallisto -t 32`
-  (`59.12s` wall in the latest local run); current remaining optimization work is
-  mostly in pseudoalignment/decompression/EM rather than loader startup or
-  per-record FASTQ allocation/copying
+- subsequent loader/quant passes improved the same full-file paired benchmark. The current
+  median-of-5 result is `32.79s` for kallistors versus `55.81s` for upstream `kallisto -t 32`,
+  and a post-fix full-file count check matches upstream kallisto exactly.
+- current remaining optimization work is mostly in pseudoalignment/decompression/EM rather than
+  loader startup or per-record FASTQ allocation/copying.
 
 ## Phase H: Pure Rust index builder
 - [x] Add `kallistors index` CLI and `kallistors::index::build_index` library entry point
