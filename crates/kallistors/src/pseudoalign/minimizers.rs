@@ -1,3 +1,5 @@
+use core::range::RangeInclusive;
+
 use crate::index::bifrost::{encode_minimizer_rep, wyhash};
 
 const REP_HASH_VALS: [u64; 4] = [
@@ -45,7 +47,7 @@ const COMP_BASES: [u8; 256] = {
 };
 
 #[inline]
-fn bifrost_neighbor_bounds(k: usize, g: usize) -> Option<(usize, usize)> {
+fn bifrost_neighbor_bounds(k: usize, g: usize) -> Option<RangeInclusive<usize>> {
     // Bifrost minHashKmer(..., neighbor_hash=true) scans [shift, k-g-shift] inclusive.
     // With shift=1 this is [1, k-g-1].
     let shift = 1usize;
@@ -56,12 +58,15 @@ fn bifrost_neighbor_bounds(k: usize, g: usize) -> Option<(usize, usize)> {
     if end < shift {
         None
     } else {
-        Some((shift, end))
+        Some(RangeInclusive {
+            start: shift,
+            last: end,
+        })
     }
 }
 
 #[inline]
-fn strict_bounds(k: usize, g: usize) -> Option<(usize, usize)> {
+fn strict_bounds(k: usize, g: usize) -> Option<RangeInclusive<usize>> {
     if k < g + 2 {
         return None;
     }
@@ -70,14 +75,14 @@ fn strict_bounds(k: usize, g: usize) -> Option<(usize, usize)> {
     if end < start {
         end = start;
     }
-    Some((start, end))
+    Some(RangeInclusive { start, last: end })
 }
 
 pub(super) fn minimizers_for_kmer(seq: &[u8], g: usize) -> Option<Vec<([u8; 8], usize)>> {
-    let (start, end) = strict_bounds(seq.len(), g)?;
+    let bounds = strict_bounds(seq.len(), g)?;
     let mut best_hash: Option<u64> = None;
     let mut best: Vec<([u8; 8], usize)> = Vec::new();
-    for pos in start..=end {
+    for pos in bounds {
         let slice = &seq[pos..pos + g];
         let h = rep_hash(slice)?;
         let bytes = encode_minimizer_rep(slice)?;
@@ -105,13 +110,13 @@ pub(super) fn minimizers_for_kmer_into(
     g: usize,
     out: &mut Vec<([u8; 8], usize)>,
 ) -> bool {
-    let Some((start, end)) = strict_bounds(seq.len(), g) else {
+    let Some(bounds) = strict_bounds(seq.len(), g) else {
         out.clear();
         return false;
     };
     out.clear();
     let mut best_hash: Option<u64> = None;
-    for pos in start..=end {
+    for pos in bounds {
         let slice = &seq[pos..pos + g];
         let Some(h) = rep_hash(slice) else {
             out.clear();
@@ -146,9 +151,9 @@ pub(super) fn minimizers_ranked_for_kmer(
     if max_hashes == 0 {
         return None;
     }
-    let (start, end) = strict_bounds(seq.len(), g)?;
+    let bounds = strict_bounds(seq.len(), g)?;
     let mut all: Vec<(u64, [u8; 8], usize)> = Vec::new();
-    for pos in start..=end {
+    for pos in bounds {
         let slice = &seq[pos..pos + g];
         let h = rep_hash(slice)?;
         let bytes = encode_minimizer_rep(slice)?;
@@ -178,11 +183,11 @@ type MinimizerCandidates = Vec<([u8; 8], usize)>;
 type MinhashCandidates = (MinimizerCandidates, Option<([u8; 8], usize)>);
 
 pub(super) fn minhash_primary_for_kmer(seq: &[u8], g: usize) -> Option<(u64, MinimizerCandidates)> {
-    let (start, end) = bifrost_neighbor_bounds(seq.len(), g)?;
+    let bounds = bifrost_neighbor_bounds(seq.len(), g)?;
     let mut best_hash: Option<u64> = None;
     let mut best: Vec<([u8; 8], usize)> = Vec::new();
 
-    for pos in start..=end {
+    for pos in bounds {
         let slice = &seq[pos..pos + g];
         let h = rep_hash(slice)?;
         let bytes = encode_minimizer_rep(slice)?;
@@ -211,13 +216,13 @@ pub(super) fn minhash_next_after_hash(
     g: usize,
     min_hash: u64,
 ) -> Option<(u64, ([u8; 8], usize))> {
-    let (start, end) = bifrost_neighbor_bounds(seq.len(), g)?;
+    let bounds = bifrost_neighbor_bounds(seq.len(), g)?;
     let mut best_hash: Option<u64> = None;
     let mut best_rep: Option<u64> = None;
     let mut best_bytes: [u8; 8] = [0; 8];
     let mut best_pos: usize = 0;
 
-    for pos in start..=end {
+    for pos in bounds {
         let slice = &seq[pos..pos + g];
         let h = rep_hash(slice)?;
         if h <= min_hash {
@@ -264,17 +269,18 @@ pub(super) fn minhash_candidates_for_kmer(seq: &[u8], g: usize) -> Option<Minhas
 }
 
 pub(super) fn minimizer_tail_for_kmer(seq: &[u8], g: usize) -> Option<([u8; 8], usize)> {
-    let (_, end) = bifrost_neighbor_bounds(seq.len(), g)?;
+    let bounds = bifrost_neighbor_bounds(seq.len(), g)?;
+    let end = bounds.last;
     let slice = &seq[end..end + g];
     let bytes = encode_minimizer_rep(slice)?;
     Some((bytes, end))
 }
 
 pub(super) fn minimizer_for_kmer_strict(seq: &[u8], g: usize) -> Option<([u8; 8], usize)> {
-    let (start, end) = strict_bounds(seq.len(), g)?;
+    let bounds = strict_bounds(seq.len(), g)?;
     let mut best_hash: Option<u64> = None;
     let mut best: Option<([u8; 8], usize)> = None;
-    for pos in start..=end {
+    for pos in bounds {
         let slice = &seq[pos..pos + g];
         let h = rep_hash(slice)?;
         let bytes = encode_minimizer_rep(slice)?;

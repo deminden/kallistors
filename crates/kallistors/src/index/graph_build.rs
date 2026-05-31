@@ -1,3 +1,4 @@
+use core::range::RangeInclusive;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1137,7 +1138,7 @@ fn insert_selected_minimizers(
     if seq.len() < k {
         return Ok(());
     }
-    let Some((start, end)) = bifrost_minimizer_bounds(k, g) else {
+    let Some(bounds) = bifrost_minimizer_bounds(k, g) else {
         return Ok(());
     };
     let mut hashes = Vec::with_capacity(seq.len() - g + 1);
@@ -1146,11 +1147,11 @@ fn insert_selected_minimizers(
     }
 
     let mut selected_positions = Vec::new();
-    let mut window = VecDeque::with_capacity(end - start + 1);
-    let mut next_pos = start;
+    let mut window = VecDeque::with_capacity(bounds.last - bounds.start + 1);
+    let mut next_pos = bounds.start;
     for kmer_start in 0..=seq.len() - k {
-        let window_start = kmer_start + start;
-        let window_end = kmer_start + end;
+        let window_start = kmer_start + bounds.start;
+        let window_end = kmer_start + bounds.last;
         while window.front().is_some_and(|&pos| pos < window_start) {
             window.pop_front();
         }
@@ -1202,7 +1203,7 @@ fn minimizer_position_count(seq_len: usize, g: usize) -> usize {
     }
 }
 
-fn bifrost_minimizer_bounds(k: usize, g: usize) -> Option<(usize, usize)> {
+fn bifrost_minimizer_bounds(k: usize, g: usize) -> Option<RangeInclusive<usize>> {
     let shift = 1usize;
     if k < g + shift + 1 {
         return None;
@@ -1211,7 +1212,10 @@ fn bifrost_minimizer_bounds(k: usize, g: usize) -> Option<(usize, usize)> {
     if end < shift {
         None
     } else {
-        Some((shift, end))
+        Some(RangeInclusive {
+            start: shift,
+            last: end,
+        })
     }
 }
 
@@ -1696,14 +1700,14 @@ mod tests {
     }
 
     fn selected_minimizers_naive(seq: &[u8], k: usize, g: usize) -> Vec<(u32, [u8; 8])> {
-        let Some((start, end)) = bifrost_minimizer_bounds(k, g) else {
+        let Some(bounds) = bifrost_minimizer_bounds(k, g) else {
             return Vec::new();
         };
         let mut out = Vec::new();
         for kmer_start in 0..=seq.len() - k {
             let mut best_hash = u64::MAX;
             let mut selected = Vec::new();
-            for rel_pos in start..=end {
+            for rel_pos in bounds {
                 let pos = kmer_start + rel_pos;
                 let min_seq = &seq[pos..pos + g];
                 let hash = minimizer_rep_hash(min_seq).expect("hash minimizer");

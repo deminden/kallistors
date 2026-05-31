@@ -1,5 +1,6 @@
 //! Quantification routines (EM over ECs with optional sequence bias).
 
+use core::range::Range;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -23,8 +24,7 @@ const TOLERANCE: f64 = f64::from_bits(1);
 const KALLISTO_BIAS_LEN: usize = 4096;
 
 struct EmMultiEc {
-    start: usize,
-    len: usize,
+    transcript_range: Range<usize>,
     count: f64,
 }
 
@@ -520,9 +520,8 @@ pub fn em_quantify(
         next_alpha.copy_from_slice(&em_work.singleton_alpha);
 
         for ec in &em_work.multi_ecs {
-            let range = ec.start..ec.start + ec.len;
             let mut denom = 0.0;
-            for i in range.clone() {
+            for i in ec.transcript_range {
                 let tr = em_work.multi_transcripts[i];
                 denom += alpha[tr] * em_work.multi_weights[i];
             }
@@ -530,7 +529,7 @@ pub fn em_quantify(
                 continue;
             }
             let scale = ec.count / denom;
-            for i in range {
+            for i in ec.transcript_range {
                 let tr = em_work.multi_transcripts[i];
                 next_alpha[tr] += em_work.multi_weights[i] * alpha[tr] * scale;
             }
@@ -634,9 +633,8 @@ fn em_quantify_fixed_eff_lens(
         next_alpha.copy_from_slice(&em_work.singleton_alpha);
 
         for ec in &em_work.multi_ecs {
-            let range = ec.start..ec.start + ec.len;
             let mut denom = 0.0;
-            for i in range.clone() {
+            for i in ec.transcript_range {
                 let tr = em_work.multi_transcripts[i];
                 denom += alpha[tr] * em_work.multi_weights[i];
             }
@@ -644,7 +642,7 @@ fn em_quantify_fixed_eff_lens(
                 continue;
             }
             let scale = ec.count / denom;
-            for i in range {
+            for i in ec.transcript_range {
                 let tr = em_work.multi_transcripts[i];
                 next_alpha[tr] += em_work.multi_weights[i] * alpha[tr] * scale;
             }
@@ -705,8 +703,10 @@ fn prepare_em_work(ec_classes: &[Vec<u32>], counts: &[u32], eff_lens: &[f64]) ->
                 multi_weights.push(count / len);
             }
             multi_ecs.push(EmMultiEc {
-                start,
-                len: ec.len(),
+                transcript_range: Range {
+                    start,
+                    end: multi_transcripts.len(),
+                },
                 count,
             });
         }
@@ -791,7 +791,7 @@ impl SplitMix64 {
 
 fn refresh_multi_weights(work: &mut EmWork, eff_lens: &[f64]) {
     for ec in &work.multi_ecs {
-        for i in ec.start..ec.start + ec.len {
+        for i in ec.transcript_range {
             let tr = work.multi_transcripts[i];
             let len = eff_lens.get(tr).copied().unwrap_or(1.0);
             work.multi_weights[i] = ec.count / len;

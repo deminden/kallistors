@@ -1,5 +1,6 @@
 //! I/O utilities and FASTQ parsing.
 
+use core::range::Range;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -23,11 +24,7 @@ pub trait ReadSource {
     fn next_record(&mut self) -> Option<Result<FastqRecord>>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PackedSpan {
-    start: u32,
-    len: u32,
-}
+type PackedSpan = Range<u32>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PackedFastqRecord {
@@ -101,9 +98,7 @@ impl PackedFastqBatch {
     }
 
     fn slice(&self, span: PackedSpan) -> &[u8] {
-        let start = span.start as usize;
-        let end = start + span.len as usize;
-        &self.storage[start..end]
+        &self.storage[span_as_usize(span)]
     }
 }
 
@@ -136,16 +131,19 @@ impl PackedSeqBatch {
     pub(crate) unsafe fn seq_unchecked(&self, idx: usize) -> &[u8] {
         // Callers iterate below `len()`, so the record index is in bounds.
         let span = unsafe { self.records.get_unchecked(idx).seq };
-        let start = span.start as usize;
-        let end = start + span.len as usize;
         // Spans are produced from this storage by `read_line_span_into`.
-        unsafe { self.storage.get_unchecked(start..end) }
+        unsafe { self.storage.get_unchecked(span_as_usize(span)) }
     }
 
     fn slice(&self, span: PackedSpan) -> &[u8] {
-        let start = span.start as usize;
-        let end = start + span.len as usize;
-        &self.storage[start..end]
+        &self.storage[span_as_usize(span)]
+    }
+}
+
+fn span_as_usize(span: PackedSpan) -> Range<usize> {
+    Range {
+        start: span.start as usize,
+        end: span.end as usize,
     }
 }
 
@@ -233,10 +231,9 @@ impl<R: BufRead> FastqReader<R> {
                 storage.pop();
             }
         }
-        let len = storage.len() - start;
         Ok(Some(PackedSpan {
             start: start as u32,
-            len: len as u32,
+            end: storage.len() as u32,
         }))
     }
 

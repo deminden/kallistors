@@ -1,6 +1,8 @@
+use std::assert_matches;
 use std::collections::HashSet;
 use std::fs;
 
+use kallistors::Error;
 use kallistors::index::{
     Index, IndexBuildOptions, bifrost::encode_minimizer_rep, build_index, build_index_with_report,
     extract_ec_list,
@@ -132,7 +134,7 @@ TTGACCGTAGCTAGGATCCGATCGTACGATCGTAGCTAGCTAACGTTAGCTAGGCTACGATCGATCGT
         },
     )
     .expect_err("duplicate names should fail");
-    assert!(err.to_string().contains("repeated name"));
+    assert_matches!(err, Error::InvalidFormat(message) if message.contains("repeated name"));
 
     let index = dir.path().join("dupes_unique.idx");
     build_index(
