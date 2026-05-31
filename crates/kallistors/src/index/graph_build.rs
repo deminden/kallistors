@@ -197,6 +197,7 @@ pub(super) fn build_kmer_unitig_graph_with_report(
     threads: usize,
 ) -> Result<(BuildGraph, GraphBuildReport)> {
     let graph_start = Instant::now();
+    // Build topology first; EC payloads are keyed to the final compacted unitig coordinates.
     let kmers = collect_kmers(transcripts, k, threads)?;
     let lookup = KmerLookup::new(&kmers.sorted)?;
     let paths = {
@@ -363,6 +364,7 @@ fn compact_unitigs(
     let mut visited = VisitedKmers::new(entries.len());
     let mut out = Vec::new();
 
+    // Branch starts produce maximal paths; the second pass catches isolated cycles.
     for &word in entries {
         if visited.contains_word(entries, lookup, word)? {
             continue;
@@ -464,6 +466,7 @@ fn join_unitig_paths(
     topology: &GraphTopology<'_>,
 ) -> Result<Vec<UnitigPath>> {
     let active = vec![true; paths.len()];
+    // Stitch only unique k-1 overlaps left behind after the primary unitig walk.
     let starts = build_oriented_starts(&paths, &active, topology.k)?;
     let candidates = build_join_candidates(&paths, &active, &starts, topology)?;
     let (next, prev) = build_join_edges(paths.len(), candidates);
@@ -936,6 +939,7 @@ fn build_blocks_for_unitig(
     breakpoints.sort_unstable();
     breakpoints.dedup();
 
+    // Small EC breakpoint sets are cheaper to scan directly; large ones use a sweep-line.
     if breakpoints.len() <= SWEEP_BLOCK_MIN_BREAKPOINTS {
         return build_blocks_for_unitig_by_scan(trinfos, &breakpoints, kmer_count, ec_threshold);
     }
@@ -1146,6 +1150,7 @@ fn insert_selected_minimizers(
         hashes.push(minimizer_rep_hash(&seq[pos..pos + g])?);
     }
 
+    // Keep the window minimum with a monotonic queue instead of rescanning every k-mer.
     let mut selected_positions = Vec::new();
     let mut window = VecDeque::with_capacity(bounds.last - bounds.start + 1);
     let mut next_pos = bounds.start;
@@ -1419,6 +1424,7 @@ impl KmerLookup {
                 "too many distinct k-mers for compact lookup".into(),
             ));
         }
+        // Prefix buckets keep the table compact and make small buckets linear-scan friendly.
         let prefix_bits = kmer_lookup_prefix_bits(entries.len());
         let bucket_count = 1usize << prefix_bits;
         let shift = 64 - prefix_bits;
