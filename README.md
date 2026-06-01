@@ -10,7 +10,7 @@ kallistors: a Rust implementation of kallisto-style pseudoalignment and quantifi
   about `18%` lower peak RSS).
 - Quant writes kallisto-style `abundance.tsv`, `run_info.json`, and default `abundance.h5`.
 
-## Compatibility notes (v0.3.1)
+## Compatibility notes (v0.3.2)
 
 This is a focused reimplementation at the current stage, not a drop-in replacement for `kallisto`.
 

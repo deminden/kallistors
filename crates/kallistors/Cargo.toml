@@ -1,7 +1,8 @@
 [package]
 name = "kallistors"
-version = "0.3.1"
+version = "0.3.2"
 description = "A Rust reimplementation of kallisto-style pseudoalignment and RNA-seq quantification."
+readme = "../../README.md"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
