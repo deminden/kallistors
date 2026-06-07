@@ -306,6 +306,15 @@ fn build_index_with_named_transcript(
     name: &str,
     transcript: &[u8],
 ) -> (std::path::PathBuf, Vec<u8>) {
+    build_index_with_named_transcript_and_k(dir, name, transcript, 31)
+}
+
+fn build_index_with_named_transcript_and_k(
+    dir: &tempfile::TempDir,
+    name: &str,
+    transcript: &[u8],
+    k: usize,
+) -> (std::path::PathBuf, Vec<u8>) {
     let fasta = dir.path().join("transcripts.fa");
     let index = dir.path().join("transcripts.idx");
     fs::write(
@@ -317,7 +326,7 @@ fn build_index_with_named_transcript(
         &index,
         std::slice::from_ref(&fasta),
         IndexBuildOptions {
-            k: 31,
+            k,
             ..IndexBuildOptions::default()
         },
     )
@@ -633,7 +642,7 @@ fn bus_without_technology_infers_paired_batch_rows() {
     )
     .expect("write batch");
 
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
+    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
         .arg("bus")
         .arg("-i")
         .arg(&index)
@@ -641,9 +650,15 @@ fn bus_without_technology_infers_paired_batch_rows() {
         .arg(&out_dir)
         .arg("--batch")
         .arg(&batch)
-        .status()
+        .output()
         .expect("run paired batch kallistors bus without -x");
-    assert!(status.success());
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[bus] will try running read files supplied in batch file"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("--paired ignored"), "{stderr}");
 
     let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
     assert_eq!(bc_len, 16);
@@ -694,12 +709,19 @@ fn bus_without_technology_rejects_mixed_batch_row_widths() {
         .arg(&out_dir)
         .arg("--batch")
         .arg(&batch)
+        .arg("--paired")
         .output()
         .expect("run mixed-width batch kallistors bus without -x");
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("batch file line 2 has 2 files, expected 1"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "[bus] --paired ignored; single/paired-end is inferred from number of files supplied"
+        ),
         "{stderr}"
     );
 }
@@ -984,6 +1006,40 @@ fn bus_custom_technology_suffix_paired_consumes_extra_mate() {
 }
 
 #[test]
+fn bus_custom_open_ended_umi_patches_bus_header_length() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (index, transcript) = build_tiny_index(&dir);
+    let r1 = dir.path().join("r1.fastq");
+    let r2 = dir.path().join("r2.fastq");
+    let out_dir = dir.path().join("custom_open_ended_umi_out");
+
+    let mut bc_umi = b"ACGTACGTACGTACGT".to_vec();
+    bc_umi.extend(std::iter::repeat_n(b'T', 12));
+    write_fastq(&r1, &[("bc_umi", &bc_umi)]);
+    write_fastq(&r2, &[("seq", &transcript)]);
+
+    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
+        .arg("bus")
+        .arg("-i")
+        .arg(&index)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("-x")
+        .arg("0,0,16:0,16,0:1,0,0")
+        .arg(&r1)
+        .arg(&r2)
+        .status()
+        .expect("run kallistors bus custom open-ended UMI");
+    assert!(status.success());
+
+    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
+    assert_eq!(bc_len, 16);
+    assert_eq!(umi_len, 12);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].ec, 0);
+}
+
+#[test]
 fn bus_batch_writes_cells_and_batch_barcodes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (index, transcript) = build_tiny_index(&dir);
@@ -1168,6 +1224,36 @@ fn bus_rejects_zero_threads() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid number of threads 0"));
+}
+
+#[test]
+fn bus_rejects_missing_index_file_clearly() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let index = dir.path().join("missing.idx");
+    let read = dir.path().join("read.fastq");
+    let out_dir = dir.path().join("missing_index_out");
+
+    write_fastq(&read, &[("read", b"ACGTACGTACGTACGTACGTACGTACGTACGT")]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
+        .arg("bus")
+        .arg("-i")
+        .arg(&index)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("-x")
+        .arg("MATQSEQ")
+        .arg(&read)
+        .output()
+        .expect("run kallistors bus with missing index");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("kallisto index file not found"), "{stderr}");
+    assert!(
+        !out_dir.exists(),
+        "missing index should fail before creating output directory"
+    );
 }
 
 #[test]
@@ -1752,7 +1838,7 @@ fn bus_long_computes_threshold_from_error_rate() {
         &[("seq_read", &transcript), ("seq_novel", &[b'N'; 80])],
     );
 
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
+    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
         .arg("bus")
         .arg("-i")
         .arg(&index)
@@ -1767,9 +1853,47 @@ fn bus_long_computes_threshold_from_error_rate() {
         .arg("ONT")
         .arg(&r1)
         .arg(&r2)
-        .status()
+        .output()
         .expect("run kallistors bus --long --error-rate");
-    assert!(status.success());
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Using computed threshold 0.38"));
+
+    let (_bc_len, _umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
+    assert_eq!(records.len(), 1);
+}
+
+#[test]
+fn bus_long_computed_threshold_uses_index_k() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let transcript = b"ACGTGCACTGATCGTACGATCGTACGTTAGCTAGCTAGGCTAGCATCGATCGATGCTAGCTAGCTGACT";
+    let (index, transcript) = build_index_with_named_transcript_and_k(&dir, "tx0", transcript, 15);
+    let r1 = dir.path().join("r1.fastq");
+    let r2 = dir.path().join("r2.fastq");
+    let out_dir = dir.path().join("long_error_rate_k15_out");
+
+    write_fastq(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
+    write_fastq(&r2, &[("seq_read", &transcript)]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
+        .arg("bus")
+        .arg("-i")
+        .arg(&index)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("-x")
+        .arg("10XV3")
+        .arg("--long")
+        .arg("-e")
+        .arg("0.01")
+        .arg("-P")
+        .arg("ONT")
+        .arg(&r1)
+        .arg(&r2)
+        .output()
+        .expect("run kallistors bus --long --error-rate on k15 index");
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Using computed threshold 0.7"), "{stderr}");
 
     let (_bc_len, _umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
     assert_eq!(records.len(), 1);
@@ -1924,7 +2048,7 @@ fn bus_long_invalid_threshold_uses_default() {
     write_fastq(&r1, &[("cell", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
     write_fastq(&r2, &[("seq", &transcript)]);
 
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
+    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
         .arg("bus")
         .arg("-i")
         .arg(&index)
@@ -1937,9 +2061,14 @@ fn bus_long_invalid_threshold_uses_default() {
         .arg("2")
         .arg(&r1)
         .arg(&r2)
-        .status()
+        .output()
         .expect("run kallistors bus --long with invalid threshold");
-    assert!(status.success());
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(
+            "Threshold not in (0,1). Setting default threshold for unmapped kmers to 0.8"
+        )
+    );
 
     let (_bc_len, _umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
     assert_eq!(records.len(), 1);
@@ -2209,7 +2338,7 @@ fn bus_bam_rejects_missing_umi_tag() {
 }
 
 #[test]
-fn bus_bam_skips_secondary_records_before_counting_num_reads() {
+fn bus_bam_skips_secondary_and_supplementary_records_before_counting_num_reads() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (index, transcript) = build_tiny_index(&dir);
     let bam = dir.path().join("reads.bam");
@@ -2223,6 +2352,12 @@ fn bus_bam_skips_secondary_records_before_counting_num_reads() {
                 b"ACGTACGTACGTACGT",
                 b"TTTTTTTTTT",
                 Flags::SECONDARY,
+            ),
+            (
+                &transcript,
+                b"AAAACCCCGGGGTTTT",
+                b"CCCCCCCCCC",
+                Flags::SUPPLEMENTARY,
             ),
             (
                 &transcript,
@@ -2246,7 +2381,7 @@ fn bus_bam_skips_secondary_records_before_counting_num_reads() {
         .arg("1")
         .arg(&bam)
         .status()
-        .expect("run kallistors bus --bam with secondary record");
+        .expect("run kallistors bus --bam with secondary/supplementary records");
     assert!(status.success());
 
     let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
@@ -2914,6 +3049,55 @@ fn bus_num_reads_larger_than_input_returns_error_after_writing_outputs() {
 }
 
 #[test]
+fn bus_batch_num_reads_larger_than_input_returns_error_after_writing_outputs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (index, transcript) = build_tiny_index(&dir);
+    let r1 = dir.path().join("r1.fastq");
+    let r2 = dir.path().join("r2.fastq");
+    let batch = dir.path().join("batch.txt");
+    let out_dir = dir.path().join("batch_num_reads_short_out");
+
+    write_fastq(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
+    write_fastq(&r2, &[("seq_read", &transcript)]);
+    fs::write(
+        &batch,
+        format!("sample_a\t{}\t{}\n", r1.display(), r2.display()),
+    )
+    .expect("write batch");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
+        .arg("bus")
+        .arg("-i")
+        .arg(&index)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("-x")
+        .arg("10XV3")
+        .arg("--batch")
+        .arg(&batch)
+        .arg("--numReads")
+        .arg("2")
+        .output()
+        .expect("run kallistors batch bus --numReads larger than input");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Number of reads processed is less than --numReads: 2, returning 1")
+    );
+    assert!(
+        fs::read_to_string(out_dir.join("run_info.json"))
+            .unwrap()
+            .contains("\"n_processed\": 1")
+    );
+    assert_eq!(
+        fs::read_to_string(out_dir.join("matrix.cells")).unwrap(),
+        "sample_a\n"
+    );
+    let (_bc_len, _umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
+    assert_eq!(records.len(), 1);
+}
+
+#[test]
 fn bus_pseudobam_writes_transcriptome_bam() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (index, transcript) = build_tiny_index(&dir);
@@ -3558,7 +3742,7 @@ fn bus_aa_ignores_paired_flag_for_single_cdna_technologies() {
         &[("seq_read", b"TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT")],
     );
 
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
+    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
         .arg("bus")
         .arg("-i")
         .arg(&index)
@@ -3570,9 +3754,14 @@ fn bus_aa_ignores_paired_flag_for_single_cdna_technologies() {
         .arg("--paired")
         .arg(&r1)
         .arg(&r2)
-        .status()
+        .output()
         .expect("run kallistors bus --aa --paired");
-    assert!(status.success());
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("[bus] --paired ignored; --aa only supports single-end reads"),
+        "{stderr}"
+    );
 
     let (_bc_len, _umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
     assert_eq!(records.len(), 1);

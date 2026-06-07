@@ -762,17 +762,69 @@ impl PseudoBamWriter {
     }
 }
 
-fn long_read_threshold(threshold: Option<f64>, error_rate: Option<f64>) -> Result<f64> {
+struct ThresholdChoice {
+    value: f64,
+    report: Option<ThresholdReport>,
+}
+
+enum ThresholdReport {
+    Computed(f64),
+    InvalidSupplied,
+    InvalidComputed(f64),
+}
+
+fn long_read_threshold(
+    threshold: Option<f64>,
+    error_rate: Option<f64>,
+    k: usize,
+) -> ThresholdChoice {
     if let Some(threshold) = threshold {
-        return Ok(threshold);
+        if 0.0 < threshold && threshold < 1.0 {
+            return ThresholdChoice {
+                value: threshold,
+                report: None,
+            };
+        }
+        return ThresholdChoice {
+            value: 0.8,
+            report: Some(ThresholdReport::InvalidSupplied),
+        };
     }
     if let Some(error_rate) = error_rate {
-        let computed = (1.0 / error_rate - 62.0) * error_rate;
+        let computed = (1.0 / error_rate - 2.0 * k as f64) * error_rate;
         if 0.0 < computed && computed < 1.0 {
-            return Ok(computed);
+            return ThresholdChoice {
+                value: computed,
+                report: Some(ThresholdReport::Computed(computed)),
+            };
+        }
+        return ThresholdChoice {
+            value: 0.8,
+            report: Some(ThresholdReport::InvalidComputed(computed)),
+        };
+    }
+    ThresholdChoice {
+        value: 0.8,
+        report: None,
+    }
+}
+
+fn report_threshold_choice(report: &ThresholdReport) {
+    match report {
+        ThresholdReport::Computed(threshold) => {
+            eprintln!("Using computed threshold {threshold}");
+        }
+        ThresholdReport::InvalidSupplied => {
+            eprintln!(
+                "Threshold not in (0,1). Setting default threshold for unmapped kmers to 0.8"
+            );
+        }
+        ThresholdReport::InvalidComputed(threshold) => {
+            eprintln!(
+                "Supplied and computed threshold are invalid, using default value of 0.8 (computed: {threshold})"
+            );
         }
     }
-    Ok(0.8)
 }
 
 fn bus_pseudoalign_options(
@@ -792,7 +844,7 @@ fn bus_pseudoalign_options(
         strand_specific,
         do_union: args.do_union,
         no_jump: args.no_jump,
-        dfk_onlist: args.dfk_onlist,
+        dfk_onlist: args.dfk_onlist || args.aa,
         investigation: super::investigation_options_from_env(),
         ..kallistors::pseudoalign::PseudoalignOptions::default()
     }
@@ -846,6 +898,9 @@ pub fn run(args: BusArgs) -> Result<()> {
         .index
         .as_deref()
         .ok_or_else(|| anyhow!("kallisto index file missing"))?;
+    if !index_path.exists() {
+        bail!("kallisto index file not found {}", index_path.display());
+    }
     let out_dir = args
         .out_dir
         .as_deref()
@@ -891,6 +946,14 @@ pub fn run(args: BusArgs) -> Result<()> {
         && !batch.exists()
     {
         bail!("file not found {}", batch.display());
+    }
+    if args.batch.is_some() {
+        eprintln!("[bus] will try running read files supplied in batch file");
+        if args.technology.is_none() && args.paired {
+            eprintln!(
+                "[bus] --paired ignored; single/paired-end is inferred from number of files supplied"
+            );
+        }
     }
     if args.bam && args.batch.is_some() {
         bail!("--bam cannot be combined with batch mode");
@@ -938,16 +1001,6 @@ pub fn run(args: BusArgs) -> Result<()> {
     {
         bail!("--platform must be PACBIO or ONT");
     }
-    let threshold = if args.long {
-        let threshold = long_read_threshold(args.threshold, args.error_rate)?;
-        if 0.0 < threshold && threshold < 1.0 {
-            threshold
-        } else {
-            0.8
-        }
-    } else {
-        0.8
-    };
     if (args.do_union || args.no_jump) && (args.long || args.aa) {
         bail!("--union and --no-jump are not compatible with --long or --aa");
     }
@@ -991,6 +1044,9 @@ pub fn run(args: BusArgs) -> Result<()> {
         mark_technology_paired(&mut spec, "--paired")?;
     } else if args.paired && args.long && !args.aa && technology_base == "SMARTSEQ2" {
         add_unpaired_mate_slice(&mut spec, "--paired")?;
+    }
+    if args.aa && args.paired && !spec.paired {
+        eprintln!("[bus] --paired ignored; --aa only supports single-end reads");
     }
     if args.aa && spec.paired {
         bail!("--aa BUS mode currently supports single cDNA read technologies");
@@ -1040,6 +1096,15 @@ pub fn run(args: BusArgs) -> Result<()> {
         )
     }
     .map_err(|err| anyhow!("pseudoalign failed: {err}"))?;
+    let threshold = if args.long {
+        let choice = long_read_threshold(args.threshold, args.error_rate, index.k);
+        if let Some(report) = choice.report.as_ref() {
+            report_threshold_choice(report);
+        }
+        choice.value
+    } else {
+        0.8
+    };
     let strand_specific = bus_strand_specific(&args, &spec, &index);
     if strand_specific.is_some() && !strand_specific_compatible(&spec) {
         bail!(
@@ -1437,7 +1502,7 @@ fn process_bam_records(
 
     for result in reader.records() {
         let record = result.map_err(|err| anyhow!("failed to read BAM record: {err}"))?;
-        if record.flags().is_secondary() {
+        if record.flags().is_secondary() || record.flags().is_supplementary() {
             continue;
         }
         if let Some(max_reads) = processing.max_reads
@@ -2605,10 +2670,17 @@ fn sentinel_slice() -> SliceSpec {
 }
 
 fn parse_custom_technology(name: &str) -> Result<TechnologySpec> {
-    let parts = name.split(':').collect::<Vec<_>>();
-    if parts.len() != 3 {
-        bail!("custom technology must have barcode:umi:sequence sections");
+    let colon_count = name.as_bytes().iter().filter(|&&byte| byte == b':').count();
+    if colon_count != 2 {
+        let detail = match colon_count {
+            0 => "none found".to_string(),
+            1 => "only one found".to_string(),
+            3 => "three found".to_string(),
+            count => format!("{count} found"),
+        };
+        bail!("custom technology must contain two colons (:), {detail}: \"{name}\"");
     }
+    let parts = name.split(':').collect::<Vec<_>>();
     let bc = parse_slice_list(parts[0])?;
     if bc.is_empty() {
         bail!("custom technology barcode list is empty");
@@ -2647,6 +2719,9 @@ fn parse_custom_technology(name: &str) -> Result<TechnologySpec> {
 }
 
 fn parse_slice_list(value: &str) -> Result<Vec<SliceSpec>> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
     let nums = value
         .split(',')
         .map(|part| {
@@ -3214,6 +3289,17 @@ mod tests {
     }
 
     #[test]
+    fn bus_aa_enables_dfk_onlist_by_default() {
+        let args = BusArgs {
+            aa: true,
+            ..BusArgs::default()
+        };
+        let options = bus_pseudoalign_options(&args, None);
+
+        assert!(options.dfk_onlist);
+    }
+
+    #[test]
     fn parse_v3_lengths_and_strand_match_preset() {
         let spec = technology_spec("PARSEV3").unwrap();
         assert_eq!(spec.nfiles, 2);
@@ -3236,6 +3322,12 @@ mod tests {
                 seq: b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".to_vec(),
                 plus: b"+".to_vec(),
                 qual: vec![b'I'; 62],
+            },
+            FastqRecord {
+                header: b"@r3".to_vec(),
+                seq: b"QRST".to_vec(),
+                plus: b"+".to_vec(),
+                qual: vec![b'I'; 4],
             },
         ];
 
@@ -3300,6 +3392,80 @@ mod tests {
             concat_sequence_slices(&records, &vasa, false).unwrap(),
             b"EFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
         );
+
+        let dropseq = technology_spec("DROPSEQ").unwrap();
+        assert_eq!(
+            concat_slices(&records, &dropseq.bc, false).unwrap(),
+            b"0123456789AB"
+        );
+        assert_eq!(
+            concat_slices(&records, &dropseq.umi, false).unwrap(),
+            b"CDEFGHIJ"
+        );
+
+        let indrops_v1 = technology_spec("INDROPSV1").unwrap();
+        assert_eq!(
+            concat_slices(&records, &indrops_v1.bc, false).unwrap(),
+            b"0123456789AUVWXYZab"
+        );
+        assert_eq!(
+            concat_slices(&records, &indrops_v1.umi, false).unwrap(),
+            b"ghijkl"
+        );
+
+        let indrops_v2 = technology_spec("INDROPSV2").unwrap();
+        assert_eq!(
+            concat_slices(&records, &indrops_v2.bc, false).unwrap(),
+            b"abcdefghijkEFGHIJKL"
+        );
+        assert_eq!(
+            concat_slices(&records, &indrops_v2.umi, false).unwrap(),
+            b"QRSTUV"
+        );
+
+        let indrops_v3 = technology_spec("INDROPSV3").unwrap();
+        assert_eq!(
+            concat_slices(&records, &indrops_v3.bc, false).unwrap(),
+            b"01234567abcdefgh"
+        );
+        assert_eq!(
+            concat_slices(&records, &indrops_v3.umi, false).unwrap(),
+            b"ijklmn"
+        );
+        assert_eq!(
+            concat_sequence_slices(&records, &indrops_v3, false).unwrap(),
+            b"QRST"
+        );
+
+        let celseq = technology_spec("CELSEQ").unwrap();
+        assert_eq!(
+            concat_slices(&records, &celseq.bc, false).unwrap(),
+            b"01234567"
+        );
+        assert_eq!(
+            concat_slices(&records, &celseq.umi, false).unwrap(),
+            b"89AB"
+        );
+
+        let celseq2 = technology_spec("CELSEQ2").unwrap();
+        assert_eq!(
+            concat_slices(&records, &celseq2.bc, false).unwrap(),
+            b"6789AB"
+        );
+        assert_eq!(
+            concat_slices(&records, &celseq2.umi, false).unwrap(),
+            b"012345"
+        );
+
+        let scrbseq = technology_spec("SCRBSEQ").unwrap();
+        assert_eq!(
+            concat_slices(&records, &scrbseq.bc, false).unwrap(),
+            b"012345"
+        );
+        assert_eq!(
+            concat_slices(&records, &scrbseq.umi, false).unwrap(),
+            b"6789ABCDEF"
+        );
     }
 
     #[test]
@@ -3334,6 +3500,26 @@ mod tests {
         assert!(spec.keep_fastq_comments);
         assert!(!spec.bulk_like());
         assert_eq!(total_len(&spec.umi), None);
+    }
+
+    #[test]
+    fn custom_technology_parser_reports_colon_count_and_empty_lists() {
+        let no_colons = technology_spec("0,0,16").unwrap_err().to_string();
+        assert!(no_colons.contains("none found"), "{no_colons}");
+
+        let one_colon = technology_spec("0,0,16:0,16,28").unwrap_err().to_string();
+        assert!(one_colon.contains("only one found"), "{one_colon}");
+
+        let three_colons = technology_spec("0,0,16:0,16,28:1,0,0:extra")
+            .unwrap_err()
+            .to_string();
+        assert!(three_colons.contains("three found"), "{three_colons}");
+
+        let empty_barcode = technology_spec(":0,16,28:1,0,0").unwrap_err().to_string();
+        assert!(
+            empty_barcode.contains("custom technology barcode list is empty"),
+            "{empty_barcode}"
+        );
     }
 
     #[test]
