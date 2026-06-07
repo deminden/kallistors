@@ -375,6 +375,17 @@ pub struct BifrostIndex {
     pub use_shade: bool,
 }
 
+impl BifrostIndex {
+    pub fn has_strand_annotations(&self) -> bool {
+        self.ec_blocks.iter().flatten().any(|block| {
+            block
+                .strands
+                .as_ref()
+                .is_some_and(|strands| !strands.is_empty())
+        })
+    }
+}
+
 pub fn build_bifrost_index(path: &Path) -> Result<BifrostIndex> {
     build_bifrost_index_with_positions_threaded(path, false, 1)
 }

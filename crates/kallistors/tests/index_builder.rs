@@ -33,6 +33,7 @@ TTGACCGTAGCTAGGATCCGATCGTACGATCGTAGCTAGCTAACGTTAGCTAGGCTACGATCGATCGT
             threads: 1,
             make_unique: false,
             ec_max_size: -1,
+            aa: false,
         },
     )
     .expect("build index");

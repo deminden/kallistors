@@ -34,6 +34,8 @@ enum Commands {
         timings: bool,
         #[arg(long)]
         make_unique: bool,
+        #[arg(long)]
+        aa: bool,
         #[arg(short = 'e', long = "ec-max-size", default_value_t = -1)]
         ec_max_size: i32,
         #[arg(required = true)]
@@ -203,6 +205,88 @@ enum Commands {
         #[arg(long)]
         genomebam: bool,
         #[arg(required = true, num_args = 1..=2)]
+        reads: Vec<std::path::PathBuf>,
+    },
+    #[command(about = "Generate BUS files for single-cell data")]
+    Bus {
+        #[arg(short = 'i', long)]
+        index: Option<std::path::PathBuf>,
+        #[arg(short = 'o', long = "output-dir", alias = "out")]
+        out_dir: Option<std::path::PathBuf>,
+        #[arg(short = 'x', long = "technology")]
+        technology: Option<String>,
+        #[arg(short = 'l', long = "list")]
+        list: bool,
+        #[arg(short = 't', long, default_value_t = 1)]
+        threads: usize,
+        #[arg(short = 'N', long = "numReads")]
+        max_reads: Option<u64>,
+        #[arg(short = 'B', long = "batch")]
+        batch: Option<std::path::PathBuf>,
+        #[arg(short = 'b', long)]
+        bam: bool,
+        #[arg(long)]
+        pseudobam: bool,
+        #[arg(long)]
+        genomebam: bool,
+        #[arg(short = 'g', long)]
+        gtf: Option<std::path::PathBuf>,
+        #[arg(short = 'c', long)]
+        chromosomes: Option<std::path::PathBuf>,
+        #[arg(long = "batch-barcodes")]
+        batch_barcodes: bool,
+        #[arg(long = "inleaved", alias = "interleaved")]
+        interleaved: bool,
+        #[arg(short = 'T', long = "tag")]
+        tag_sequence: Option<String>,
+        #[arg(long)]
+        long: bool,
+        #[arg(short = 'P', long)]
+        platform: Option<String>,
+        #[arg(short = 'e', long = "error-rate")]
+        error_rate: Option<f64>,
+        #[arg(short = 'r', long)]
+        threshold: Option<f64>,
+        #[arg(long)]
+        unmapped: bool,
+        #[arg(long)]
+        aa: bool,
+        #[arg(short = 'n', long)]
+        num: bool,
+        #[arg(long)]
+        paired: bool,
+        #[arg(long)]
+        unstranded: bool,
+        #[arg(long)]
+        fr_stranded: bool,
+        #[arg(long)]
+        rf_stranded: bool,
+        #[arg(long)]
+        union: bool,
+        #[arg(long)]
+        no_jump: bool,
+        #[arg(long)]
+        verbose: bool,
+        #[arg(long = "dfk-onlist")]
+        dfk_onlist: bool,
+        #[arg(long)]
+        kallisto_enum: bool,
+        #[arg(long)]
+        kallisto_strict: bool,
+        #[arg(long)]
+        kallisto_local_fallback: bool,
+        #[arg(long)]
+        kallisto_fallback: bool,
+        #[arg(long)]
+        discard_special_only: bool,
+        #[arg(long)]
+        skip_overcrowded_minimizer: bool,
+        #[arg(long)]
+        kallisto_direct_kmer: bool,
+        #[arg(long)]
+        kallisto_bifrost_find: bool,
+        #[arg(long)]
+        kallisto_sparse_hits: bool,
         reads: Vec<std::path::PathBuf>,
     },
     #[command(about = "DEBUG: map transcript ids to names from index")]
@@ -379,6 +463,7 @@ fn main() -> Result<()> {
             threads,
             timings,
             make_unique,
+            aa,
             ec_max_size,
             fasta,
         } => commands::index::run(commands::index::Args {
@@ -388,6 +473,7 @@ fn main() -> Result<()> {
             threads,
             timings,
             make_unique,
+            aa,
             ec_max_size,
             fasta,
         }),
@@ -544,6 +630,88 @@ fn main() -> Result<()> {
             timings,
             pseudobam,
             genomebam,
+        }),
+        Commands::Bus {
+            index,
+            out_dir,
+            technology,
+            list,
+            threads,
+            max_reads,
+            batch,
+            bam,
+            pseudobam,
+            genomebam,
+            gtf,
+            chromosomes,
+            batch_barcodes,
+            interleaved,
+            tag_sequence,
+            long,
+            platform,
+            error_rate,
+            threshold,
+            unmapped,
+            aa,
+            num,
+            paired,
+            unstranded,
+            fr_stranded,
+            rf_stranded,
+            union,
+            no_jump,
+            verbose: _,
+            dfk_onlist,
+            kallisto_enum,
+            kallisto_strict,
+            kallisto_local_fallback,
+            kallisto_fallback,
+            discard_special_only,
+            skip_overcrowded_minimizer,
+            kallisto_direct_kmer,
+            kallisto_bifrost_find,
+            kallisto_sparse_hits,
+            reads,
+        } => commands::bus::run(commands::bus::BusArgs {
+            index,
+            out_dir,
+            technology,
+            reads,
+            threads,
+            list,
+            max_reads,
+            batch,
+            bam,
+            pseudobam,
+            genomebam,
+            gtf,
+            chromosomes,
+            batch_barcodes,
+            interleaved,
+            tag_sequence,
+            long,
+            platform,
+            error_rate,
+            threshold,
+            unmapped,
+            aa,
+            num,
+            paired,
+            unstranded,
+            fr_stranded,
+            rf_stranded,
+            do_union: union,
+            no_jump,
+            dfk_onlist,
+            kallisto_enum,
+            kallisto_strict,
+            kallisto_local_fallback,
+            kallisto_fallback,
+            discard_special_only,
+            skip_overcrowded_minimizer,
+            kallisto_direct_kmer,
+            kallisto_bifrost_find,
+            kallisto_sparse_hits,
         }),
         Commands::TranscriptLookup {
             index,

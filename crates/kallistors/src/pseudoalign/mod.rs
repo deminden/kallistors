@@ -74,7 +74,7 @@ pub(super) use utils::{add_ec_count, merge_ec_counts};
 
 const KMER_BYTES_CANDIDATES: [usize; 4] = [8, 16, 24, 32];
 const BATCH_SIZE: usize = 12_000;
-const MAX_FRAG_LEN: i64 = 1000;
+pub const MAX_FRAG_LEN: i64 = 1000;
 static RESET_ALL_CACHES_PER_READ: OnceLock<bool> = OnceLock::new();
 
 #[inline]
@@ -241,6 +241,7 @@ pub struct ReadTraceResult {
     pub dropped_hits: Option<Vec<debug::DroppedHitTrace>>,
     pub minimizer_candidates: Option<Vec<debug::MinimizerCandidateTrace>>,
     pub jump_decisions: Option<Vec<debug::JumpDecisionTrace>>,
+    pub placement: Option<PseudoalignPlacement>,
 }
 
 #[derive(Debug, Clone)]
@@ -251,6 +252,15 @@ pub struct PairedTraceResult {
     pub merged_reason: Option<DebugFailReason>,
     pub hard_reject_pair: bool,
     pub had_offlist: bool,
+    pub estimated_fragment_length: Option<i64>,
+    pub placement: Option<PseudoalignPlacement>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PseudoalignPlacement {
+    pub transcript_id: u32,
+    pub start: usize,
+    pub reverse: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -921,6 +931,7 @@ pub(crate) fn trace_result_from_debug_state(
             dropped_hits: Some(dbg.dropped_hits.clone()),
             minimizer_candidates: Some(dbg.minimizer_candidates.clone()),
             jump_decisions: Some(dbg.jump_decisions.clone()),
+            placement: None,
         };
     }
     if read_ec_present {
@@ -940,6 +951,7 @@ pub(crate) fn trace_result_from_debug_state(
             dropped_hits: Some(dbg.dropped_hits.clone()),
             minimizer_candidates: Some(dbg.minimizer_candidates.clone()),
             jump_decisions: Some(dbg.jump_decisions.clone()),
+            placement: None,
         };
     }
 
@@ -984,6 +996,7 @@ pub(crate) fn trace_result_from_debug_state(
         dropped_hits: Some(dbg.dropped_hits.clone()),
         minimizer_candidates: Some(dbg.minimizer_candidates.clone()),
         jump_decisions: Some(dbg.jump_decisions.clone()),
+        placement: None,
     }
 }
 
@@ -1030,7 +1043,7 @@ fn trace_read_bifrost_inner(
         } else {
             None
         };
-        let trace = trace_result_from_debug_state(
+        let mut trace = trace_result_from_debug_state(
             index,
             seq,
             &dbg,
@@ -1040,6 +1053,9 @@ fn trace_read_bifrost_inner(
             Some(ec_strand),
             reason,
         );
+        trace.placement = read_ec
+            .best_match
+            .and_then(|best_match| placement_for_match(&read_ec.ec, best_match, seq.len()));
         return (Some(read_ec), trace);
     }
 
@@ -1047,6 +1063,28 @@ fn trace_read_bifrost_inner(
         None,
         trace_result_from_debug_state(index, seq, &dbg, false, None, None, None, None),
     )
+}
+
+fn placement_for_match(
+    ec: &[u32],
+    best_match: MatchInfo,
+    read_len: usize,
+) -> Option<PseudoalignPlacement> {
+    let transcript_id = *ec.first()?;
+    let start = if best_match.used_revcomp {
+        best_match
+            .unitig_pos
+            .saturating_add(read_len)
+            .saturating_sub(best_match.read_pos)
+            .saturating_sub(1)
+    } else {
+        best_match.unitig_pos.saturating_sub(best_match.read_pos)
+    };
+    Some(PseudoalignPlacement {
+        transcript_id,
+        start,
+        reverse: best_match.used_revcomp,
+    })
 }
 
 /// Running fragment length statistics for paired-end reads.
@@ -1126,6 +1164,49 @@ pub fn unique_pseudoaligned_reads(counts: &EcCounts) -> u64 {
         }
     }
     total
+}
+
+/// Pseudoalign one sequence and return its equivalence class.
+pub fn ec_for_sequence_bifrost(
+    index: &BifrostIndex,
+    seq: &[u8],
+    strand: Strand,
+    options: PseudoalignOptions,
+) -> Option<Vec<u32>> {
+    let mut read_ec = ec_for_read_bifrost(index, seq, strand, None, options)?;
+    if let Some(mode) = options.strand_specific {
+        let comprehensive = options.do_union || options.no_jump || index.use_shade;
+        if let Some(filtered) =
+            apply_strand_filter(index, &read_ec, mode, true, comprehensive, &mut None, b"")
+        {
+            read_ec.ec = filtered;
+        }
+    }
+    (!read_ec.ec.is_empty()).then_some(read_ec.ec)
+}
+
+pub fn unmapped_kmer_ratio_bifrost(
+    index: &BifrostIndex,
+    seq: &[u8],
+    options: PseudoalignOptions,
+) -> f64 {
+    let total = seq.len().saturating_sub(index.k).saturating_add(1);
+    if total == 0 {
+        return 1.0;
+    }
+    let hits = local_kmer_hits(
+        index,
+        seq,
+        options.kallisto_enum,
+        options.kallisto_strict,
+        options.skip_overcrowded_minimizer,
+        options.kallisto_bifrost_find,
+        usize::MAX,
+    )
+    .into_iter()
+    .filter(|(_, _, hit, _)| *hit)
+    .count();
+    (total.saturating_sub(hits)) as f64 / total as f64
 }
 
 #[derive(Debug, Clone, Copy, Default)]

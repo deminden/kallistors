@@ -234,6 +234,33 @@ pub fn trace_read_pair_bifrost(
 
     let left_before = ec1.as_ref().map(|v| v.ec.clone());
     let right_before = ec2.as_ref().map(|v| v.ec.clone());
+    let estimated_fragment_length = if merged.len() == 1 {
+        match (ec1.as_ref(), ec2.as_ref()) {
+            (Some(left), Some(right)) => {
+                estimate_fragment_length_for_pair(index, merged[0], left, right)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let placement = if merged.len() == 1 {
+        ec1.as_ref()
+            .and_then(|left| {
+                left.best_match.and_then(|best_match| {
+                    super::placement_for_match(&merged, best_match, left_seq.len())
+                })
+            })
+            .or_else(|| {
+                ec2.as_ref().and_then(|right| {
+                    right.best_match.and_then(|best_match| {
+                        super::placement_for_match(&merged, best_match, right_seq.len())
+                    })
+                })
+            })
+    } else {
+        None
+    };
     let left_trace = super::trace_result_from_debug_state(
         index,
         left_seq,
@@ -262,6 +289,8 @@ pub fn trace_read_pair_bifrost(
         merged_reason,
         hard_reject_pair,
         had_offlist,
+        estimated_fragment_length,
+        placement,
     }
 }
 

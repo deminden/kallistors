@@ -17,12 +17,13 @@ This is a focused reimplementation at the current stage, not a drop-in replaceme
 | Area | Status |
 | --- | --- |
 | Existing `kallisto` index loading | Supported |
-| Pure Rust index building | Supported for normal nucleotide transcript FASTA, v13-compatible output |
+| Pure Rust index building | Supported for normal nucleotide transcript FASTA, v13-compatible output; amino-acid BUS indexes are supported with `index --aa` |
 | Paired-end quant | Implemented; deterministic prefix and latest full-file checks have exact `run_info.json` count parity |
 | Single-end quant | Implemented, with synthetic and selected parity coverage |
+| Single-cell BUS output | Implemented for fixed technology presets and kallisto-style custom `-x` triples, including batch/interleaved input, BAM input tags, SmartSeq3 tags, `--num`, `--union`, `--no-jump`, `--unmapped` ratio output, amino-acid `--aa` mode for single-cDNA technologies, first-pass `--long` threshold filtering with `--platform`/`--error-rate` and `novel.fastq`, long/paired BUS sidecars, and guarded pseudobam/genomebam CLI surface |
 | Sequence-specific bias correction | Optional with `--bias` and `--transcripts` |
 | Bootstrap / H5 output | Supported for quant; `abundance.h5` is written by default, plaintext bootstrap TSVs with `--plaintext` |
-| Long-read, UMI/BUS/technology modes, fusion detection | Not implemented |
+| Long-read and fusion detection | Not implemented |
 | CLI option coverage | Partial |
 
 Current real-data status:
@@ -43,9 +44,9 @@ Current real-data status:
   upstream kallisto because the RNG/sampling path still differs.
 
 Sequence-specific bias correction is optional and enabled only with `--bias`.
-The index builder currently targets nucleotide transcript FASTA. It intentionally rejects kallisto
-features outside that supported builder surface, including amino-acid mode, distinguish mode,
-d-list-specific behavior, and technology-specific modes.
+The index builder targets nucleotide transcript FASTA by default. Use `index --aa` for BUS indexes
+built from protein FASTA; unsupported builder features still include distinguish mode and
+d-list-specific behavior.
 
 ## Usage
 
@@ -62,6 +63,12 @@ kallistors index \
     --timings \
     transcripts.fa.gz
 
+# Build an amino-acid BUS index from protein FASTA
+kallistors index \
+    -i proteins.idx \
+    --aa \
+    proteins.fa.gz
+
 # Quantify (paired-end)
 kallistors quant \
     -i path/to/index.idx \
@@ -74,6 +81,80 @@ kallistors quant \
     -o out_dir \
     -b 100 \
     --seed 42 \
+    reads_1.fq reads_2.fq
+
+# Generate BUS output for a 10x Genomics v3-style single-cell run
+kallistors bus \
+    -i path/to/index.idx \
+    -o bus_out \
+    -x 10XV3 \
+    reads_1.fq reads_2.fq
+
+# Generate BUS output by translating cDNA reads against an amino-acid index
+kallistors bus \
+    -i proteins.idx \
+    -o bus_out \
+    -x 10XV3 \
+    --aa \
+    reads_1.fq reads_2.fq
+
+# Custom BUS technology triples support RX UMI extraction from FASTQ comments
+kallistors bus \
+    -i path/to/index.idx \
+    -o bus_out \
+    -x 0,0,16:RX:1,0,0 \
+    reads_1.fq reads_2.fq
+
+# Generate BUS output from a batch file: sample_id followed by the FASTQ files for that sample
+kallistors bus \
+    -i path/to/index.idx \
+    -o bus_out \
+    -x 10XV3 \
+    -B samples.tsv \
+    --batch-barcodes
+
+# Interleaved FASTQ input is accepted with kallisto's --inleaved spelling
+kallistors bus \
+    -i path/to/index.idx \
+    -o bus_out \
+    -x 10XV3 \
+    --inleaved \
+    interleaved.fq
+
+# SmartSeq3 uses kallisto's default UMI tag sequence; override it with -T if needed
+kallistors bus \
+    -i path/to/index.idx \
+    -o bus_out \
+    -x SMARTSEQ3 \
+    -T ATTGCGCAATG \
+    sample_bc1.fq sample_bc2.fq reads_1.fq reads_2.fq
+
+# Read a BAM file with CR/CB barcode tags and UR/RX UMI tags
+kallistors bus \
+    -i path/to/index.idx \
+    -o bus_out \
+    -x 10XV2 \
+    --bam \
+    alignments.bam
+
+# Write per-read unmapped k-mer ratios alongside BUS output
+kallistors bus \
+    -i path/to/index.idx \
+    -o bus_out \
+    -x 10XV3 \
+    --unmapped \
+    reads_1.fq reads_2.fq
+
+# Long-read BUS mode filters reads above the unmapped k-mer threshold
+kallistors bus \
+    -i path/to/index.idx \
+    -o bus_out \
+    -x 10XV3 \
+    --long \
+    --platform ONT \
+    --error-rate 0.01 \
+    --threshold 0.8 \
+    --unmapped \
     reads_1.fq reads_2.fq
 
 # Quantify (single-end)
@@ -96,6 +177,8 @@ Notes:
 - `--bias` requires `--transcripts` to provide the transcript FASTA.
 - `kallistors index` defaults to `k = 31`, `threads = 1`, and kallisto-compatible minimizer length
   selection when `-m/--min-size` is omitted.
+- `bus --aa` currently supports single-cDNA BUS technologies and reports `n_frame_clashes` in
+  `run_info.json`; paired BUS technologies are rejected in amino-acid mode.
 
 ### Performance and validation
 - Current benchmark tables, raw artifact paths, and methodology are in

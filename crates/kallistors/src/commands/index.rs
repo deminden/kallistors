@@ -9,6 +9,7 @@ pub struct Args {
     pub threads: usize,
     pub timings: bool,
     pub make_unique: bool,
+    pub aa: bool,
     pub ec_max_size: i32,
     pub fasta: Vec<PathBuf>,
 }
@@ -20,6 +21,7 @@ pub fn run(args: Args) -> Result<()> {
         threads: args.threads,
         make_unique: args.make_unique,
         ec_max_size: args.ec_max_size,
+        aa: args.aa,
     };
     let timings_enabled = args.timings || std::env::var_os("KALLISTORS_TIMINGS").is_some();
     if timings_enabled {

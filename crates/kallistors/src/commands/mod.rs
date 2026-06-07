@@ -1,3 +1,4 @@
+pub mod bus;
 pub mod ec_compare;
 pub mod ec_export;
 pub mod ec_from_index;

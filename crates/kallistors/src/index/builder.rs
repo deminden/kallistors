@@ -19,6 +19,7 @@ pub struct IndexBuildOptions {
     pub threads: usize,
     pub make_unique: bool,
     pub ec_max_size: i32,
+    pub aa: bool,
 }
 
 impl Default for IndexBuildOptions {
@@ -29,6 +30,7 @@ impl Default for IndexBuildOptions {
             threads: 1,
             make_unique: false,
             ec_max_size: -1,
+            aa: false,
         }
     }
 }
@@ -74,7 +76,7 @@ pub fn build_index_with_report(
     validate_k_g(k, g)?;
 
     let fasta_start = Instant::now();
-    let transcripts = load_transcripts(fasta_paths, options.make_unique)?;
+    let transcripts = load_transcripts(fasta_paths, options.make_unique, options.aa)?;
     let fasta_parse = fasta_start.elapsed();
 
     let (graph, graph_report) = build_kmer_unitig_graph_with_report(
@@ -157,7 +159,11 @@ fn validate_k_g(k: usize, g: usize) -> Result<()> {
     Ok(())
 }
 
-fn load_transcripts(fasta_paths: &[PathBuf], make_unique: bool) -> Result<Vec<Transcript>> {
+fn load_transcripts(
+    fasta_paths: &[PathBuf],
+    make_unique: bool,
+    aa: bool,
+) -> Result<Vec<Transcript>> {
     let mut out = Vec::new();
     let mut names = HashSet::new();
     let mut rng = Mt19937::new(42);
@@ -183,6 +189,7 @@ fn load_transcripts(fasta_paths: &[PathBuf], make_unique: bool) -> Result<Vec<Tr
                     current_name.take(),
                     &mut current_seq,
                     make_unique,
+                    aa,
                 )?;
                 let name = rest.split_whitespace().next().unwrap_or("").to_string();
                 current_name = Some(name);
@@ -197,6 +204,7 @@ fn load_transcripts(fasta_paths: &[PathBuf], make_unique: bool) -> Result<Vec<Tr
             current_name.take(),
             &mut current_seq,
             make_unique,
+            aa,
         )?;
     }
 
@@ -223,6 +231,7 @@ fn flush_transcript(
     name: Option<String>,
     seq: &mut Vec<u8>,
     make_unique: bool,
+    aa: bool,
 ) -> Result<()> {
     let Some(mut name) = name else {
         return Ok(());
@@ -248,16 +257,21 @@ fn flush_transcript(
         }
     }
 
-    let original_len = seq.len() as u32;
-    let mut normalized = Vec::with_capacity(seq.len());
-    for &base in seq.iter() {
-        let b = base.to_ascii_uppercase();
-        match b {
-            b'A' | b'C' | b'G' | b'T' => normalized.push(b),
-            b'U' => normalized.push(b'T'),
-            _ => normalized.push(dna_from_mt(rng.next_u32())),
+    let mut normalized = if aa {
+        crate::util::aa_to_comma_free(seq)
+    } else {
+        let mut normalized = Vec::with_capacity(seq.len());
+        for &base in seq.iter() {
+            let b = base.to_ascii_uppercase();
+            match b {
+                b'A' | b'C' | b'G' | b'T' => normalized.push(b),
+                b'U' => normalized.push(b'T'),
+                _ => normalized.push(dna_from_mt(rng.next_u32())),
+            }
         }
-    }
+        normalized
+    };
+    let original_len = normalized.len() as u32;
     if normalized.len() >= 10
         && normalized[normalized.len() - 10..]
             .iter()

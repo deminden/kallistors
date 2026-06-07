@@ -2,7 +2,7 @@
 
 use core::range::Range;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Stdin};
 use std::path::Path;
 
 use crate::Result;
@@ -150,6 +150,7 @@ fn span_as_usize(span: PackedSpan) -> Range<usize> {
 pub enum FastqInput {
     Gzip(Box<BufReader<flate2::read::MultiGzDecoder<BufReader<File>>>>),
     Plain(BufReader<File>),
+    Stdin(BufReader<Stdin>),
 }
 
 impl Read for FastqInput {
@@ -157,6 +158,7 @@ impl Read for FastqInput {
         match self {
             Self::Gzip(reader) => reader.read(buf),
             Self::Plain(reader) => reader.read(buf),
+            Self::Stdin(reader) => reader.read(buf),
         }
     }
 }
@@ -166,6 +168,7 @@ impl BufRead for FastqInput {
         match self {
             Self::Gzip(reader) => reader.fill_buf(),
             Self::Plain(reader) => reader.fill_buf(),
+            Self::Stdin(reader) => reader.fill_buf(),
         }
     }
 
@@ -173,12 +176,18 @@ impl BufRead for FastqInput {
         match self {
             Self::Gzip(reader) => reader.consume(amt),
             Self::Plain(reader) => reader.consume(amt),
+            Self::Stdin(reader) => reader.consume(amt),
         }
     }
 }
 
 /// Open a FASTQ reader from a plain or gzip-compressed file.
 pub fn open_fastq_reader(path: &Path) -> Result<FastqReader<FastqInput>> {
+    if path == Path::new("-") {
+        return Ok(FastqReader::new(FastqInput::Stdin(
+            BufReader::with_capacity(FASTQ_IO_BUFFER_BYTES, std::io::stdin()),
+        )));
+    }
     let file = File::open(path).map_err(|_| Error::MissingFile(path.to_path_buf()))?;
     let reader = if path.extension().and_then(|s| s.to_str()) == Some("gz") {
         let file = BufReader::with_capacity(FASTQ_IO_BUFFER_BYTES, file);
@@ -395,5 +404,10 @@ mod tests {
         assert_eq!(record.header, b"@r1");
         assert_eq!(record.seq, b"ACGT");
         assert!(reader.next_record().is_none());
+    }
+
+    #[test]
+    fn open_fastq_reader_accepts_stdin_sentinel() {
+        let _reader = open_fastq_reader(Path::new("-")).expect("open stdin FASTQ reader");
     }
 }
