@@ -2072,6 +2072,9 @@ fn configure_tag(
 }
 
 fn validate_tag_sequence(tag: &str) -> Result<()> {
+    if tag.is_empty() {
+        bail!("tag sequence cannot be empty");
+    }
     for (idx, base) in tag.bytes().enumerate() {
         if !matches!(base, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't') {
             bail!(
@@ -2750,6 +2753,19 @@ mod tests {
         assert_eq!(spec.nfiles, 1);
         assert_eq!(total_len(&spec.bc), None);
         assert_eq!(total_len(&spec.umi), None);
+    }
+
+    #[test]
+    fn custom_technology_parser_rejects_malformed_sentinel_slices() {
+        assert!(technology_spec("-1,0,0:-1,0,0:0,0,0,1,0,0").is_ok());
+
+        let err = technology_spec("-1,1,4:0,0,4:1,0,0")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("sentinel technology slices must be -1,-1,-1 or -1,0,0"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ kallistors: a Rust implementation of kallisto-style pseudoalignment and quantifi
   about `18%` lower peak RSS).
 - Quant writes kallisto-style `abundance.tsv`, `run_info.json`, and default `abundance.h5`.
 
-## Compatibility notes (v0.3.2)
+## Compatibility notes (v0.4.0)
 
 This is a focused reimplementation at the current stage, not a drop-in replacement for `kallisto`.
 
@@ -20,10 +20,10 @@ This is a focused reimplementation at the current stage, not a drop-in replaceme
 | Pure Rust index building | Supported for normal nucleotide transcript FASTA, v13-compatible output; amino-acid BUS indexes are supported with `index --aa` |
 | Paired-end quant | Implemented; deterministic prefix and latest full-file checks have exact `run_info.json` count parity |
 | Single-end quant | Implemented, with synthetic and selected parity coverage |
-| Single-cell BUS output | Implemented for fixed technology presets and kallisto-style custom `-x` triples, including batch/interleaved input, BAM input tags, SmartSeq3 tags, `--num`, `--union`, `--no-jump`, `--unmapped` ratio output, amino-acid `--aa` mode for single-cDNA technologies, first-pass `--long` threshold filtering with `--platform`/`--error-rate` and `novel.fastq`, long/paired BUS sidecars, and guarded pseudobam/genomebam CLI surface |
+| Single-cell BUS output | Implemented for fixed technology presets and kallisto-style custom `-x` triples, including batch/interleaved input, batch barcode sidecars, BAM input tags and missing-tag skips, SmartSeq3 tags, `--num`, `--union`, `--no-jump`, `--unmapped` ratio output, amino-acid `--aa` mode for single-cDNA technologies, first-pass `--long` threshold filtering with `--platform`/`--error-rate` and valid `novel.fastq`, long/paired BUS sidecars, pseudobam output, and projected/sorted genome BAM output with BAI index |
 | Sequence-specific bias correction | Optional with `--bias` and `--transcripts` |
 | Bootstrap / H5 output | Supported for quant; `abundance.h5` is written by default, plaintext bootstrap TSVs with `--plaintext` |
-| Long-read and fusion detection | Not implemented |
+| Long-read and fusion detection | Long-read BUS filtering/output is implemented; general long-read quant and fusion detection are not implemented |
 | CLI option coverage | Partial |
 
 Current real-data status:
@@ -53,6 +53,8 @@ d-list-specific behavior.
 ### As a Binary
 
 ```bash
+# Download prebuilt binaries from GitHub Releases, or install the CLI from source.
+#
 # Install the CLI from git
 cargo install --git https://github.com/deminden/kallistors kallistors
 
@@ -96,6 +98,24 @@ kallistors bus \
     -o bus_out \
     -x 10XV3 \
     --aa \
+    reads_1.fq reads_2.fq
+
+# Write transcriptome pseudobam output for supported single-cDNA or paired BUS technologies
+kallistors bus \
+    -i path/to/index.idx \
+    -o bus_out \
+    -x 10XV3 \
+    --pseudobam \
+    reads_1.fq reads_2.fq
+
+# Project pseudobam placements to genome coordinates and write pseudoalignments.bam.bai
+kallistors bus \
+    -i path/to/index.idx \
+    -o genome_bus_out \
+    -x 10XV3 \
+    --genomebam \
+    --gtf annotations.gtf \
+    --chromosomes chromosomes.txt \
     reads_1.fq reads_2.fq
 
 # Custom BUS technology triples support RX UMI extraction from FASTQ comments
@@ -168,6 +188,8 @@ kallistors quant \
 ```
 
 Notes:
+- Versioned GitHub Releases attach native release archives for Linux x86_64, macOS x86_64,
+  macOS arm64, and Windows x86_64, plus SHA-256 checksum files.
 - Paired-end quant estimates fragment length mean/sd from pseudoaligned pairs.
 - Quant writes `abundance.tsv`, `run_info.json`, and, unless `--plaintext` is set, `abundance.h5`
   in `out_dir` (matching kallisto field names and upstream-readable HDF5 structure).
@@ -179,6 +201,9 @@ Notes:
   selection when `-m/--min-size` is omitted.
 - `bus --aa` currently supports single-cDNA BUS technologies and reports `n_frame_clashes` in
   `run_info.json`; paired BUS technologies are rejected in amino-acid mode.
+- BUS pseudobam/genomebam output is supported for single-cDNA and paired BUS technologies. Unpaired
+  multi-sequence custom technologies are rejected for BAM output and strand-specific processing
+  until their placement semantics are made explicit.
 
 ### Performance and validation
 - Current benchmark tables, raw artifact paths, and methodology are in

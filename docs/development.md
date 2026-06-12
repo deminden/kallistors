@@ -14,6 +14,23 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
 
+## Release workflow
+
+The crate version lives in `crates/kallistors/Cargo.toml`. For a release, bump
+that version, refresh `Cargo.lock`, update docs that mention the release state,
+run the required checks above, then tag the checked commit with the matching
+version (`v0.4.0` for crate version `0.4.0`).
+
+Two GitHub workflows handle release publication:
+- `Publish to crates.io` runs on version tags (`v*` and `[0-9]*`). It verifies
+  that the tag matches the crate version, runs fmt/clippy/tests, performs a
+  locked dry run, then publishes when `CARGO_REGISTRY_TOKEN` is configured.
+- `Release binaries` runs when a GitHub Release is published, and can also be
+  dispatched manually for an existing tag. It checks out the tag, verifies the
+  tag/version match, builds `kallistors` with `cargo build --locked --release`
+  for Linux x86_64, macOS x86_64, macOS arm64, and Windows x86_64, then uploads
+  archives plus `.sha256` checksum files to the release.
+
 ## Kallistors CLI debugging tools
 
 - `trace-reads` supports EC traces, per-hit dumps, intersection dumps, and

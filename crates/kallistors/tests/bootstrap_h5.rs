@@ -3,10 +3,6 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, ExitStatus};
 
-use hdf5_pure::data_layout::DataLayout;
-use hdf5_pure::filter_pipeline::{FILTER_DEFLATE, FilterPipeline};
-use hdf5_pure::message_type::MessageType;
-use hdf5_pure::object_header::ObjectHeader;
 use tempfile::TempDir;
 
 #[test]
@@ -51,6 +47,17 @@ fn quant_writes_bootstrap_h5() {
     assert_eq!(json_u64(&run_info, "n_bootstraps"), Some(3));
 
     let h5 = hdf5_pure::File::open(out.join("abundance.h5")).expect("open h5");
+    let ids = h5
+        .dataset("aux/ids")
+        .expect("ids dataset")
+        .read_string()
+        .expect("read ids");
+    let expected_ids = transcripts
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, expected_ids);
+
     let num_bootstrap = h5
         .dataset("aux/num_bootstrap")
         .expect("num_bootstrap dataset")
@@ -71,8 +78,6 @@ fn quant_writes_bootstrap_h5() {
         bias_observed.shape().expect("bias_observed shape"),
         vec![4096]
     );
-    assert_eq!(chunk_dims(&h5, "aux/bias_observed"), vec![4096]);
-    assert_eq!(deflate_level(&h5, "aux/bias_observed"), Some(6));
     assert_eq!(
         bias_observed.read_i32().expect("read bias_observed"),
         vec![1; 4096]
@@ -83,8 +88,6 @@ fn quant_writes_bootstrap_h5() {
         bias_normalized.shape().expect("bias_normalized shape"),
         vec![4096]
     );
-    assert_eq!(chunk_dims(&h5, "aux/bias_normalized"), vec![4096]);
-    assert_eq!(deflate_level(&h5, "aux/bias_normalized"), Some(6));
     assert!(
         bias_normalized
             .read_f64()
@@ -158,63 +161,6 @@ fn run_kallistors(args: &[&OsStr]) -> std::io::Result<ExitStatus> {
             .args(args)
             .status()
     }
-}
-
-fn chunk_dims(file: &hdf5_pure::File, path: &str) -> Vec<u32> {
-    match data_layout(file, path) {
-        DataLayout::Chunked {
-            mut chunk_dimensions,
-            ..
-        } => {
-            chunk_dimensions.pop();
-            chunk_dimensions
-        }
-        other => panic!("{path} should use chunked storage, got {other:?}"),
-    }
-}
-
-fn deflate_level(file: &hdf5_pure::File, path: &str) -> Option<u32> {
-    let header = object_header(file, path);
-    let pipeline = header
-        .messages
-        .iter()
-        .find(|msg| msg.msg_type == MessageType::FilterPipeline)
-        .and_then(|msg| FilterPipeline::parse(&msg.data).ok())?;
-    pipeline
-        .filters
-        .iter()
-        .find(|filter| filter.filter_id == FILTER_DEFLATE)
-        .and_then(|filter| filter.client_data.first().copied())
-}
-
-fn data_layout(file: &hdf5_pure::File, path: &str) -> DataLayout {
-    let header = object_header(file, path);
-    let superblock = file.superblock();
-    let message = header
-        .messages
-        .iter()
-        .find(|msg| msg.msg_type == MessageType::DataLayout)
-        .expect("data layout message");
-    DataLayout::parse(
-        &message.data,
-        superblock.offset_size,
-        superblock.length_size,
-    )
-    .expect("parse data layout")
-}
-
-fn object_header(file: &hdf5_pure::File, path: &str) -> ObjectHeader {
-    let superblock = file.superblock();
-    let address = hdf5_pure::group_v2::resolve_path_any(file.as_bytes(), superblock, path)
-        .expect("resolve h5 path");
-    ObjectHeader::parse_with_base(
-        file.as_bytes(),
-        address as usize,
-        superblock.offset_size,
-        superblock.length_size,
-        superblock.base_address,
-    )
-    .expect("parse object header")
 }
 
 fn synthetic_transcripts() -> Vec<(String, Vec<u8>)> {

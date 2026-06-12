@@ -397,6 +397,9 @@ fn parse_slice_list(value: &str) -> Result<Vec<SliceSpec>> {
             bail!("invalid technology file number {file}");
         }
         if file == -1 {
+            if !((start == -1 && stop == -1) || (start == 0 && stop == 0)) {
+                bail!("sentinel technology slices must be -1,-1,-1 or -1,0,0");
+            }
             specs.push(sentinel_slice());
             continue;
         }

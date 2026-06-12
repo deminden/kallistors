@@ -1,6 +1,5 @@
 # Rust
 /target
-Cargo.lock
 
 # External references
 kallisto_src/

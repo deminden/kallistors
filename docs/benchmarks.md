@@ -12,7 +12,8 @@ cache-sensitive; compare only runs measured with the same inputs, binaries, and 
 - Timing method: `/usr/bin/time -f '%e %M'`
 - Builds: release binaries
 - Upstream kallisto: `kallisto_src/build/src/kallisto`, version `0.52.0`
-- kallistors: `target/release/kallistors`, version `0.3.1`
+- kallistors: `target/release/kallistors`, benchmark snapshot from the pre-`0.4.0`
+  development line
 
 ## Paired-End Quant
 

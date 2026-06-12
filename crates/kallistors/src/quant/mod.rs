@@ -12,9 +12,7 @@ use crate::ec::EcList;
 use crate::index::Index;
 use crate::pseudoalign::StrandSpecific;
 use crate::{Error, Result};
-use hdf5_pure::FileBuilder;
-use hdf5_pure::datatype::{CharacterSet, Datatype, StringPadding};
-use hdf5_pure::type_builders::DatasetBuilder;
+use hdf5_pure::{DatasetBuilder, Datatype, FileBuilder};
 
 const MIN_ALPHA: f64 = 1e-8;
 const ALPHA_LIMIT: f64 = 1e-7;
@@ -275,11 +273,11 @@ fn set_h5_chunking(dataset: &mut DatasetBuilder, len: usize) {
 }
 
 fn fixed_ascii_type(width: usize) -> Datatype {
-    Datatype::String {
-        size: width as u32,
-        padding: StringPadding::NullTerminate,
-        charset: CharacterSet::Ascii,
-    }
+    let mut encoded = vec![0x13, 0, 0, 0];
+    encoded.extend_from_slice(&(width as u32).to_le_bytes());
+    Datatype::parse(&encoded)
+        .expect("valid fixed-length ASCII HDF5 datatype")
+        .0
 }
 
 fn fixed_string_bytes(values: &[&str], width: usize) -> Vec<u8> {

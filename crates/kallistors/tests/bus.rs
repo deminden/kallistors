@@ -1410,6 +1410,43 @@ fn bus_rejects_invalid_tag_sequence_base() {
 }
 
 #[test]
+fn bus_rejects_empty_tag_sequence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (index, transcript) = build_tiny_index(&dir);
+    let r1 = dir.path().join("r1.fastq");
+    let r2 = dir.path().join("r2.fastq");
+    let out_dir = dir.path().join("custom_empty_tag_out");
+
+    let mut bc_umi = vec![b'A'; 16];
+    bc_umi.extend(std::iter::repeat_n(b'T', 24));
+    write_fastq(&r1, &[("bc_umi", &bc_umi)]);
+    write_fastq(&r2, &[("seq", &transcript)]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
+        .arg("bus")
+        .arg("-i")
+        .arg(&index)
+        .arg("-o")
+        .arg(&out_dir)
+        .arg("-x")
+        .arg("0,0,16:0,16,40:1,0,0")
+        .arg("--tag")
+        .arg("")
+        .arg(&r1)
+        .arg(&r2)
+        .output()
+        .expect("run kallistors bus custom empty tag");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("tag sequence cannot be empty"), "{stderr}");
+    assert!(
+        !out_dir.exists(),
+        "invalid tag sequence should fail before creating outputs"
+    );
+}
+
+#[test]
 fn bus_batch_writes_cells_and_batch_barcodes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (index, transcript) = build_tiny_index(&dir);

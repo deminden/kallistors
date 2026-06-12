@@ -316,3 +316,30 @@ Latest large-build reference run:
 - The generated index loads in both `kallistors index-info` and upstream `kallisto inspect`
 - Synthetic paired-read parity is exact when quantifying with either `kallistors quant` or upstream
   `kallisto quant` against the `kallistors`-built index
+
+## Phase I: Single-cell BUS surface
+- [x] Support fixed BUS technology presets and kallisto-style custom `-x` triples
+- [x] Validate malformed custom technology slices, sentinels, and suffixes before processing reads
+- [x] Support batch files, interleaved FASTQ input, and batch barcode sidecars
+- [x] Support BAM input with barcode/UMI tags, corrected tags, missing-tag skips, and header patching
+- [x] Support SmartSeq3 default and custom tag handling, including invalid or empty `--tag`
+  validation
+- [x] Support `--num`, `--union`, `--no-jump`, `--unmapped`, and valid `novel.fastq` output in
+  long-read BUS mode
+- [x] Support amino-acid `--aa` BUS output for single-cDNA technologies and record
+  `n_frame_clashes`
+- [x] Support transcriptome pseudobam and projected/sorted genome BAM output with BAI indexes for
+  supported single-cDNA and paired technologies
+- [x] Refactor BUS support into focused input/output/technology modules while keeping coupled
+  orchestration in `commands/bus.rs`
+- [ ] Broaden BAM output semantics before enabling unpaired multi-sequence custom technologies for
+  BAM output or strand-specific processing
+
+Acceptance test:
+- `cargo test -p kallistors --test bus`, plus the full workspace fmt/clippy/test gate before a
+  release.
+
+Notes:
+- Current BUS coverage is broad but not a claim of complete drop-in parity for every kallisto BUS
+  edge case. Unpaired multi-sequence custom technologies stay rejected where output placement or
+  strand semantics would otherwise be ambiguous.

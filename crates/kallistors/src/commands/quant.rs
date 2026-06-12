@@ -351,7 +351,7 @@ fn estimate_paired_fragment_lengths(
 }
 
 fn format_start_time() -> String {
-    let format = time::format_description::parse(
+    let format = time::format_description::parse_borrowed::<1>(
         "[weekday repr:short] [month repr:short] [day padding:space] [hour]:[minute]:[second] [year]",
     )
     .unwrap_or_else(|_| Vec::new());

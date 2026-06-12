@@ -1,0 +1,103 @@
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and upload assets for
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-15
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    env:
+      TAG_NAME: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG_NAME }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Verify tag matches crate version
+        shell: bash
+        run: |
+          tag_version="${TAG_NAME#v}"
+          crate_version="$(
+            cargo metadata --no-deps --format-version 1 \
+              | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "kallistors"))'
+          )"
+
+          if [[ "${tag_version}" != "${crate_version}" ]]; then
+            echo "Tag ${TAG_NAME} does not match kallistors ${crate_version}."
+            exit 1
+          fi
+
+      - name: Build release binary
+        run: cargo build --locked --release --package kallistors --bin kallistors --target ${{ matrix.target }}
+
+      - name: Package binary
+        shell: bash
+        run: |
+          version="${TAG_NAME#v}"
+          asset_stem="kallistors-${version}-${{ matrix.target }}"
+          dist_dir="dist/${asset_stem}"
+          mkdir -p "${dist_dir}"
+
+          binary="target/${{ matrix.target }}/release/kallistors"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+
+          cp "${binary}" "${dist_dir}/"
+          cp README.md LICENSE "${dist_dir}/"
+
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            powershell -NoProfile -Command "Compress-Archive -Path '${dist_dir}' -DestinationPath '${asset_stem}.zip' -Force"
+            asset="${asset_stem}.zip"
+          else
+            tar -czf "${asset_stem}.tar.gz" -C dist "${asset_stem}"
+            asset="${asset_stem}.tar.gz"
+          fi
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${asset}" > "${asset}.sha256"
+          else
+            shasum -a 256 "${asset}" > "${asset}.sha256"
+          fi
+
+          echo "ASSET=${asset}" >> "${GITHUB_ENV}"
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release upload "${TAG_NAME}" "${ASSET}" "${ASSET}.sha256" --clobber
