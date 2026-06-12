@@ -23,10 +23,19 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use kallistors::io::ReadSource;
 use noodles_sam::alignment::record::data::field::Value as SamDataValue;
+
+mod output;
+
+use output::{
+    BusRecord, RunInfo, fake_barcode, write_batch_long_flens, write_batch_paired_flens,
+    write_bus_header, write_bus_record, write_cells, write_long_flens, write_matrix_ec,
+    write_novel_read, write_paired_flens, write_run_info, write_sample_barcodes, write_transcripts,
+    write_unmapped_ratios,
+};
 
 #[derive(Default)]
 pub struct BusArgs {
@@ -59,6 +68,7 @@ pub struct BusArgs {
     pub rf_stranded: bool,
     pub do_union: bool,
     pub no_jump: bool,
+    pub verbose: bool,
     pub dfk_onlist: bool,
     pub kallisto_enum: bool,
     pub kallisto_strict: bool,
@@ -99,14 +109,6 @@ impl TechnologySpec {
         self.default_strand = Some(strand);
         self
     }
-}
-
-struct BusRecord {
-    barcode: u64,
-    umi: u64,
-    ec: i32,
-    count: u32,
-    flags: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +276,12 @@ impl GenomeModel {
                 let length = length
                     .parse::<usize>()
                     .map_err(|_| anyhow!("invalid chromosome length in line: {line}"))?;
+                if length == 0 {
+                    bail!("invalid chromosome length in line: {line}");
+                }
+                if chromosome_ids.contains_key(name) {
+                    bail!("duplicate chromosome name in line: {line}");
+                }
                 let id = chromosome_names.len();
                 chromosome_ids.insert(name.to_string(), id);
                 chromosome_names.push(name.to_string());
@@ -333,15 +341,28 @@ impl GenomeModel {
                 } else {
                     continue;
                 };
-            let start = fields[3]
+            if let Some(gene_id) = versioned_gtf_attribute(fields[8], "gene_id", "gene_version")
+                && !gene_ids.contains_key(&gene_id)
+            {
+                let gene_name = gtf_attribute(fields[8], "gene_name").unwrap_or_default();
+                gene_ids.insert(gene_id.clone(), genes.len());
+                genes.push(GeneInfo {
+                    id: gene_id,
+                    name: gene_name,
+                });
+            }
+            let start_one_based = fields[3]
                 .parse::<usize>()
-                .map_err(|_| anyhow!("invalid GTF exon start: {}", fields[3]))?
-                .saturating_sub(1);
+                .map_err(|_| anyhow!("invalid GTF exon start: {}", fields[3]))?;
+            if start_one_based == 0 {
+                bail!("invalid GTF exon start: {}", fields[3]);
+            }
+            let start = start_one_based - 1;
             let end = fields[4]
                 .parse::<usize>()
                 .map_err(|_| anyhow!("invalid GTF exon end: {}", fields[4]))?;
             if end <= start {
-                continue;
+                bail!("invalid GTF exon interval: {}-{}", fields[3], fields[4]);
             }
             let chromosome_id = if let Some(id) = chromosome_ids.get(fields[0]).copied() {
                 id
@@ -353,13 +374,22 @@ impl GenomeModel {
                 id
             };
             chromosome_lengths[chromosome_id] = chromosome_lengths[chromosome_id].max(end);
+            let negative_strand = match fields[6] {
+                "+" => false,
+                "-" => true,
+                strand => bail!("invalid GTF exon strand: {strand}"),
+            };
             let entry = raw[transcript_id].get_or_insert_with(|| RawTranscriptProjection {
                 chromosome_id,
-                negative_strand: fields[6] == "-",
+                negative_strand,
                 exons: Vec::new(),
             });
-            entry.chromosome_id = chromosome_id;
-            entry.negative_strand = fields[6] == "-";
+            if entry.chromosome_id != chromosome_id {
+                bail!("GTF transcript {transcript_name} has exons on multiple chromosomes");
+            }
+            if entry.negative_strand != negative_strand {
+                bail!("GTF transcript {transcript_name} has exons on multiple strands");
+            }
             entry.exons.push(Exon { start, end });
         }
 
@@ -920,6 +950,9 @@ pub fn run(args: BusArgs) -> Result<()> {
         bail!("invalid number of threads 0");
     }
     let write_pseudobam = args.pseudobam || args.genomebam;
+    if args.pseudobam && args.genomebam {
+        bail!("--pseudobam and --genomebam are mutually exclusive");
+    }
     if args.genomebam && args.gtf.is_none() {
         bail!("--genomebam requires --gtf");
     }
@@ -1061,8 +1094,38 @@ pub fn run(args: BusArgs) -> Result<()> {
         bail!("missing read files");
     }
     validate_read_files(&args, &read_groups)?;
+    if args.verbose {
+        report_verbose_read_groups(&read_groups);
+    }
     let synthetic_bc = spec.bc.first().is_some_and(|v| v.file.is_none());
     let fixed_bc_len = total_len(&spec.bc);
+    if let Some(fixed_bc_len) = fixed_bc_len
+        && fixed_bc_len > 32
+    {
+        bail!("barcode length {fixed_bc_len} exceeds BUS limit of 32 bases");
+    }
+    let fixed_umi_len = total_len(&spec.umi);
+    if let Some(fixed_umi_len) = fixed_umi_len
+        && fixed_umi_len > 32
+    {
+        bail!("UMI length {fixed_umi_len} exceeds BUS limit of 32 bases");
+    }
+    let batch_barcode_prefix_len = if args.batch_barcodes {
+        let Some(fixed_bc_len) = fixed_bc_len else {
+            bail!("--batch-barcodes requires a bounded barcode length");
+        };
+        if fixed_bc_len >= 32 {
+            bail!("--batch-barcodes requires barcode length shorter than 32 bases");
+        }
+        Some(32 - fixed_bc_len)
+    } else {
+        None
+    };
+    if let Some(prefix_len) = batch_barcode_prefix_len
+        && prefix_len == 0
+    {
+        bail!("--batch-barcodes requires barcode length shorter than 32 bases");
+    }
     let bc_len = if args.batch_barcodes && fixed_bc_len.is_some_and(|v| v > 0) {
         32
     } else if synthetic_bc {
@@ -1154,7 +1217,7 @@ pub fn run(args: BusArgs) -> Result<()> {
     } else if spec.bulk_like() {
         1
     } else {
-        total_len(&spec.umi).unwrap_or(0)
+        fixed_umi_len.unwrap_or(0)
     };
     let header_bc_len = if args.bam { 0 } else { bc_len };
     write_bus_header(&mut bus_writer, header_bc_len, umi_len)?;
@@ -1231,23 +1294,47 @@ pub fn run(args: BusArgs) -> Result<()> {
                 {
                     break 'groups;
                 }
+                records += 1;
 
-                let barcode_seq =
-                    barcode_sequence(&batch, &spec, group.batch_index, args.batch_barcodes)?;
+                let Some(barcode_seq) =
+                    barcode_sequence(&batch, &spec, group.batch_index, args.batch_barcodes)?
+                else {
+                    record_unmapped_ratio_for_skipped_read(
+                        args.unmapped,
+                        &mut unmapped_ratios,
+                        &index,
+                        &batch,
+                        &spec,
+                        options,
+                    )?;
+                    continue;
+                };
                 let Some(umi_value) =
                     umi_value(&batch, &spec, tag_config.as_ref().map(|tag| &tag.config))?
                 else {
+                    record_unmapped_ratio_for_skipped_read(
+                        args.unmapped,
+                        &mut unmapped_ratios,
+                        &index,
+                        &batch,
+                        &spec,
+                        options,
+                    )?;
                     continue;
                 };
-                records += 1;
                 let umi_seq_len = umi_value.len;
                 record_length(&mut bc_len_hist, barcode_seq.len());
                 record_length(&mut umi_len_hist, umi_seq_len);
                 let mut barcode_flag = 0;
-                let barcode = string_to_binary(&barcode_seq, &mut barcode_flag);
+                let barcode = string_to_binary(&barcode_seq, &mut barcode_flag, "barcode")?;
 
                 let query = if args.long || args.unmapped {
                     Some(bus_query_sequence(&batch, &spec, umi_value.tag_present)?)
+                } else {
+                    None
+                };
+                let query_quality = if args.long || args.unmapped {
+                    Some(bus_query_quality(&batch, &spec, umi_value.tag_present)?)
                 } else {
                     None
                 };
@@ -1279,19 +1366,27 @@ pub fn run(args: BusArgs) -> Result<()> {
                 if args.long
                     && args.unmapped
                     && disjoint_intersect
-                    && let (Some(writer), Some(query)) = (novel_writer.as_mut(), query.as_deref())
+                    && let (Some(writer), Some(query), Some(quality)) = (
+                        novel_writer.as_mut(),
+                        query.as_deref(),
+                        query_quality.as_deref(),
+                    )
                 {
-                    write_novel_read(writer, "unmapped", query)?;
+                    write_novel_read(writer, "unmapped", query, quality)?;
                 }
                 if novel_long_read
-                    && let (Some(writer), Some(query)) = (novel_writer.as_mut(), query.as_deref())
+                    && let (Some(writer), Some(query), Some(quality)) = (
+                        novel_writer.as_mut(),
+                        query.as_deref(),
+                        query_quality.as_deref(),
+                    )
                 {
                     let label = if disjoint_intersect {
                         "novel_disjointIntersect"
                     } else {
                         "novel_tooManyEmptyKmers"
                     };
-                    write_novel_read(writer, label, query)?;
+                    write_novel_read(writer, label, query, quality)?;
                 }
                 if args.long
                     && !novel_long_read
@@ -1380,17 +1475,19 @@ pub fn run(args: BusArgs) -> Result<()> {
     }
     bus_writer.flush()?;
     let mut bus_file = bus_writer.into_inner()?;
-    if header_bc_len == 0
-        && let Some(observed_bc_len) = modal_length(&bc_len_hist)
-    {
-        bus_file.seek(SeekFrom::Start(8))?;
-        bus_file.write_all(&observed_bc_len.to_le_bytes())?;
+    if header_bc_len == 0 {
+        let observed_bc_len = modal_length(&bc_len_hist).or(fixed_bc_len);
+        if let Some(observed_bc_len) = observed_bc_len {
+            bus_file.seek(SeekFrom::Start(8))?;
+            bus_file.write_all(&observed_bc_len.to_le_bytes())?;
+        }
     }
-    if umi_len == 0
-        && let Some(observed_umi_len) = modal_length(&umi_len_hist)
-    {
-        bus_file.seek(SeekFrom::Start(12))?;
-        bus_file.write_all(&observed_umi_len.to_le_bytes())?;
+    if umi_len == 0 {
+        let observed_umi_len = modal_length(&umi_len_hist).or(fixed_umi_len);
+        if let Some(observed_umi_len) = observed_umi_len {
+            bus_file.seek(SeekFrom::Start(12))?;
+            bus_file.write_all(&observed_umi_len.to_le_bytes())?;
+        }
     }
 
     write_matrix_ec(&out_dir.join("matrix.ec"), &ec_list)?;
@@ -1436,9 +1533,20 @@ pub fn run(args: BusArgs) -> Result<()> {
         writer.finish()?;
     }
     if args.batch.is_some() || synthetic_bc {
-        write_cells(&out_dir.join("matrix.cells"), &read_groups)?;
+        write_cells(
+            &out_dir.join("matrix.cells"),
+            read_groups
+                .iter()
+                .enumerate()
+                .map(|(idx, group)| (idx, group.id.as_deref())),
+        )?;
         if synthetic_bc || args.batch_barcodes {
-            write_sample_barcodes(&out_dir.join("matrix.sample.barcodes"), &read_groups)?;
+            let sample_barcode_len = batch_barcode_prefix_len.unwrap_or(16);
+            write_sample_barcodes(
+                &out_dir.join("matrix.sample.barcodes"),
+                read_groups.iter().map(|group| group.batch_index as u64),
+                sample_barcode_len,
+            )?;
         }
     }
     write_transcripts(
@@ -1512,15 +1620,47 @@ fn process_bam_records(
         }
         records += 1;
 
-        let barcode_seq = bam_string_tag(&record, [b'C', b'R'])
-            .or_else(|| bam_string_tag(&record, [b'C', b'B']).map(normalize_corrected_barcode))
-            .ok_or_else(|| anyhow!("BAM record {} is missing CR/CB barcode tag", records))?;
-        let umi_seq = bam_string_tag(&record, [b'U', b'R'])
-            .or_else(|| bam_string_tag(&record, [b'R', b'X']))
-            .or_else(|| bam_string_tag(&record, [b'M', b'I']))
-            .or_else(|| bam_string_tag(&record, [b'U', b'B']))
-            .ok_or_else(|| anyhow!("BAM record {} is missing UR/RX/MI/UB UMI tag", records))?;
         let sequence = record.sequence().iter().collect::<Vec<_>>();
+        let quality = record
+            .quality_scores()
+            .iter()
+            .map(|score| score.saturating_add(b'!'))
+            .collect::<Vec<_>>();
+        let quality = if quality.len() == sequence.len() {
+            quality
+        } else {
+            vec![b'!'; sequence.len()]
+        };
+        let Some(barcode_seq) = bam_string_tag(&record, [b'C', b'R'])
+            .or_else(|| bam_string_tag(&record, [b'C', b'B']).map(normalize_corrected_barcode))
+        else {
+            record_bam_outputs_for_skipped_read(
+                args,
+                unmapped_ratios,
+                novel_writer,
+                index,
+                &sequence,
+                &quality,
+                processing.options,
+            )?;
+            continue;
+        };
+        let Some(umi_seq) = bam_string_tag(&record, [b'U', b'R'])
+            .or_else(|| bam_string_tag(&record, [b'R', b'X']))
+            .or_else(|| bam_string_tag(&record, [b'M', b'I']).map(normalize_corrected_barcode))
+            .or_else(|| bam_string_tag(&record, [b'U', b'B']).map(normalize_corrected_barcode))
+        else {
+            record_bam_outputs_for_skipped_read(
+                args,
+                unmapped_ratios,
+                novel_writer,
+                index,
+                &sequence,
+                &quality,
+                processing.options,
+            )?;
+            continue;
+        };
         let too_many_empty_kmers = if args.long || args.unmapped {
             let ratio = kallistors::pseudoalign::unmapped_kmer_ratio_bifrost(
                 index,
@@ -1539,9 +1679,9 @@ fn process_bam_records(
         record_length(state.umi_len_hist, umi_seq.len());
 
         let mut barcode_flag = 0;
-        let barcode = string_to_binary(&barcode_seq, &mut barcode_flag);
+        let barcode = string_to_binary(&barcode_seq, &mut barcode_flag, "barcode")?;
         let mut umi_flag = 0;
-        let umi = string_to_binary(&umi_seq, &mut umi_flag);
+        let umi = string_to_binary(&umi_seq, &mut umi_flag, "UMI")?;
 
         let alignment = if args.aa {
             aa_alignment_for_query(index, &sequence, processing.options)
@@ -1567,7 +1707,7 @@ fn process_bam_records(
             && disjoint_intersect
             && let Some(writer) = novel_writer.as_mut()
         {
-            write_novel_read(writer, "unmapped", &sequence)?;
+            write_novel_read(writer, "unmapped", &sequence, &quality)?;
         }
         if novel_long_read && let Some(writer) = novel_writer.as_mut() {
             let label = if disjoint_intersect {
@@ -1575,7 +1715,7 @@ fn process_bam_records(
             } else {
                 "novel_tooManyEmptyKmers"
             };
-            write_novel_read(writer, label, &sequence)?;
+            write_novel_read(writer, label, &sequence, &quality)?;
         }
         frame_clashes = frame_clashes.saturating_add(alignment.frame_clashes);
         if args.long
@@ -1940,6 +2080,19 @@ fn validate_read_files(args: &BusArgs, groups: &[ReadGroup]) -> Result<()> {
     Ok(())
 }
 
+fn report_verbose_read_groups(groups: &[ReadGroup]) {
+    for (sample_idx, group) in groups.iter().enumerate() {
+        let label = group
+            .id
+            .as_deref()
+            .map_or_else(|| (sample_idx + 1).to_string(), str::to_string);
+        eprintln!("[bus] will process sample {label}:");
+        for path in &group.files {
+            eprintln!("[bus]   {}", path.display());
+        }
+    }
+}
+
 fn next_parallel_batch<R: ReadSource>(
     readers: &mut [R],
 ) -> Result<Vec<kallistors::io::FastqRecord>> {
@@ -2012,6 +2165,9 @@ fn parse_batch_file(path: &Path, nfiles: usize) -> Result<Vec<ReadGroup>> {
             interleaved: false,
         });
     }
+    if groups.is_empty() {
+        bail!("batch file contains no read groups");
+    }
     Ok(groups)
 }
 
@@ -2055,7 +2211,7 @@ fn infer_batch_nfiles(path: &Path) -> Result<usize> {
             None => inferred = Some(files),
         }
     }
-    Ok(inferred.unwrap_or(1))
+    inferred.ok_or_else(|| anyhow!("batch file contains no read groups"))
 }
 
 fn resolve_batch_read_path(batch_dir: &Path, value: &str) -> PathBuf {
@@ -2072,19 +2228,25 @@ fn barcode_sequence(
     spec: &TechnologySpec,
     batch_index: usize,
     batch_barcodes: bool,
-) -> Result<Vec<u8>> {
+) -> Result<Option<Vec<u8>>> {
     let extracted = if spec.bc.first().is_some_and(|v| v.file.is_none()) {
         fake_barcode(batch_index as u64, 16)
     } else {
-        concat_slices(batch, &spec.bc, false)?
+        let Some(barcode) = concat_slices_optional(batch, &spec.bc, false)? else {
+            return Ok(None);
+        };
+        barcode
     };
     if batch_barcodes && spec.bc.first().is_none_or(|v| v.file.is_some()) {
+        if extracted.len() >= 32 {
+            bail!("--batch-barcodes requires barcode length shorter than 32 bases");
+        }
         let prefix_len = 32usize.saturating_sub(extracted.len()).min(32);
         let mut prefixed = fake_barcode(batch_index as u64, prefix_len);
         prefixed.extend_from_slice(&extracted);
-        Ok(prefixed)
+        Ok(Some(prefixed))
     } else {
-        Ok(extracted)
+        Ok(Some(extracted))
     }
 }
 
@@ -2100,6 +2262,7 @@ fn configure_tag(
     let Some(tag) = tag else {
         return Ok(None);
     };
+    validate_tag_sequence(&tag)?;
     let Some(first_umi) = spec.umi.first_mut() else {
         bail!("tag sequence requires a UMI slice");
     };
@@ -2114,11 +2277,24 @@ fn configure_tag(
     let mut flag = 0;
     Ok(Some(ConfiguredTag {
         config: TagConfig {
-            binary: string_to_binary(tag.as_bytes(), &mut flag),
+            binary: string_to_binary(tag.as_bytes(), &mut flag, "tag sequence")?,
             sequence: tag.into_bytes(),
         },
         inferred_default,
     }))
+}
+
+fn validate_tag_sequence(tag: &str) -> Result<()> {
+    for (idx, base) in tag.bytes().enumerate() {
+        if !matches!(base, b'A' | b'C' | b'G' | b'T' | b'a' | b'c' | b'g' | b't') {
+            bail!(
+                "tag sequence contains invalid base {} at position {}",
+                char::from(base),
+                idx + 1
+            );
+        }
+    }
+    Ok(())
 }
 
 fn umi_value(
@@ -2129,7 +2305,7 @@ fn umi_value(
     if spec.bulk_like() {
         let mut flag = 0;
         return Ok(Some(UmiValue {
-            binary: string_to_binary(b"A", &mut flag),
+            binary: string_to_binary(b"A", &mut flag, "UMI")?,
             flag,
             len: 1,
             seq: b"A".to_vec(),
@@ -2147,7 +2323,7 @@ fn umi_value(
         };
         let mut flag = 0;
         return Ok(Some(UmiValue {
-            binary: string_to_binary(&umi_seq, &mut flag),
+            binary: string_to_binary(&umi_seq, &mut flag, "UMI")?,
             flag,
             len: umi_seq.len(),
             seq: umi_seq,
@@ -2157,10 +2333,12 @@ fn umi_value(
     }
 
     let Some(tag) = tag else {
-        let umi_seq = concat_slices(batch, &spec.umi, false)?;
+        let Some(umi_seq) = concat_slices_optional(batch, &spec.umi, false)? else {
+            return Ok(None);
+        };
         let mut flag = 0;
         return Ok(Some(UmiValue {
-            binary: string_to_binary(&umi_seq, &mut flag),
+            binary: string_to_binary(&umi_seq, &mut flag, "UMI")?,
             flag,
             len: umi_seq.len(),
             seq: umi_seq,
@@ -2172,12 +2350,18 @@ fn umi_value(
     let Some(first_umi) = spec.umi.first() else {
         bail!("tag sequence requires a UMI slice");
     };
-    let mut tagged_umi = extract_tagged_umi(batch, *first_umi, tag.sequence.len())?;
+    let Some(mut tagged_umi) = extract_tagged_umi_optional(batch, *first_umi, tag.sequence.len())?
+    else {
+        return Ok(None);
+    };
     for spec in spec.umi.iter().skip(1) {
-        tagged_umi.extend_from_slice(&extract_slice(batch, *spec)?);
+        let Some(slice) = extract_slice_optional(batch, *spec)? else {
+            return Ok(None);
+        };
+        tagged_umi.extend_from_slice(&slice);
     }
     let mut flag = 0;
-    let tagged_binary = string_to_binary(&tagged_umi, &mut flag);
+    let tagged_binary = string_to_binary(&tagged_umi, &mut flag, "tagged UMI")?;
     let tag_len = tag.sequence.len();
     let hamming_threshold = usize::from(tag_len > 5);
     let tag_present = tagged_umi.len() >= tag_len
@@ -2213,14 +2397,14 @@ fn umi_value(
     }
 }
 
-fn extract_tagged_umi(
+fn extract_tagged_umi_optional(
     records: &[kallistors::io::FastqRecord],
     spec: SliceSpec,
     tag_len: usize,
-) -> Result<Vec<u8>> {
+) -> Result<Option<Vec<u8>>> {
     let mut tagged_spec = spec;
     tagged_spec.start = tagged_spec.start.saturating_sub(tag_len);
-    extract_slice(records, tagged_spec)
+    extract_slice_optional(records, tagged_spec)
 }
 
 fn rx_umi_from_header(record: &kallistors::io::FastqRecord) -> Option<Vec<u8>> {
@@ -2258,6 +2442,46 @@ fn pseudobam_read_name(
     } else {
         name.to_vec()
     }
+}
+
+fn record_unmapped_ratio_for_skipped_read(
+    enabled: bool,
+    ratios: &mut Vec<f64>,
+    index: &kallistors::pseudoalign::BifrostIndex,
+    batch: &[kallistors::io::FastqRecord],
+    spec: &TechnologySpec,
+    options: kallistors::pseudoalign::PseudoalignOptions,
+) -> Result<()> {
+    if enabled {
+        let query = bus_query_sequence(batch, spec, false)?;
+        ratios.push(kallistors::pseudoalign::unmapped_kmer_ratio_bifrost(
+            index, &query, options,
+        ));
+    }
+    Ok(())
+}
+
+fn record_bam_outputs_for_skipped_read(
+    args: &BusArgs,
+    ratios: &mut Vec<f64>,
+    novel_writer: &mut Option<BufWriter<File>>,
+    index: &kallistors::pseudoalign::BifrostIndex,
+    sequence: &[u8],
+    quality: &[u8],
+    options: kallistors::pseudoalign::PseudoalignOptions,
+) -> Result<()> {
+    if args.unmapped {
+        ratios.push(kallistors::pseudoalign::unmapped_kmer_ratio_bifrost(
+            index, sequence, options,
+        ));
+    }
+    if args.long
+        && args.unmapped
+        && let Some(writer) = novel_writer.as_mut()
+    {
+        write_novel_read(writer, "skipped_missingTags", sequence, quality)?;
+    }
+    Ok(())
 }
 
 fn pseudoalign_bus_read(
@@ -2383,6 +2607,29 @@ fn bus_query_sequence(
         Ok(query)
     } else {
         concat_sequence_slices(batch, spec, tag_present)
+    }
+}
+
+fn bus_query_quality(
+    batch: &[kallistors::io::FastqRecord],
+    spec: &TechnologySpec,
+    tag_present: bool,
+) -> Result<Vec<u8>> {
+    if spec.paired {
+        if spec.seq.len() != 2 {
+            bail!("paired BUS technology requires exactly two sequence slices");
+        }
+        let mut quality = extract_quality_slice(batch, spec.seq[0], spec, tag_present)?;
+        quality.push(b'!');
+        quality.extend_from_slice(&extract_quality_slice(
+            batch,
+            spec.seq[1],
+            spec,
+            tag_present,
+        )?);
+        Ok(quality)
+    } else {
+        concat_quality_slices(batch, spec, tag_present)
     }
 }
 
@@ -2584,17 +2831,28 @@ fn apply_technology_suffix(spec: &mut TechnologySpec, suffix: Option<&str>) -> R
     let mut fields = suffix.split('%');
     if let Some(strand) = fields.next() {
         let strand = strand.to_ascii_uppercase();
-        if strand.starts_with("FORWARD") {
+        if strand.is_empty() || strand == "NONE" {
+        } else if strand.starts_with("FORWARD") {
             spec.default_strand = Some(kallistors::pseudoalign::StrandSpecific::FR);
         } else if strand.starts_with("REVERSE") {
             spec.default_strand = Some(kallistors::pseudoalign::StrandSpecific::RF);
+        } else {
+            bail!("invalid technology strand suffix: {strand}");
         }
     }
-    if let Some(parity) = fields.next()
-        && parity.to_ascii_uppercase().starts_with("PAIRED")
-        && !spec.paired
-    {
-        mark_technology_paired(spec, "%PAIRED")?;
+    if let Some(parity) = fields.next() {
+        let parity = parity.to_ascii_uppercase();
+        if parity.is_empty() || parity == "NONE" {
+        } else if parity.starts_with("PAIRED") {
+            if !spec.paired {
+                mark_technology_paired(spec, "%PAIRED")?;
+            }
+        } else {
+            bail!("invalid technology pairing suffix: {parity}");
+        }
+    }
+    if let Some(extra) = fields.next() {
+        bail!("unexpected technology suffix field: {extra}");
     }
     Ok(())
 }
@@ -2771,6 +3029,7 @@ fn total_len(specs: &[SliceSpec]) -> Option<u32> {
     Some(total)
 }
 
+#[cfg(test)]
 fn concat_slices(
     records: &[kallistors::io::FastqRecord],
     specs: &[SliceSpec],
@@ -2786,22 +3045,40 @@ fn concat_slices(
     Ok(out)
 }
 
+fn concat_slices_optional(
+    records: &[kallistors::io::FastqRecord],
+    specs: &[SliceSpec],
+    separate_with_n: bool,
+) -> Result<Option<Vec<u8>>> {
+    let mut out = Vec::new();
+    for (idx, spec) in specs.iter().enumerate() {
+        if idx > 0 && separate_with_n {
+            out.push(b'N');
+        }
+        let Some(slice) = extract_slice_optional(records, *spec)? else {
+            return Ok(None);
+        };
+        out.extend_from_slice(&slice);
+    }
+    Ok(Some(out))
+}
+
 fn concat_sequence_slices(
     records: &[kallistors::io::FastqRecord],
     spec: &TechnologySpec,
     tag_present: bool,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    for seq_spec in &spec.seq {
+    for (idx, seq_spec) in spec.seq.iter().enumerate() {
+        if idx > 0 {
+            out.push(b'N');
+        }
         out.extend_from_slice(&extract_sequence_slice(
             records,
             *seq_spec,
             spec,
             tag_present,
         )?);
-        if spec.seq.len() > 1 {
-            out.push(b'N');
-        }
     }
     Ok(out)
 }
@@ -2812,16 +3089,16 @@ fn concat_quality_slices(
     tag_present: bool,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    for seq_spec in &spec.seq {
+    for (idx, seq_spec) in spec.seq.iter().enumerate() {
+        if idx > 0 {
+            out.push(b'!');
+        }
         out.extend_from_slice(&extract_quality_slice(
             records,
             *seq_spec,
             spec,
             tag_present,
         )?);
-        if spec.seq.len() > 1 {
-            out.push(b'I');
-        }
     }
     Ok(out)
 }
@@ -2891,6 +3168,13 @@ fn extract_slice(records: &[kallistors::io::FastqRecord], spec: SliceSpec) -> Re
     extract_slice_from(records, spec, |record| record.seq.as_slice(), "read")
 }
 
+fn extract_slice_optional(
+    records: &[kallistors::io::FastqRecord],
+    spec: SliceSpec,
+) -> Result<Option<Vec<u8>>> {
+    extract_slice_from_optional(records, spec, |record| record.seq.as_slice())
+}
+
 fn extract_slice_from(
     records: &[kallistors::io::FastqRecord],
     spec: SliceSpec,
@@ -2915,40 +3199,22 @@ fn extract_slice_from(
     Ok(seq[spec.start..end].to_vec())
 }
 
-fn write_bus_header(writer: &mut impl Write, bc_len: u32, umi_len: u32) -> Result<()> {
-    writer.write_all(b"BUS\0")?;
-    writer.write_all(&1u32.to_le_bytes())?;
-    writer.write_all(&bc_len.to_le_bytes())?;
-    writer.write_all(&umi_len.to_le_bytes())?;
-    let text = b"BUS file produced by kallisto";
-    writer.write_all(&(text.len() as u32).to_le_bytes())?;
-    writer.write_all(text)?;
-    Ok(())
-}
-
-fn write_bus_record(writer: &mut impl Write, record: &BusRecord) -> Result<()> {
-    writer.write_all(&record.barcode.to_le_bytes())?;
-    writer.write_all(&record.umi.to_le_bytes())?;
-    writer.write_all(&record.ec.to_le_bytes())?;
-    writer.write_all(&record.count.to_le_bytes())?;
-    writer.write_all(&record.flags.to_le_bytes())?;
-    writer.write_all(&0u32.to_le_bytes())?;
-    Ok(())
-}
-
-fn write_matrix_ec(path: &Path, ec_list: &[Vec<u32>]) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
-    for (idx, ec) in ec_list.iter().enumerate() {
-        write!(writer, "{idx}\t")?;
-        for (tx_idx, transcript) in ec.iter().enumerate() {
-            if tx_idx > 0 {
-                writer.write_all(b",")?;
-            }
-            write!(writer, "{transcript}")?;
-        }
-        writeln!(writer)?;
+fn extract_slice_from_optional(
+    records: &[kallistors::io::FastqRecord],
+    spec: SliceSpec,
+    get: impl Fn(&kallistors::io::FastqRecord) -> &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let Some(file) = spec.file else {
+        return Ok(Some(Vec::new()));
+    };
+    let seq = get(records
+        .get(file)
+        .ok_or_else(|| anyhow!("technology references missing file {}", file + 1))?);
+    let end = spec.stop.unwrap_or(seq.len());
+    if spec.start > end || end > seq.len() {
+        return Ok(None);
     }
-    Ok(())
+    Ok(Some(seq[spec.start..end].to_vec()))
 }
 
 fn onlist_target_count(names: &[String], onlist: Option<&[bool]>) -> usize {
@@ -2962,17 +3228,6 @@ fn onlist_target_count(names: &[String], onlist: Option<&[bool]>) -> usize {
     }
 }
 
-fn write_transcripts(path: &Path, names: &[String], onlist: Option<&[bool]>) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
-    for (idx, name) in names.iter().enumerate() {
-        if onlist.is_some_and(|onlist| !onlist.get(idx).copied().unwrap_or(false)) {
-            continue;
-        }
-        writeln!(writer, "{name}")?;
-    }
-    Ok(())
-}
-
 fn write_gene_list(path: &Path, model: &GenomeModel) -> Result<()> {
     let mut writer = BufWriter::new(File::create(path)?);
     for (idx, gene) in model.genes.iter().enumerate() {
@@ -2981,199 +3236,15 @@ fn write_gene_list(path: &Path, model: &GenomeModel) -> Result<()> {
     Ok(())
 }
 
-fn write_cells(path: &Path, groups: &[ReadGroup]) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
-    for (idx, group) in groups.iter().enumerate() {
-        let id = group
-            .id
-            .as_deref()
-            .map_or_else(|| format!("batch{idx}"), ToString::to_string);
-        writeln!(writer, "{id}")?;
+fn string_to_binary(seq: &[u8], flag: &mut u32, label: &str) -> Result<u64> {
+    if seq.len() > 32 {
+        bail!("{label} length {} exceeds BUS limit of 32 bases", seq.len());
     }
-    Ok(())
-}
-
-fn write_sample_barcodes(path: &Path, groups: &[ReadGroup]) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
-    for group in groups {
-        writeln!(
-            writer,
-            "{}",
-            String::from_utf8_lossy(&fake_barcode(group.batch_index as u64, 16))
-        )?;
-    }
-    Ok(())
-}
-
-fn write_unmapped_ratios(path: &Path, ratios: &[f64], trailing_comma: bool) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
-    for (idx, ratio) in ratios.iter().enumerate() {
-        if idx > 0 {
-            writer.write_all(b",")?;
-        }
-        write!(writer, "{ratio}")?;
-    }
-    if trailing_comma && !ratios.is_empty() {
-        writer.write_all(b",")?;
-    }
-    writer.write_all(b"\n")?;
-    Ok(())
-}
-
-fn write_novel_read(writer: &mut impl Write, label: &str, seq: &[u8]) -> Result<()> {
-    writeln!(writer, "@{label}")?;
-    writer.write_all(seq)?;
-    writer.write_all(b"\n")?;
-    Ok(())
-}
-
-fn write_long_flens(
-    path: &Path,
-    transcript_lengths: &[u32],
-    sums: &[u64],
-    counts: &[u64],
-    k: usize,
-) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
-    write_long_flens_line(&mut writer, transcript_lengths, sums, counts, k)?;
-    Ok(())
-}
-
-fn write_batch_long_flens(
-    path: &Path,
-    transcript_lengths: &[u32],
-    batch_sums: &[Vec<u64>],
-    batch_counts: &[Vec<u64>],
-    k: usize,
-) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
-    for (sums, counts) in batch_sums.iter().zip(batch_counts) {
-        write_long_flens_line(&mut writer, transcript_lengths, sums, counts, k)?;
-    }
-    Ok(())
-}
-
-fn write_long_flens_line<W: Write>(
-    writer: &mut W,
-    transcript_lengths: &[u32],
-    sums: &[u64],
-    counts: &[u64],
-    k: usize,
-) -> Result<()> {
-    for (idx, length) in transcript_lengths.iter().enumerate() {
-        if idx > 0 {
-            writer.write_all(b" ")?;
-        }
-        let value = if counts.get(idx).copied().unwrap_or(0) > 0 {
-            sums[idx] as f64 / counts[idx] as f64 - k as f64
-        } else {
-            f64::from(*length) - k as f64
-        }
-        .abs();
-        write!(writer, "{value}")?;
-    }
-    writer.write_all(b"\n")?;
-    Ok(())
-}
-
-fn write_paired_flens(path: &Path, flens: &[u32]) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
-    write_paired_flens_line(&mut writer, flens)?;
-    Ok(())
-}
-
-fn write_batch_paired_flens(path: &Path, batch_flens: &[Vec<u32>]) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
-    for flens in batch_flens {
-        write_paired_flens_line(&mut writer, flens)?;
-    }
-    Ok(())
-}
-
-fn write_paired_flens_line<W: Write>(writer: &mut W, flens: &[u32]) -> Result<()> {
-    for (idx, value) in flens.iter().enumerate() {
-        if idx > 0 {
-            writer.write_all(b" ")?;
-        }
-        write!(writer, "{value}")?;
-    }
-    writer.write_all(b"\n")?;
-    Ok(())
-}
-
-struct RunInfo {
-    processed: u64,
-    aligned: u64,
-    unique: u64,
-    targets: usize,
-    k: usize,
-    frame_clashes: Option<u64>,
-}
-
-fn write_run_info(path: &Path, info: RunInfo) -> Result<()> {
-    let p_pseudoaligned = if info.processed == 0 {
-        0.0
-    } else {
-        info.aligned as f64 * 100.0 / info.processed as f64
-    };
-    let p_unique = if info.processed == 0 {
-        0.0
-    } else {
-        info.unique as f64 * 100.0 / info.processed as f64
-    };
-    let start_time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs().to_string())
-        .unwrap_or_else(|_| "0".to_string());
-    let call = std::env::args().collect::<Vec<_>>().join(" ");
-    let mut writer = BufWriter::new(File::create(path)?);
-    writeln!(writer, "{{")?;
-    writeln!(writer, "  \"n_targets\": {},", info.targets)?;
-    writeln!(writer, "  \"n_bootstraps\": 0,")?;
-    writeln!(writer, "  \"n_processed\": {},", info.processed)?;
-    writeln!(writer, "  \"n_pseudoaligned\": {},", info.aligned)?;
-    writeln!(writer, "  \"n_unique\": {},", info.unique)?;
-    writeln!(writer, "  \"p_pseudoaligned\": {p_pseudoaligned:.1},")?;
-    writeln!(writer, "  \"p_unique\": {p_unique:.1},")?;
-    writeln!(
-        writer,
-        "  \"kallisto_version\": \"kallistors {}\",",
-        env!("CARGO_PKG_VERSION")
-    )?;
-    writeln!(writer, "  \"index_version\": 13,")?;
-    writeln!(writer, "  \"k-mer length\": {},", info.k)?;
-    writeln!(writer, "  \"start_time\": \"{start_time}\",")?;
-    if let Some(frame_clashes) = info.frame_clashes {
-        writeln!(writer, "  \"call\": \"{}\",", json_escape(&call))?;
-        writeln!(writer, "  \"n_frame_clashes\": {frame_clashes}")?;
-    } else {
-        writeln!(writer, "  \"call\": \"{}\"", json_escape(&call))?;
-    }
-    writeln!(writer, "}}")?;
-    Ok(())
-}
-
-fn json_escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            other => escaped.push(other),
-        }
-    }
-    escaped
-}
-
-fn string_to_binary(seq: &[u8], flag: &mut u32) -> u64 {
     *flag = 0;
     let mut result = 0u64;
     let mut num_n = 0u32;
     let mut pos_n = 0u32;
-    for (idx, base) in seq.iter().take(32).enumerate() {
+    for (idx, base) in seq.iter().enumerate() {
         let x = (base & 4) >> 1;
         if (base & 3) == 2 {
             if num_n == 0 {
@@ -3187,7 +3258,7 @@ fn string_to_binary(seq: &[u8], flag: &mut u32) -> u64 {
     if num_n > 0 {
         *flag = (num_n.min(3) & 3) | ((pos_n & 31) << 2);
     }
-    result
+    Ok(result)
 }
 
 fn hamming(left: u64, right: u64, len: usize) -> usize {
@@ -3202,29 +3273,10 @@ fn hamming(left: u64, right: u64, len: usize) -> usize {
     distance
 }
 
-fn fake_barcode(value: u64, len: usize) -> Vec<u8> {
-    binary_to_string(value, len.min(32)).into_bytes()
-}
-
-fn binary_to_string(value: u64, len: usize) -> String {
-    let mut out = String::with_capacity(len);
-    for idx in 0..len {
-        let shift = 2 * (len - idx - 1);
-        let base = match (value >> shift) & 0x03 {
-            0 => 'A',
-            1 => 'C',
-            2 => 'G',
-            _ => 'T',
-        };
-        out.push(base);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        BusArgs, bus_pseudoalign_options, concat_sequence_slices, concat_slices,
+        BusArgs, bus_pseudoalign_options, bus_query_quality, concat_sequence_slices, concat_slices,
         mark_technology_paired, onlist_target_count, read_groups, string_to_binary,
         technology_spec, total_len, write_batch_long_flens, write_batch_paired_flens,
         write_matrix_ec, write_transcripts,
@@ -3235,7 +3287,10 @@ mod tests {
     #[test]
     fn bus_binary_encoding_matches_kallisto_order() {
         let mut flag = 99;
-        assert_eq!(string_to_binary(b"ACGT", &mut flag), 0b00_01_10_11);
+        assert_eq!(
+            string_to_binary(b"ACGT", &mut flag, "test").unwrap(),
+            0b00_01_10_11
+        );
         assert_eq!(flag, 0);
     }
 
@@ -3616,12 +3671,38 @@ mod tests {
         assert_eq!(forward.default_strand, Some(StrandSpecific::FR));
         assert!(!forward.paired);
 
+        let none_paired = technology_spec("0,0,16:0,16,28:1,0,0%NONE%PAIRED").unwrap();
+        assert_eq!(none_paired.default_strand, None);
+        assert!(none_paired.paired);
+
         let reverse_paired = technology_spec("0,0,16:0,16,28:1,0,0%REVERSE%PAIRED").unwrap();
         assert_eq!(reverse_paired.default_strand, Some(StrandSpecific::RF));
         assert!(reverse_paired.paired);
         assert_eq!(reverse_paired.nfiles, 3);
         assert_eq!(reverse_paired.seq.len(), 2);
         assert_eq!(reverse_paired.seq[1].file, Some(2));
+
+        let invalid_strand = technology_spec("0,0,16:0,16,28:1,0,0%SIDEWAYS")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            invalid_strand.contains("invalid technology strand suffix: SIDEWAYS"),
+            "{invalid_strand}"
+        );
+        let invalid_pairing = technology_spec("0,0,16:0,16,28:1,0,0%FORWARD%MATED")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            invalid_pairing.contains("invalid technology pairing suffix: MATED"),
+            "{invalid_pairing}"
+        );
+        let extra = technology_spec("0,0,16:0,16,28:1,0,0%FORWARD%PAIRED%EXTRA")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            extra.contains("unexpected technology suffix field: EXTRA"),
+            "{extra}"
+        );
     }
 
     #[test]
@@ -3643,7 +3724,11 @@ mod tests {
         let spec = technology_spec("-1,-1,-1:0,0,4:0,4,8,1,0,4").unwrap();
         assert_eq!(
             concat_sequence_slices(&records, &spec, false).unwrap(),
-            b"CCCCNGGGGN"
+            b"CCCCNGGGG"
+        );
+        assert_eq!(
+            bus_query_quality(&records, &spec, false).unwrap(),
+            b"IIII!IIII"
         );
     }
 
