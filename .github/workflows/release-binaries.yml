@@ -1,6 +1,10 @@
 name: Release binaries
 
 on:
+  push:
+    tags:
+      - "v*"
+      - "[0-9]*"
   release:
     types: [published]
   workflow_dispatch:
@@ -14,8 +18,51 @@ permissions:
   contents: write
 
 jobs:
+  prepare-release:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    env:
+      TAG_NAME: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG_NAME }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify tag matches crate version
+        shell: bash
+        run: |
+          tag_version="${TAG_NAME#v}"
+          crate_version="$(
+            cargo metadata --no-deps --format-version 1 \
+              | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "kallistors"))'
+          )"
+
+          if [[ "${tag_version}" != "${crate_version}" ]]; then
+            echo "Tag ${TAG_NAME} does not match kallistors ${crate_version}."
+            exit 1
+          fi
+
+      - name: Ensure GitHub release exists
+        if: github.event_name != 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          gh release create "${TAG_NAME}" \
+            --verify-tag \
+            --title "${TAG_NAME}" \
+            --notes "Release ${TAG_NAME}"
+
   build:
     name: Build ${{ matrix.target }}
+    needs: prepare-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -35,7 +82,7 @@ jobs:
             archive: zip
 
     env:
-      TAG_NAME: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+      TAG_NAME: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       CARGO_TERM_COLOR: always
 
     steps:
@@ -46,20 +93,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Verify tag matches crate version
-        shell: bash
-        run: |
-          tag_version="${TAG_NAME#v}"
-          crate_version="$(
-            cargo metadata --no-deps --format-version 1 \
-              | python3 -c 'import json, sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "kallistors"))'
-          )"
-
-          if [[ "${tag_version}" != "${crate_version}" ]]; then
-            echo "Tag ${TAG_NAME} does not match kallistors ${crate_version}."
-            exit 1
-          fi
 
       - name: Build release binary
         run: cargo build --locked --release --package kallistors --bin kallistors --target ${{ matrix.target }}
