@@ -196,7 +196,7 @@ fn synthetic_transcripts() -> Vec<(String, Vec<u8>)> {
 }
 
 fn mutate(rng: &mut SimpleRng, seq: &[u8], rate: f64) -> Vec<u8> {
-    let bases = [b'A', b'C', b'G', b'T'];
+    let bases = *b"ACGT";
     let mut out = Vec::with_capacity(seq.len());
     for &b in seq {
         if rng.next_f64() < rate {
@@ -213,7 +213,7 @@ fn mutate(rng: &mut SimpleRng, seq: &[u8], rate: f64) -> Vec<u8> {
 }
 
 fn random_seq(rng: &mut SimpleRng, len: usize) -> Vec<u8> {
-    let bases = [b'A', b'C', b'G', b'T'];
+    let bases = *b"ACGT";
     let mut out = Vec::with_capacity(len);
     for _ in 0..len {
         out.push(bases[rng.next_usize(bases.len())]);

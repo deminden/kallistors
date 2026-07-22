@@ -1,7 +1,8 @@
 # Benchmarks
 
-This page records local benchmark results for the checked-in real dataset. Results are machine- and
-cache-sensitive; compare only runs measured with the same inputs, binaries, and timing method.
+This page records benchmark results for a local real dataset. The inputs and raw artifacts are not
+part of the repository. Results are machine- and cache-sensitive; compare only runs measured with
+the same inputs, binaries, and timing method.
 
 ## Environment
 

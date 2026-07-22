@@ -1,6 +1,8 @@
 use std::fs;
-use std::io::Write as _;
-use std::process::{Command, Stdio};
+use std::io::{self, Write as _};
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use kallistors::index::{IndexBuildOptions, build_index};
 use noodles_sam::alignment::{
@@ -12,6 +14,8 @@ use noodles_sam::alignment::{
 
 type BamRecordFixture<'a> = (&'a [u8], &'a [u8], &'a [u8], Flags);
 type OptionalBamTagsFixture<'a> = (&'a [u8], Option<&'a [u8]>, Option<&'a [u8]>);
+const TINY_TRANSCRIPT: &[u8] =
+    b"ACGTGCACTGATCGTACGATCGTACGTTAGCTAGCTAGGCTAGCATCGATCGATGCTAGCTAGCTGACT";
 
 fn write_fastq(path: &std::path::Path, records: &[(&str, &[u8])]) {
     let mut out = Vec::new();
@@ -268,11 +272,42 @@ fn read_u64_le(bytes: &[u8], offset: usize) -> u64 {
 }
 
 fn kallisto_available() -> bool {
-    Command::new("kallisto")
-        .arg("version")
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    command_status_with_timeout(
+        Command::new("kallisto").arg("version"),
+        Duration::from_secs(5),
+    )
+    .map(|status| status.success())
+    .unwrap_or(false)
+}
+
+fn command_status_with_timeout(command: &mut Command, timeout: Duration) -> io::Result<ExitStatus> {
+    let description = format!("{command:?}");
+    let mut child = command.spawn()?;
+    let start = Instant::now();
+
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if start.elapsed() >= timeout {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            let kill_result = child.kill();
+            let wait_result = child.wait();
+            if let Err(error) = kill_result
+                && error.kind() != io::ErrorKind::InvalidInput
+            {
+                return Err(error);
+            }
+            wait_result?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("command exceeded {timeout:?} and was terminated: {description}"),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,10 +354,7 @@ fn encode_bus_seq(seq: &[u8]) -> u64 {
 }
 
 fn build_tiny_index(dir: &tempfile::TempDir) -> (std::path::PathBuf, Vec<u8>) {
-    build_index_with_transcript(
-        dir,
-        b"ACGTGCACTGATCGTACGATCGTACGTTAGCTAGCTAGGCTAGCATCGATCGATGCTAGCTAGCTGACT",
-    )
+    build_index_with_transcript(dir, TINY_TRANSCRIPT)
 }
 
 fn build_index_with_transcript(
@@ -346,13 +378,9 @@ fn build_index_with_named_transcript_and_k(
     transcript: &[u8],
     k: usize,
 ) -> (std::path::PathBuf, Vec<u8>) {
-    let fasta = dir.path().join("transcripts.fa");
+    let fasta = write_transcript_fasta(dir, name, transcript);
     let index = dir.path().join("transcripts.idx");
-    fs::write(
-        &fasta,
-        format!(">{name}\n{}\n", std::str::from_utf8(transcript).unwrap()),
-    )
-    .expect("write fasta");
+
     build_index(
         &index,
         std::slice::from_ref(&fasta),
@@ -363,6 +391,20 @@ fn build_index_with_named_transcript_and_k(
     )
     .expect("build index");
     (index, transcript.to_vec())
+}
+
+fn write_transcript_fasta(
+    dir: &tempfile::TempDir,
+    name: &str,
+    transcript: &[u8],
+) -> std::path::PathBuf {
+    let fasta = dir.path().join("transcripts.fa");
+    fs::write(
+        &fasta,
+        format!(">{name}\n{}\n", std::str::from_utf8(transcript).unwrap()),
+    )
+    .expect("write fasta");
+    fasta
 }
 
 fn build_aa_index_with_transcript(dir: &tempfile::TempDir, protein: &[u8]) -> std::path::PathBuf {
@@ -1146,40 +1188,54 @@ fn bus_tenx_v3_matches_upstream_kallisto_on_tiny_case() {
     let r2 = dir.path().join("r2.fastq");
     let kallistors_out = dir.path().join("kallistors_bus");
     let kallisto_out = dir.path().join("kallisto_bus");
-    let (index, transcript) = build_tiny_index(&dir);
+    let upstream_index = dir.path().join("upstream.idx");
+    let fasta = write_transcript_fasta(&dir, "tx0", TINY_TRANSCRIPT);
 
     write_fastq(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
-    write_fastq(&r2, &[("seq_read instrument:1", &transcript)]);
+    write_fastq(&r2, &[("seq_read instrument:1", TINY_TRANSCRIPT)]);
 
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&kallistors_out)
-        .arg("-x")
-        .arg("10XV3")
-        .arg(&r1)
-        .arg(&r2)
-        .status()
-        .expect("run kallistors bus");
+    let status = command_status_with_timeout(
+        Command::new("kallisto")
+            .arg("index")
+            .arg("-i")
+            .arg(&upstream_index)
+            .arg(&fasta),
+        Duration::from_secs(30),
+    )
+    .expect("run kallisto index");
+    assert!(status.success(), "kallisto index failed");
+
+    let status = command_status_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_kallistors"))
+            .arg("bus")
+            .arg("-i")
+            .arg(&upstream_index)
+            .arg("-o")
+            .arg(&kallistors_out)
+            .arg("-x")
+            .arg("10XV3")
+            .arg(&r1)
+            .arg(&r2),
+        Duration::from_secs(30),
+    )
+    .expect("run kallistors bus");
     assert!(status.success());
 
-    let status = Command::new("kallisto")
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&kallisto_out)
-        .arg("-x")
-        .arg("10XV3")
-        .arg(&r1)
-        .arg(&r2)
-        .status()
-        .expect("run kallisto bus");
-    if !status.success() {
-        return;
-    }
+    let status = command_status_with_timeout(
+        Command::new("kallisto")
+            .arg("bus")
+            .arg("-i")
+            .arg(&upstream_index)
+            .arg("-o")
+            .arg(&kallisto_out)
+            .arg("-x")
+            .arg("10XV3")
+            .arg(&r1)
+            .arg(&r2),
+        Duration::from_secs(30),
+    )
+    .expect("run kallisto bus");
+    assert!(status.success(), "kallisto bus failed");
 
     assert_eq!(
         fs::read_to_string(kallistors_out.join("transcripts.txt")).unwrap(),

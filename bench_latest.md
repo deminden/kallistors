@@ -3,7 +3,7 @@
 The detailed benchmark record now lives in [docs/benchmarks.md](docs/benchmarks.md).
 
 Latest paired-end headline, measured on 2026-05-19 with one warmup and median of five measured
-runs on the checked-in full paired dataset:
+runs on the local full paired dataset described in the benchmark record:
 
 | tool | threads | median elapsed | median RSS |
 | --- | ---: | ---: | ---: |

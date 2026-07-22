@@ -1,7 +1,8 @@
 # Modified kallisto build and debug usage
 
-This project vendors upstream kallisto under `kallisto_src` and includes
-local debug instrumentation for EC tracing and hit dumps.
+This page documents a locally patched upstream kallisto checkout under the ignored `kallisto_src`
+directory. The tracing flags below are not part of a stock upstream checkout, and the patch that
+adds them is not tracked in this repository.
 
 ## Build (macOS arm64 + BAM support)
 
@@ -12,7 +13,7 @@ Requirements:
 
 Commands:
 ```sh
-cd /Users/denisdemin/Code/kallistors/kallisto_src
+cd kallisto_src
 rm -rf build
 mkdir build
 cd build

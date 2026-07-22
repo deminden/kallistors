@@ -4,6 +4,11 @@ This page collects developer-facing workflows for checks, parity debugging, and
 abundance investigation. For the patched upstream `kallisto` build and its extra
 tracing flags, see [kallisto_debug_build.md](kallisto_debug_build.md).
 
+## Toolchain
+
+Development requires Rust 1.97 or newer. The workspace uses Rust edition 2024 and declares the
+minimum supported Rust version in the root `Cargo.toml`.
+
 ## Required checks
 
 Before committing changes, run:
@@ -19,7 +24,7 @@ cargo test --workspace --all-features
 The crate version lives in `crates/kallistors/Cargo.toml`. For a release, bump
 that version, refresh `Cargo.lock`, update docs that mention the release state,
 run the required checks above, then tag the checked commit with the matching
-version (`v0.4.0` for crate version `0.4.0`).
+version (`v0.4.1` for crate version `0.4.1`).
 
 Two GitHub workflows handle release publication:
 - `Publish to crates.io` runs on version tags (`v*` and `[0-9]*`). It verifies
@@ -70,7 +75,7 @@ target/release/kallistors trace-reads \
 
 ## Real-data subset parity
 
-Run deterministic paired-prefix parity against the checked-in real dataset:
+Run deterministic paired-prefix parity against the local real dataset:
 
 ```bash
 python3 scripts/real_subset_parity.py \

@@ -1,6 +1,7 @@
 # Kallisto compatibility TODOs
 
-This checklist is ordered. Do not proceed to the next item until the current item is validated against kallisto output.
+This historical roadmap records completed work, open follow-ups, and the validation evidence
+available at each stage. Later phases may be complete while earlier exploratory items remain open.
 
 ## Phase A: Index parsing parity (metadata)
 - [x] Parse and report index version (should be 13)
@@ -125,7 +126,7 @@ Notes:
 - Tried a quant-only loader shortcut that omitted nested `ec_blocks` and kept only the flattened EC
   representation. It looked fine on tiny subsets but regressed larger paired parity, so normal
   quant/pseudoalign commands were switched back to the standard builder.
-- Current full-file median-of-5 benchmark on the checked-in real dataset (`-t 32`) is faster than
+- The May 19, 2026 full-file median-of-5 benchmark on the local real dataset (`-t 32`) was faster than
   local upstream `kallisto`: `55.81s` for kallisto versus `32.79s` for kallistors (`1.70x`).
   A post-fix full-file count check matches kallisto exactly; see `docs/benchmarks.md` for the raw
   artifacts and multicore table.
@@ -146,7 +147,7 @@ Notes:
   full-file run-info counts
 
 Acceptance test:
-- On the checked-in paired real dataset, the common search path should stop rebuilding minimizer
+- On the local paired real dataset, the common search path should stop rebuilding minimizer
   candidates for every adjacent k-mer window, the deterministic `1,048,576`-pair prefix should
   remain exact across the multicore table, and full-file run-info parity should remain exact.
 
@@ -187,7 +188,7 @@ Notes:
   another layer of candidate structs.
 - Tried a naive rolling minimizer window in the fast path and an eager upstream-inspired
   overcrowded retry. It reduced full-file wall time sharply, but it also regressed full-file parity
-  (`aligned 4,245,700` / `4,245,946` vs the current correct `4,244,773`), so it was reverted.
+  (`aligned 4,245,700` / `4,245,946` vs the then-current `4,244,773` baseline), so it was reverted.
   The next attempt must mirror upstream iterator semantics more exactly instead of approximating
   them with a simple shifted minimizer cache.
 - Tried swapping the fast path over to exact `minHashKmer`-style primary/next minimizer
@@ -249,7 +250,7 @@ Notes:
 
 Input-path work:
 - switched `flate2` to the `zlib-rs` backend in `crates/kallistors/Cargo.toml`
-  after refreshing the registry state so Cargo could resolve `zlib-rs 0.6.3`
+  after refreshing the registry state so Cargo could resolve the backend
 - measured full-file paired quant with `zlib-rs` at `83.11s` wall, down from
   `84.02s` on the previous exact build
 - removed one layer of threaded worker churn by accumulating directly into
@@ -261,9 +262,9 @@ Input-path work:
   - `crates/kallistors/src/pseudoalign/utils.rs`
 - measured full-file paired quant after that change at `82.85s` wall; this is
   a small but real improvement (`-0.26s`, about `-0.3%`)
-- the remaining input-path gap is now mostly the per-record FASTQ object model
-  in `crates/kallistors/src/io/mod.rs`: `FastqReader::next_record()` still
-  allocates four `Vec<u8>` objects per record
+- at that stage, the remaining input-path gap was mostly the per-record FASTQ object model
+  in `crates/kallistors/src/io/mod.rs`: `FastqReader::next_record()` allocated four `Vec<u8>`
+  objects per record
 - replaced the threaded owned-record transport with packed/reusable FASTQ
   batches built around:
   - one contiguous backing buffer for all record bytes in a batch
@@ -282,10 +283,11 @@ Input-path work:
   `70.73s` wall (`-6.87s`, about `-8.9%`) while preserving exact full-file
   run-info parity and exact deterministic paired-prefix parity through `262144`
   with `--threads 32`
-- subsequent loader/quant passes improved the same full-file paired benchmark. The current
+- subsequent loader/quant passes improved the same full-file paired benchmark. The latest recorded
   median-of-5 result is `32.79s` for kallistors versus `55.81s` for upstream `kallisto -t 32`,
   and a post-fix full-file count check matches upstream kallisto exactly.
-- current remaining optimization work is mostly in pseudoalignment/decompression/EM rather than
+- at the time of that benchmark, remaining optimization work was mostly in
+  pseudoalignment/decompression/EM rather than
   loader startup or per-record FASTQ allocation/copying.
 
 ## Phase H: Pure Rust index builder

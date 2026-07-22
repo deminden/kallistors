@@ -1608,8 +1608,8 @@ fn process_bam_records(
         } else {
             vec![b'!'; sequence.len()]
         };
-        let Some(barcode_seq) = bam_string_tag(&record, [b'C', b'R'])
-            .or_else(|| bam_string_tag(&record, [b'C', b'B']).map(normalize_corrected_barcode))
+        let Some(barcode_seq) = bam_string_tag(&record, *b"CR")
+            .or_else(|| bam_string_tag(&record, *b"CB").map(normalize_corrected_barcode))
         else {
             record_bam_outputs_for_skipped_read(
                 args,
@@ -1622,10 +1622,10 @@ fn process_bam_records(
             )?;
             continue;
         };
-        let Some(umi_seq) = bam_string_tag(&record, [b'U', b'R'])
-            .or_else(|| bam_string_tag(&record, [b'R', b'X']))
-            .or_else(|| bam_string_tag(&record, [b'M', b'I']).map(normalize_corrected_barcode))
-            .or_else(|| bam_string_tag(&record, [b'U', b'B']).map(normalize_corrected_barcode))
+        let Some(umi_seq) = bam_string_tag(&record, *b"UR")
+            .or_else(|| bam_string_tag(&record, *b"RX"))
+            .or_else(|| bam_string_tag(&record, *b"MI").map(normalize_corrected_barcode))
+            .or_else(|| bam_string_tag(&record, *b"UB").map(normalize_corrected_barcode))
         else {
             record_bam_outputs_for_skipped_read(
                 args,

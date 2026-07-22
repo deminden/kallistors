@@ -9,6 +9,7 @@ authors = ["Denis Demin"]
 license = "MIT"
 repository = "https://github.com/deminden/kallistors"
 edition = "2024"
+rust-version = "1.97"
 
 [workspace.lints.rust]
 unsafe_code = "warn"

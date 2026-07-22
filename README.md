@@ -2,15 +2,15 @@
 kallistors: a Rust implementation of kallisto-style pseudoalignment and quantification.
 
 ## At A Glance
-- Paired-end quant is faster than local upstream `kallisto` on the checked-in real dataset. Latest
-  median-of-5 full-file benchmark on `7950X3D`, `-t 32`: `kallisto 55.81s`, `kallistors 32.79s`
-  (`1.70x` faster). See [docs/benchmarks.md](docs/benchmarks.md).
+- Paired-end quant was faster than local upstream `kallisto` in the May 19, 2026 real-data
+  benchmark. The median-of-5 full-file result on `7950X3D`, `-t 32` was `kallisto 55.81s`,
+  `kallistors 32.79s` (`1.70x` faster). See [docs/benchmarks.md](docs/benchmarks.md).
 - Builds pure Rust kallisto v13-compatible transcriptome indexes for normal nucleotide FASTA.
   Last measured GENCODE build: `kallisto 6:24.81`, `kallistors 2:02.23` (`3.15x` faster,
   about `18%` lower peak RSS).
 - Quant writes kallisto-style `abundance.tsv`, `run_info.json`, and default `abundance.h5`.
 
-## Compatibility notes (v0.4.0)
+## Compatibility notes (v0.4.1)
 
 This is a focused reimplementation at the current stage, not a drop-in replacement for `kallisto`.
 
@@ -18,7 +18,7 @@ This is a focused reimplementation at the current stage, not a drop-in replaceme
 | --- | --- |
 | Existing `kallisto` index loading | Supported |
 | Pure Rust index building | Supported for normal nucleotide transcript FASTA, v13-compatible output; amino-acid BUS indexes are supported with `index --aa` |
-| Paired-end quant | Implemented; deterministic prefix and latest full-file checks have exact `run_info.json` count parity |
+| Paired-end quant | Implemented; recorded deterministic-prefix and full-file checks have exact `run_info.json` count parity |
 | Single-end quant | Implemented, with synthetic and selected parity coverage |
 | Single-cell BUS output | Implemented for fixed technology presets and kallisto-style custom `-x` triples, including batch/interleaved input, batch barcode sidecars, BAM input tags and missing-tag skips, SmartSeq3 tags, `--num`, `--union`, `--no-jump`, `--unmapped` ratio output, amino-acid `--aa` mode for single-cDNA technologies, first-pass `--long` threshold filtering with `--platform`/`--error-rate` and valid `novel.fastq`, long/paired BUS sidecars, pseudobam output, and projected/sorted genome BAM output with BAI index |
 | Sequence-specific bias correction | Optional with `--bias` and `--transcripts` |
@@ -26,15 +26,16 @@ This is a focused reimplementation at the current stage, not a drop-in replaceme
 | Long-read and fusion detection | Long-read BUS filtering/output is implemented; general long-read quant and fusion detection are not implemented |
 | CLI option coverage | Partial |
 
-Current real-data status:
+Recorded real-data validation (May 19, 2026 benchmark snapshot):
 - Paired-end parity is exact on the deterministic `1,048,576`-pair subset across `1, 2, 4, 8, 16,
   32` threads.
-- The active working tree's latest full-file paired check matches kallisto counts exactly:
+- The recorded full-file paired check matches kallisto counts exactly:
   `n_processed=4,408,640`, `n_pseudoaligned=4,244,771`, `n_unique=276,251`.
-- Full-file runtime is currently faster than local upstream `kallisto`.
-- Pure Rust index output is accepted by both `kallistors` and upstream `kallisto inspect/quant` on
-  the reduced real subset and the GENCODE validation path. Generated indexes are format-compatible,
-  not byte-identical to upstream indexes.
+- The measured full-file runtime was faster than local upstream `kallisto` in that snapshot.
+- Pure Rust index output is accepted by both `kallistors` and standard `MAX_KMER_SIZE=32` upstream
+  `kallisto inspect/quant` builds on the reduced real subset and the GENCODE validation path.
+  Generated indexes are format-compatible for that compile-time width, not byte-identical to
+  upstream indexes.
 - `abundance.tsv` is validated with floating-point tolerances where tests compare estimates. The
   README does not claim bit-for-bit abundance parity.
 - H5 output is readable by upstream `kallisto h5dump` and uses kallisto-compatible default bias
@@ -51,6 +52,8 @@ d-list-specific behavior.
 ## Usage
 
 ### As a Binary
+
+Building or installing from source requires Rust 1.97 or newer. The project uses Rust edition 2024.
 
 ```bash
 # Download prebuilt binaries from GitHub Releases, or install the CLI from source.

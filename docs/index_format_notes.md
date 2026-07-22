@@ -47,7 +47,9 @@ This header is at the beginning of the `dbg_size` bytes.
 `Kmer` uses `MAX_KMER_SIZE` (default 32). Storage is `MAX_K/4` bytes, so:
 - default `Kmer` binary size = 32/4 = 8 bytes
 
-If kallisto is compiled with a different `MAX_KMER_SIZE`, the d-list entry size will differ.
+If kallisto is compiled with a different `MAX_KMER_SIZE`, the d-list entry size and minimizer MPHF
+key width differ. Index v13 does not record that compile-time width, so cross-width loading is not
+supported.
 
 ## Notes / assumptions for kallistors
 
@@ -61,6 +63,6 @@ If kallisto is compiled with a different `MAX_KMER_SIZE`, the d-list entry size 
 - The pure Rust builder emits `dlist_size = 0` for the currently supported index surface.
 - Generated indexes are intended to be format-compatible and quant-equivalent, not byte-identical
   to upstream `kallisto index` output.
-- Unsupported builder features remain outside the current surface: amino-acid mode, distinguish
-  mode, d-list-specific indexes, H5/bootstrap concerns, and nonstandard upstream compile-time
-  layouts.
+- Amino-acid BUS indexes are supported with `index --aa`; distinguish mode, d-list-specific
+  indexes, H5/bootstrap concerns, and nonstandard upstream compile-time layouts remain outside the
+  current builder surface.

@@ -68,7 +68,7 @@ fn write_fasta(path: &Path, transcripts: &[(String, Vec<u8>)]) -> std::io::Resul
 }
 
 fn make_seq(seed: usize, len: usize) -> Vec<u8> {
-    let bases = [b'A', b'C', b'G', b'T'];
+    let bases = *b"ACGT";
     let mut seq = Vec::with_capacity(len);
     let mut state = 0x9e37_79b9_7f4a_7c15u64 ^ (seed as u64);
     for _ in 0..len {
