@@ -177,6 +177,7 @@ pub fn local_kmer_hits(
     kallisto_bifrost_find: bool,
     max_unitigs: usize,
 ) -> Vec<(usize, String, bool, usize)> {
+    super::runtime::ensure_cache_context(index);
     if seq.len() < index.k {
         return Vec::new();
     }

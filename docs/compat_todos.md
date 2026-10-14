@@ -93,12 +93,12 @@ Notes:
 - [x] Remove the large shutdown/drop cost caused by eagerly materialized per-minimizer vectors
 - [x] Add explicit stage timing for index load, minimizer reconstruction, pseudoalignment, and EM so loader regressions are visible immediately
 - [ ] Benchmark full GENCODE index startup against `kallisto` after each structural change; do not accept changes that only reshuffle overhead
-- [x] Replace per-occurrence atomic minimizer counting with buffered local batch counting that mirrors upstream `readBinaryIndex(...)` batching while preserving the existing exact storage write path
+- [x] Replace per-occurrence atomic minimizer counting with buffered batch counting that mirrors upstream `readBinaryIndex(...)` batching while preserving the existing exact storage write path
 
 Acceptance test:
 - On `data/gencode.v49_kallisto.idx`, `kallistors quant` should spend most of its wall time in
   pseudoalignment/EM rather than loader startup, and full-file `-t 32` runtime should stay at or
-  below local upstream `kallisto` without using an on-disk cache.
+  below upstream `kallisto` without using an on-disk cache.
 
 Notes:
 - Upstream `kallisto`/Bifrost loads minimizer occurrences directly into `MinimizerIndex` during
@@ -112,11 +112,11 @@ Notes:
   stays out of shade/debug/fallback logic.
 - Common-case candidate validation now uses precomputed encoded unitig / km-unitig base stores
   rather than repeated byte-slice equality in the hot path.
-- Pathological and repeated k-mer reuse now extend beyond a single read via a thread-local fast
+- Pathological and repeated k-mer reuse now extend beyond a single read via a per-thread fast
   match cache in the worker hot path. That cache memoizes exact common-path and overcrowded/special
   fallback outcomes for recurring k-mers without changing default behavior.
-- EC block lookup now uses a small thread-local block-range cache, and fast-path minimizer
-  enumeration uses a thread-local minimizer-candidate cache to avoid redoing the same
+- EC block lookup now uses a small per-thread block-range cache, and fast-path minimizer
+  enumeration uses a per-thread minimizer-candidate cache to avoid redoing the same
   `minimizers_for_kmer` work for recurring windows.
 - Pathological selective fallback now stores pre-encoded forward k-mer codes, so fallback matching
   no longer re-encodes the candidate unitig sequence for each overcrowded/special hit.
@@ -126,30 +126,34 @@ Notes:
   it was reverted in favor of the simpler cached matcher.
 - The current loader win comes from mirroring the upstream static-MPHF read path more closely on
   the count side: unitig/km minimizer positions are buffered into large ordered batches, each batch
-  is processed in parallel into thread-local sorted minimizer-id runs, and those local runs are
+  is processed in parallel into per-thread sorted minimizer-id runs, and those sorted runs are
   merged into the global counts without a relaxed atomic increment on every occurrence.
-- Tried extending that same batched/local approach to the fill/write pass. It was much faster, but
+- Tried extending that same batched approach to the fill/write pass. It was much faster, but
   it changed large-subset/full-file pseudoalignment counts, so it was reverted. The exact write
   path still uses the previous storage fill logic, while only the count pass takes the new batched
   route.
 - Tried a quant-only loader shortcut that omitted nested `ec_blocks` and kept only the flattened EC
   representation. It looked fine on tiny subsets but regressed larger paired parity, so normal
   quant/pseudoalign commands were switched back to the standard builder.
-- The May 19, 2026 full-file median-of-5 benchmark on the local real dataset (`-t 32`) was faster than
-  local upstream `kallisto`: `55.81s` for kallisto versus `32.79s` for kallistors (`1.70x`).
+- The May 19, 2026 full-file median-of-5 benchmark on the real-read dataset (`-t 32`) was faster than
+  upstream `kallisto`: `55.81s` for kallisto versus `32.79s` for kallistors (`1.70x`).
   A post-fix full-file count check matches kallisto exactly; see `docs/benchmarks.md` for the raw
   artifacts and multicore table.
 - Remaining performance work is still mostly in pseudoalignment, FASTQ decompression, and EM;
   future search-loop work should keep both deterministic-prefix and full-file run-info parity exact.
 - The October 14 Apple Silicon follow-up found a separate major cost: both scanners counted the
-  entire on-list for every read. The unreleased fix calculates the dummy ID only when a D-list
+  entire on-list for every read. The 0.5.0 fix calculates the dummy ID only when a D-list
   hit needs it. Full EC maps remain exact in all six GENCODE v50 cases, and a focused eight-thread
   paired check takes 33.955 seconds versus 48.940 seconds upstream. See the
   [profiling and validation report](paired_performance_fix_2026-10-14.md).
 
+The [0.5.0 optimization report](performance_0.5.0.md) adds stable ordered
+parallel fill, packed exact matching, index-scoped cache reuse and ordered parallel EM. It records
+2.66x speed against upstream in one fresh eight-thread pair and exact full EC maps in all six cases.
+
 ## Phase G: Mirror remaining upstream search-loop optimizations
 - [ ] Replace per-k-mer minimizer recomputation with a rolling `minHashIterator`-style state for the common quant path
-- [ ] Preserve iterator-local minimizer state across adjacent read windows so the next k-mer search can reuse the current minimizer set instead of rebuilding it from slices
+- [ ] Preserve minimizer iterator state across adjacent read windows so the next k-mer search can reuse the current minimizer set instead of rebuilding it from slices
 - [ ] Mirror upstream overcrowded-minimizer handling: when a bucket is overcrowded, advance to the next minimizer candidate first and only fall back to direct search if no alternate minimizer proves the hit
 - [ ] Add a fast “minimizer presence changed” gate like upstream `Search.tcc` so repeated adjacent windows do not redo MPHF lookups when the primary minimizer position/hash is unchanged
 - [ ] Mirror the original quant jump loop more literally: maintain one rolling read iterator and one rolling search state, and use the next/middle-hit checks to skip windows before falling back to incremental scanning
@@ -161,7 +165,7 @@ Notes:
   full-file run-info counts
 
 Acceptance test:
-- On the local paired real dataset, the common search path should stop rebuilding minimizer
+- On the paired real-read dataset, the common search path should stop rebuilding minimizer
   candidates for every adjacent k-mer window, the deterministic `1,048,576`-pair prefix should
   remain exact across the multicore table, and full-file run-info parity should remain exact.
 
@@ -202,7 +206,7 @@ Notes:
   another layer of candidate structs.
 - Tried a naive rolling minimizer window in the fast path and an eager upstream-inspired
   overcrowded retry. It reduced full-file wall time sharply, but it also regressed full-file parity
-  (`aligned 4,245,700` / `4,245,946` vs the then-current `4,244,773` baseline), so it was reverted.
+  (paired aligned counts changed), so it was reverted.
   The next attempt must mirror upstream iterator semantics more exactly instead of approximating
   them with a simple shifted minimizer cache.
 - Tried swapping the fast path over to exact `minHashKmer`-style primary/next minimizer
@@ -216,9 +220,9 @@ Notes:
   The salvage path is to reintroduce that speedup as isolated deltas only after each delta is
   proven on the deterministic paired ladder and the full file.
 - Next salvage sequence for the faster state:
-  1. Keep the current correct baseline loop intact as the control branch.
+  1. Keep the current correct reference loop intact as the control branch.
   2. Reapply only the bounded incremental-scan change while preserving the old hit/intersection
-     bookkeeping and compare the first divergent pair against the baseline.
+     bookkeeping and compare the first divergent pair against the reference loop.
   3. Reapply only the faster probe-state update rules and compare again.
   4. Keep only the deltas that preserve exact full-file parity; reject any speedup that changes
      `n_pseudoaligned`, even if the wall time improvement is large.
@@ -226,7 +230,7 @@ Notes:
   - internal investigation flags in `PseudoalignOptions` driven by environment variables
     (`KALLISTORS_TRACE_FAST_PATH`, `KALLISTORS_FAST_DELTA_*`) so experimental fast-path deltas
     can be enabled without changing default CLI behavior
-  - `kallistors trace-compare` to run baseline vs fast-path traces side-by-side on selected
+  - `kallistors trace-compare` to compare diagnostic search-path traces on selected
     reads or read pairs and emit structured diffs for probe positions, minimizer candidates, jump
     decisions, and final ECs
   - `scripts/real_subset_parity.py --fast-env ...` to reproduce a mismatched subset under an

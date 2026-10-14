@@ -1,6 +1,6 @@
-# Local real-read comparison
+# Real-read comparison
 
-This report records reproducible local comparisons of kallistors 0.4.1 and upstream kallisto
+This report records reproducible comparisons of kallistors 0.4.1 and upstream kallisto
 0.52.0 on three paired-end human RNA-seq runs. The compact run is useful for a quick parity check;
 the larger runs provide progressively more work for multicore timing. All quantification comparisons
 use the same upstream-built index, so the speed measurements focus on quantification.
@@ -34,7 +34,7 @@ values in this original report describe the earlier build.
 | [DRR023395](https://www.ebi.ac.uk/ena/browser/view/DRR023395) | Human pulmonary artery endothelial cells (HPAEC), study PRJDB1532 | 913,953 | 100 bp | 145 MB |
 | [SRR13638690](https://www.ebi.ac.uk/ena/browser/view/SRR13638690) | Human temporal muscle RNA-seq, study PRJNA699558 | 4,451,399 | about 171 bp per mate | 871 MB |
 
-ENA supplies per-file MD5s; `scripts/prepare_local_benchmark.sh` checks them after download and
+ENA supplies per-file MD5s; `scripts/prepare_benchmark.sh` checks them after download and
 checks each gzip stream. SRR13638690 is about five times the trimmed pair count of DRR023395 and
 adds a materially larger workload while keeping its paired raw FASTQs below 1 GiB combined.
 
@@ -61,7 +61,7 @@ by the comparison scripts.
 From the repository root, after activating or using the `kallistors-r` environment:
 
 ```bash
-mamba run -n kallistors-r bash scripts/prepare_local_benchmark.sh
+mamba run -n kallistors-r bash scripts/prepare_benchmark.sh
 ```
 
 The script downloads all three ENA runs and the GENCODE v50 full transcript FASTA into ignored `data/`
@@ -82,10 +82,10 @@ target/tools/kallisto-0.52.0 index -t 8 \
 The script uses the same transcript FASTA, k=31, and four threads for both tools. It performs one
 warmup per tool and three measured builds per tool, alternating the tool order between measured
 runs. Each build goes into a temporary directory; the raw timings and median summary are saved in
-`target/benchmarks/local-real-2026-10-14/`.
+`target/benchmarks/real-reads-2026-10-14/`.
 
 ```bash
-python3 scripts/benchmark_local_index.py --threads 4
+python3 scripts/benchmark_index.py --threads 4
 ```
 
 | Tool | Median build time | Median index size |
@@ -106,13 +106,13 @@ sample uses one, two, four, and eight threads. The speedup column is kallisto me
 kallistors median time, so values above 1 indicate kallistors was faster.
 
 ```bash
-python3 scripts/benchmark_local_reads.py \
+python3 scripts/benchmark_reads.py \
   --samples ERR2260014_compact,DRR023395_larger \
   --thread-counts 1,2,4,8 \
   --compact-thread-counts 4 --larger-thread-counts 1,2,4,8
 ```
 
-Raw run records and median summaries are written to `target/benchmarks/local-real-2026-10-14/`.
+Raw run records and median summaries are written to `target/benchmarks/real-reads-2026-10-14/`.
 Those build and quant result files are ignored by Git so the repository does not acquire large
 data or machine-specific timing artifacts. The saved `quant.runs.tsv` contains each warmup and
 measured repetition; `quant.summary.tsv` contains the medians below.
@@ -136,7 +136,7 @@ For DRR023395, both tools improved from one to eight threads in paired mode (46.
 for kallisto; 84.06 to 26.92 s for kallistors). In single-end mode, the medians fell from 58.20 to
 29.41 s and from 55.80 to 23.76 s, respectively. Kallistors was slower at low thread counts in
 paired mode, then faster at eight threads; the single-end results also varied by thread count. These
-are local wall-time measurements on one host, with a shared upstream index, and should not be read
+are wall-time measurements on one host, with a shared upstream index, and should not be read
 as a general performance claim.
 
 ## Larger SRR13638690 comparison at eight threads
@@ -147,9 +147,9 @@ medians to an ignored `target/` path. Single-end mode uses trimmed mate 1 with t
 length settings documented above.
 
 ```bash
-python3 scripts/benchmark_local_reads.py \
+python3 scripts/benchmark_reads.py \
   --samples SRR13638690_larger --thread-counts 8 \
-  --out-prefix target/benchmarks/local-real-2026-10-14/srr13638690-8thread
+  --out-prefix target/benchmarks/real-reads-2026-10-14/srr13638690-8thread
 ```
 
 fastp retained 4,411,003 pairs from the ENA-reported 4,451,399. At eight threads:
@@ -168,7 +168,7 @@ The TPM values were exactly equal for 604,161 transcripts. Among transcripts wit
 TPM, relative-error median, 90th percentile, and 99th percentile were 6.74e-7, 2.34e-6, and
 3.97e-6; maximum relative error was 0.00145 (0.145%). Thus the outputs are very close by this
 summary, but not bit-for-bit identical. The one-off abundance files are kept under the ignored
-`target/benchmarks/local-real-2026-10-14/srr13638690-abundance-check/` directory.
+`target/benchmarks/real-reads-2026-10-14/srr13638690-abundance-check/` directory.
 
 The original ERR2260014 abundance summary used percentiles over the full transcript table, most
 of which has zero estimated abundance. The subsequent audit found substantial differences for

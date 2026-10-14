@@ -410,13 +410,13 @@ pub(crate) fn jump_distance_for_match(
     start: usize,
     forward_strand: bool,
 ) -> Option<usize> {
-    let blocks = index.ec_blocks.get(unitig_id)?;
-    let block = blocks.get(block_idx)?;
-    if block.ub <= block.lb {
+    // The flat table has identical bounds and is also available in compact quant indexes.
+    let (lb, ub) = index.flat_ec.block_bounds(unitig_id, block_idx)?;
+    if ub <= lb {
         return None;
     }
-    let contig_start = block.lb as isize;
-    let contig_len = (block.ub - block.lb) as isize;
+    let contig_start = lb as isize;
+    let contig_len = (ub - lb) as isize;
     let start = start as isize;
     let dist = if forward_strand {
         contig_len - 1 - (start - contig_start)

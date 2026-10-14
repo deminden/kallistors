@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::ops::Index;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use rayon::ThreadPool;
 use rayon::ThreadPoolBuilder;
@@ -36,80 +36,10 @@ const BASE_CODES: [u8; 256] = {
     codes
 };
 
-pub(crate) struct EncodedMinimizerStore {
-    offsets: Vec<usize>,
-    values: Vec<[u8; 8]>,
-}
-
-impl EncodedMinimizerStore {
-    fn from_sequences(seqs: &[Vec<u8>], g: usize, pool: Option<&ThreadPool>) -> Self {
-        let mut offsets = Vec::with_capacity(seqs.len() + 1);
-        offsets.push(0);
-        let mut total = 0usize;
-        for seq in seqs {
-            total += minimizer_count(seq.len(), g);
-            offsets.push(total);
-        }
-
-        let build_sequential = || {
-            let mut values = vec![[0u8; 8]; total];
-            for (seq_idx, seq) in seqs.iter().enumerate() {
-                let start = offsets[seq_idx];
-                let end = offsets[seq_idx + 1];
-                if start == end {
-                    continue;
-                }
-                compute_minimizer_reps_into(seq, g, &mut values[start..end]);
-            }
-            values
-        };
-
-        let values = if let Some(pool) = pool {
-            let mut values = vec![[0u8; 8]; total];
-            let base_ptr = values.as_mut_ptr() as usize;
-            pool.install(|| {
-                (0..seqs.len())
-                    .into_par_iter()
-                    .with_min_len(2048)
-                    .for_each(|seq_idx| {
-                        let start = offsets[seq_idx];
-                        let end = offsets[seq_idx + 1];
-                        if start == end {
-                            return;
-                        }
-                        let out = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                (base_ptr as *mut [u8; 8]).add(start),
-                                end - start,
-                            )
-                        };
-                        compute_minimizer_reps_into(&seqs[seq_idx], g, out);
-                    });
-            });
-            values
-        } else {
-            build_sequential()
-        };
-
-        Self { offsets, values }
-    }
-
-    #[inline]
-    fn len(&self, seq_idx: usize) -> usize {
-        self.offsets[seq_idx + 1] - self.offsets[seq_idx]
-    }
-
-    #[inline]
-    fn get(&self, seq_idx: usize, pos: usize) -> Option<&[u8; 8]> {
-        let start = *self.offsets.get(seq_idx)?;
-        let end = *self.offsets.get(seq_idx + 1)?;
-        self.values.get(start..end)?.get(pos)
-    }
-}
-
 pub(crate) struct EncodedBaseStore {
     offsets: Vec<usize>,
-    values: Vec<u8>,
+    lengths: Vec<usize>,
+    values: Vec<u64>,
 }
 
 impl EncodedBaseStore {
@@ -118,25 +48,26 @@ impl EncodedBaseStore {
         offsets.push(0);
         let mut total = 0usize;
         for seq in seqs {
-            total += seq.len();
+            total += seq.len().div_ceil(32);
             offsets.push(total);
         }
+        let lengths = seqs.iter().map(Vec::len).collect();
 
         let build_sequential = || {
-            let mut values = vec![0u8; total];
+            let mut values = vec![0u64; total];
             for (seq_idx, seq) in seqs.iter().enumerate() {
                 let start = offsets[seq_idx];
                 let end = offsets[seq_idx + 1];
                 if start == end {
                     continue;
                 }
-                encode_bases_into(seq, &mut values[start..end]);
+                pack_bases_into(seq, &mut values[start..end]);
             }
             values
         };
 
         let values = if let Some(pool) = pool {
-            let mut values = vec![0u8; total];
+            let mut values = vec![0u64; total];
             let base_ptr = values.as_mut_ptr() as usize;
             pool.install(|| {
                 (0..seqs.len())
@@ -151,11 +82,11 @@ impl EncodedBaseStore {
                         // SAFETY: each sequence owns a disjoint prefix-summed slice.
                         let out = unsafe {
                             std::slice::from_raw_parts_mut(
-                                (base_ptr as *mut u8).add(start),
+                                (base_ptr as *mut u64).add(start),
                                 end - start,
                             )
                         };
-                        encode_bases_into(&seqs[seq_idx], out);
+                        pack_bases_into(&seqs[seq_idx], out);
                     });
             });
             values
@@ -163,14 +94,33 @@ impl EncodedBaseStore {
             build_sequential()
         };
 
-        Self { offsets, values }
+        Self {
+            offsets,
+            lengths,
+            values,
+        }
+    }
+
+    #[inline]
+    // Loader sequences are decoded from the two-bit index and contain only A/C/G/T.
+    // Derive only bitmap-selected minimizers; no per-position table is retained.
+    fn minimizer_at(&self, seq_idx: usize, start: usize, g: usize) -> Option<[u8; 8]> {
+        if g == 0 || g > 32 {
+            return None;
+        }
+        let word = self.encode_kmer_at(seq_idx, start, g)?;
+        let shift = (32 - g) * 2;
+        let forward = word << shift;
+        let reversed = word.reverse_bits();
+        let reverse = !(((reversed & 0x5555_5555_5555_5555) << 1)
+            | ((reversed & 0xaaaa_aaaa_aaaa_aaaa) >> 1))
+            & (u64::MAX << shift);
+        Some(forward.min(reverse).to_le_bytes())
     }
 
     #[inline]
     pub(crate) fn len(&self, seq_idx: usize) -> Option<usize> {
-        let start = *self.offsets.get(seq_idx)?;
-        let end = *self.offsets.get(seq_idx + 1)?;
-        Some(end - start)
+        self.lengths.get(seq_idx).copied()
     }
 
     #[inline]
@@ -179,24 +129,40 @@ impl EncodedBaseStore {
             return None;
         }
         let seq_start = *self.offsets.get(seq_idx)?;
-        let seq_end = *self.offsets.get(seq_idx + 1)?;
-        let seq_len = seq_end.checked_sub(seq_start)?;
+        let seq_len = *self.lengths.get(seq_idx)?;
         if start.checked_add(k)? > seq_len {
             return None;
         }
-        let mut out = 0u64;
-        for &base in &self.values[seq_start + start..seq_start + start + k] {
-            out = (out << 2) | u64::from(base);
+        if k == 0 {
+            return Some(0);
         }
-        Some(out)
+        let word_idx = seq_start + start / 32;
+        let within_word = start % 32;
+        let shift = within_word * 2;
+        let mut word = self.values[word_idx] << shift;
+        if within_word + k > 32 {
+            word |= self.values[word_idx + 1] >> (64 - shift);
+        }
+        Some(word >> ((32 - k) * 2))
     }
 }
 
 pub(crate) struct EncodedUnitigs {
-    pub(crate) unitig_minimizers: EncodedMinimizerStore,
-    pub(crate) km_minimizers: EncodedMinimizerStore,
+    g: usize,
     pub(crate) unitig_bases: EncodedBaseStore,
     pub(crate) km_bases: EncodedBaseStore,
+}
+
+impl EncodedUnitigs {
+    #[inline]
+    fn unitig_minimizer_count(&self, seq_idx: usize) -> usize {
+        minimizer_count(self.unitig_bases.lengths[seq_idx], self.g)
+    }
+
+    #[inline]
+    fn unitig_minimizer_at(&self, seq_idx: usize, pos: usize) -> Option<[u8; 8]> {
+        self.unitig_bases.minimizer_at(seq_idx, pos, self.g)
+    }
 }
 
 pub(crate) struct FlatEcIndex {
@@ -262,7 +228,12 @@ impl FlatEcIndex {
     }
 
     pub(crate) fn block_bounds(&self, unitig_id: usize, block_idx: usize) -> Option<(u32, u32)> {
-        let global_idx = self.unitig_block_offsets.get(unitig_id)? + block_idx;
+        let start = *self.unitig_block_offsets.get(unitig_id)?;
+        let end = *self.unitig_block_offsets.get(unitig_id.checked_add(1)?)?;
+        let global_idx = start.checked_add(block_idx)?;
+        if global_idx >= end {
+            return None;
+        }
         Some((
             *self.block_lbs.get(global_idx)?,
             *self.block_ubs.get(global_idx)?,
@@ -308,16 +279,18 @@ pub struct MinzPositionIndex {
 }
 
 impl MinzPositionIndex {
-    fn from_counts(counts: Vec<usize>) -> Self {
-        let mut offsets = Vec::with_capacity(counts.len() + 1);
-        offsets.push(0);
+    fn from_counts(mut counts: Vec<usize>) -> Self {
+        // Reuse the count buffer for exclusive prefix offsets. The loader reserves
+        // the final sentinel in advance, avoiding another reference-sized allocation.
         let mut total = 0usize;
-        for count in counts {
-            total += count;
-            offsets.push(total);
+        for count in &mut counts {
+            let next = total + *count;
+            *count = total;
+            total = next;
         }
+        counts.push(total);
         Self {
-            offsets,
+            offsets: counts,
             values: vec![0; total],
         }
     }
@@ -349,7 +322,10 @@ impl Index<usize> for MinzPositionIndex {
     }
 }
 
+static NEXT_CACHE_ID: AtomicU64 = AtomicU64::new(1);
+
 pub struct BifrostIndex {
+    pub(crate) cache_id: u64,
     pub index_version: u64,
     pub k: usize,
     pub g: usize,
@@ -390,12 +366,20 @@ pub fn build_bifrost_index(path: &Path) -> Result<BifrostIndex> {
     build_bifrost_index_with_positions_threaded(path, false, 1)
 }
 
+/// Load a flat counting index without duplicate EC blocks. Positional loading retains
+/// the nested metadata needed for fragment/strand filters. Alternate k-mer scanners
+/// and detailed hit tracing should use the full index loader instead.
 pub fn build_bifrost_index_quant_threaded(
     path: &Path,
     load_positional_info: bool,
     threads: usize,
 ) -> Result<BifrostIndex> {
-    build_bifrost_index_with_positions_threaded_impl(path, load_positional_info, threads, false)
+    build_bifrost_index_with_positions_threaded_impl(
+        path,
+        load_positional_info,
+        threads,
+        load_positional_info,
+    )
 }
 
 pub fn build_bifrost_index_with_kmer_pos(
@@ -561,6 +545,8 @@ fn build_bifrost_index_with_positions_threaded_impl(
         special_minz.push((minz, pos_id));
     }
 
+    drop(abundant);
+    drop(overcrowded);
     reader.seek(SeekFrom::Start(dbg_start + dbg_size))?;
 
     let mphf_size = read_u64_le(&mut reader)? as usize;
@@ -568,6 +554,7 @@ fn build_bifrost_index_with_positions_threaded_impl(
     reader.read_exact(&mut mphf_buf)?;
     let mut mphf_cur = std::io::Cursor::new(mphf_buf.as_slice());
     let mphf = BooPhf::load(&mut mphf_cur)?;
+    drop(mphf_buf);
 
     let dlist_size = read_u64_le(&mut reader)?;
     let _dlist_overhang = read_u64_le(&mut reader)?;
@@ -595,7 +582,8 @@ fn build_bifrost_index_with_positions_threaded_impl(
     let mut flat_ec = FlatEcIndex::new(node_count);
     let mut node_buf = Vec::new();
     for _ in 0..node_count {
-        reader.seek(SeekFrom::Current(k as i64))?;
+        // Skip the stored node k-mer without discarding unread buffered bytes.
+        reader.seek_relative(k as i64)?;
         let node_size = read_u32_le(&mut reader)? as usize;
         node_buf.resize(node_size, 0);
         reader.read_exact(&mut node_buf)?;
@@ -611,6 +599,7 @@ fn build_bifrost_index_with_positions_threaded_impl(
             ec_blocks.push(blocks);
         }
     }
+    drop(node_buf);
     let selective_fallback_kmers =
         SelectiveFallbackKmerIndex::build(unitigs.len(), &km_unitigs, &h_kmers);
     let load_threads = _threads.max(1);
@@ -626,7 +615,8 @@ fn build_bifrost_index_with_positions_threaded_impl(
     };
     let encoded_unitigs = precompute_encoded_unitigs(&unitigs, &km_unitigs, g, rayon_pool.as_ref());
 
-    let mut minz_counts = vec![0usize; hmap_min_unitigs_sz];
+    let mut minz_counts = Vec::with_capacity(hmap_min_unitigs_sz + 1);
+    minz_counts.resize(hmap_min_unitigs_sz, 0);
     drop(_graph_timing);
     let _count_timing = timing::scoped(Stage::MinimizerCountPass);
     populate_unitig_minimizer_counts(
@@ -639,7 +629,8 @@ fn build_bifrost_index_with_positions_threaded_impl(
 
     let km_glen = k.saturating_sub(g) + 1;
     let kmer_load_ctx = KmerLoadContext {
-        km_minimizers: &encoded_unitigs.km_minimizers,
+        km_bases: &encoded_unitigs.km_bases,
+        g,
         km_glen,
         mphf: &mphf,
     };
@@ -669,6 +660,7 @@ fn build_bifrost_index_with_positions_threaded_impl(
         &mphf,
         rayon_pool.as_ref(),
     );
+    drop(bmp_unitigs);
     populate_kmer_minimizer_storage(
         &mut minz_positions,
         &mut minz_cursors,
@@ -677,6 +669,7 @@ fn build_bifrost_index_with_positions_threaded_impl(
         rayon_pool.as_ref(),
     );
 
+    drop(bmp_km);
     for (minz, pos_id) in special_minz {
         let bytes = minz.to_le_bytes();
         if let Some(idx) = mphf.lookup(&bytes) {
@@ -684,9 +677,23 @@ fn build_bifrost_index_with_positions_threaded_impl(
         }
     }
 
+    drop(minz_cursors);
     let onlist = read_onlist_with_lengths(&mut reader)?;
 
+    let cache_id = loop {
+        let id = NEXT_CACHE_ID.load(Ordering::Relaxed);
+        let next = id
+            .checked_add(1)
+            .expect("index cache identity space exhausted");
+        if NEXT_CACHE_ID
+            .compare_exchange_weak(id, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            break id;
+        }
+    };
     Ok(BifrostIndex {
+        cache_id,
         index_version,
         k,
         g,
@@ -713,11 +720,13 @@ fn build_bifrost_index_with_positions_threaded_impl(
 }
 
 struct KmerLoadContext<'a> {
-    km_minimizers: &'a EncodedMinimizerStore,
+    km_bases: &'a EncodedBaseStore,
+    g: usize,
     km_glen: usize,
     mphf: &'a BooPhf,
 }
 
+#[cfg(test)]
 fn base_code(base: u8) -> Option<u64> {
     let code = BASE_CODES[base as usize];
     if code == INVALID_BASE_CODE {
@@ -727,6 +736,7 @@ fn base_code(base: u8) -> Option<u64> {
     }
 }
 
+#[cfg(test)]
 fn encode_word_pair(seq: &[u8]) -> Option<(u64, u64)> {
     if seq.is_empty() {
         return Some((0, 0));
@@ -751,6 +761,7 @@ fn minimizer_count(seq_len: usize, g: usize) -> usize {
     }
 }
 
+#[cfg(test)]
 fn compute_minimizer_reps_into(seq: &[u8], g: usize, out: &mut [[u8; 8]]) {
     if out.is_empty() {
         return;
@@ -783,10 +794,101 @@ fn compute_minimizer_reps_into(seq: &[u8], g: usize, out: &mut [[u8; 8]]) {
     }
 }
 
-fn encode_bases_into(seq: &[u8], out: &mut [u8]) {
-    debug_assert_eq!(seq.len(), out.len());
-    for (src, dst) in seq.iter().zip(out.iter_mut()) {
-        *dst = BASE_CODES[*src as usize] & 3;
+fn pack_bases_into(seq: &[u8], out: &mut [u64]) {
+    debug_assert_eq!(seq.len().div_ceil(32), out.len());
+    for (chunk, word) in seq.chunks(32).zip(out) {
+        let mut encoded = 0u64;
+        for &base in chunk {
+            encoded = (encoded << 2) | u64::from(BASE_CODES[base as usize] & 3);
+        }
+        *word = encoded << ((32 - chunk.len()) * 2);
+    }
+}
+
+#[cfg(test)]
+mod packed_base_tests {
+    use super::{BASE_CODES, EncodedBaseStore, compute_minimizer_reps_into, minimizer_count};
+
+    #[test]
+    fn packed_minimizers_equal_byte_reference_for_all_g_and_word_boundaries() {
+        let mut state = 43u64;
+        let sequences: Vec<Vec<u8>> = (0..=129)
+            .map(|len| {
+                (0..len)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        b"ACGTacgt"[(state & 7) as usize]
+                    })
+                    .collect()
+            })
+            .chain([vec![b'A'; 97], vec![b'T'; 97], b"ACGT".repeat(32)])
+            .collect();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        for store in [
+            EncodedBaseStore::from_sequences(&sequences, None),
+            EncodedBaseStore::from_sequences(&sequences, Some(&pool)),
+        ] {
+            for (seq_id, sequence) in sequences.iter().enumerate() {
+                for g in 1..=32 {
+                    let mut expected = vec![[0; 8]; minimizer_count(sequence.len(), g)];
+                    compute_minimizer_reps_into(sequence, g, &mut expected);
+                    for (pos, bytes) in expected.iter().enumerate() {
+                        assert_eq!(
+                            store.minimizer_at(seq_id, pos, g).as_ref(),
+                            Some(bytes),
+                            "sequence {seq_id}, position {pos}, g {g}"
+                        );
+                    }
+                    assert_eq!(store.minimizer_at(seq_id, expected.len(), g), None);
+                    assert_eq!(store.minimizer_at(seq_id, usize::MAX, g), None);
+                }
+                assert_eq!(store.minimizer_at(seq_id, 0, 0), None);
+                assert_eq!(store.minimizer_at(seq_id, 0, 33), None);
+            }
+            assert_eq!(store.minimizer_at(sequences.len(), 0, 1), None);
+        }
+    }
+
+    #[test]
+    fn packed_windows_equal_original_byte_encoding_at_every_boundary() {
+        let sequences = vec![
+            Vec::new(),
+            b"A".to_vec(),
+            b"ACGTNacgtnX".to_vec(),
+            (0..129).map(|i| b"ACGTacgtN"[i % 9]).collect(),
+        ];
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("thread pool");
+        for store in [
+            EncodedBaseStore::from_sequences(&sequences, None),
+            EncodedBaseStore::from_sequences(&sequences, Some(&pool)),
+        ] {
+            for (seq_id, sequence) in sequences.iter().enumerate() {
+                assert_eq!(store.len(seq_id), Some(sequence.len()));
+                for start in 0..=sequence.len() + 1 {
+                    for k in 0..=33 {
+                        let expected = if k <= 32 && start + k <= sequence.len() {
+                            Some(sequence[start..start + k].iter().fold(0u64, |word, &base| {
+                                (word << 2) | u64::from(BASE_CODES[base as usize] & 3)
+                            }))
+                        } else {
+                            None
+                        };
+                        assert_eq!(store.encode_kmer_at(seq_id, start, k), expected);
+                    }
+                }
+                assert_eq!(store.encode_kmer_at(seq_id, usize::MAX, 1), None);
+            }
+            assert_eq!(store.len(sequences.len()), None);
+            assert_eq!(store.encode_kmer_at(sequences.len(), 0, 0), None);
+        }
     }
 }
 
@@ -797,8 +899,7 @@ fn precompute_encoded_unitigs(
     pool: Option<&ThreadPool>,
 ) -> EncodedUnitigs {
     EncodedUnitigs {
-        unitig_minimizers: EncodedMinimizerStore::from_sequences(unitigs, g, pool),
-        km_minimizers: EncodedMinimizerStore::from_sequences(km_unitigs, g, pool),
+        g,
         unitig_bases: EncodedBaseStore::from_sequences(unitigs, pool),
         km_bases: EncodedBaseStore::from_sequences(km_unitigs, pool),
     }
@@ -815,7 +916,7 @@ fn advance_unitig_state(state: &mut UnitigBlockState, encoded_unitigs: &EncodedU
     while pos >= state.total_unitig_len + state.current_unitig_len {
         state.unitig_id += 1;
         state.total_unitig_len += state.current_unitig_len;
-        state.current_unitig_len = encoded_unitigs.unitig_minimizers.len(state.unitig_id) as u64;
+        state.current_unitig_len = encoded_unitigs.unitig_minimizer_count(state.unitig_id) as u64;
     }
 }
 
@@ -824,14 +925,14 @@ fn precompute_unitig_block_states(
     encoded_unitigs: &EncodedUnitigs,
 ) -> Vec<UnitigBlockState> {
     let mut out = Vec::with_capacity(bmp_unitigs.len());
-    if encoded_unitigs.unitig_minimizers.offsets.len() <= 1 {
+    if encoded_unitigs.unitig_bases.lengths.is_empty() {
         return out;
     }
 
     let mut state = UnitigBlockState {
         unitig_id: 0,
         total_unitig_len: 0,
-        current_unitig_len: encoded_unitigs.unitig_minimizers.len(0) as u64,
+        current_unitig_len: encoded_unitigs.unitig_minimizer_count(0) as u64,
     };
     for (i, bitmap) in bmp_unitigs.iter().enumerate() {
         let base = (i as u64) << 32;
@@ -851,7 +952,7 @@ fn populate_unitig_minimizer_counts(
     mphf: &BooPhf,
     pool: Option<&ThreadPool>,
 ) {
-    if bmp_unitigs.is_empty() || encoded_unitigs.unitig_minimizers.offsets.len() <= 1 {
+    if bmp_unitigs.is_empty() || encoded_unitigs.unitig_bases.lengths.is_empty() {
         return;
     }
 
@@ -859,7 +960,7 @@ fn populate_unitig_minimizer_counts(
         let mut state = UnitigBlockState {
             unitig_id: 0,
             total_unitig_len: 0,
-            current_unitig_len: encoded_unitigs.unitig_minimizers.len(0) as u64,
+            current_unitig_len: encoded_unitigs.unitig_minimizer_count(0) as u64,
         };
         for (i, bitmap) in bmp_unitigs.iter().enumerate() {
             let base = (i as u64) << 32;
@@ -867,8 +968,8 @@ fn populate_unitig_minimizer_counts(
                 let pos = base + pos_bmp as u64;
                 advance_unitig_state(&mut state, encoded_unitigs, pos);
                 let rel = (pos - state.total_unitig_len) as usize;
-                if let Some(bytes) = encoded_unitigs.unitig_minimizers.get(state.unitig_id, rel)
-                    && let Some(idx) = mphf.lookup(bytes)
+                if let Some(bytes) = encoded_unitigs.unitig_minimizer_at(state.unitig_id, rel)
+                    && let Some(idx) = mphf.lookup(&bytes)
                 {
                     minz_counts[idx as usize] += 1;
                 }
@@ -912,7 +1013,7 @@ fn populate_unitig_minimizer_storage(
     mphf: &BooPhf,
     pool: Option<&ThreadPool>,
 ) {
-    if bmp_unitigs.is_empty() || encoded_unitigs.unitig_minimizers.offsets.len() <= 1 {
+    if bmp_unitigs.is_empty() || encoded_unitigs.unitig_bases.lengths.is_empty() {
         return;
     }
 
@@ -920,7 +1021,7 @@ fn populate_unitig_minimizer_storage(
         let mut state = UnitigBlockState {
             unitig_id: 0,
             total_unitig_len: 0,
-            current_unitig_len: encoded_unitigs.unitig_minimizers.len(0) as u64,
+            current_unitig_len: encoded_unitigs.unitig_minimizer_count(0) as u64,
         };
         for (i, bitmap) in bmp_unitigs.iter().enumerate() {
             let base = (i as u64) << 32;
@@ -928,8 +1029,8 @@ fn populate_unitig_minimizer_storage(
                 let pos = base + pos_bmp as u64;
                 advance_unitig_state(&mut state, encoded_unitigs, pos);
                 let rel = (pos - state.total_unitig_len) as usize;
-                if let Some(bytes) = encoded_unitigs.unitig_minimizers.get(state.unitig_id, rel)
-                    && let Some(idx) = mphf.lookup(bytes)
+                if let Some(bytes) = encoded_unitigs.unitig_minimizer_at(state.unitig_id, rel)
+                    && let Some(idx) = mphf.lookup(&bytes)
                 {
                     let pos_id = ((state.unitig_id as u64) << 32) | rel as u64;
                     minz_positions.push_at(minz_cursors, idx as usize, pos_id);
@@ -938,6 +1039,55 @@ fn populate_unitig_minimizer_storage(
         }
         return;
     };
+
+    if bmp_unitigs.len() == 1 {
+        // A single bitmap otherwise gives the outer parallel loop only one task.
+        // Resolve MPHF buckets concurrently, then append in the original order.
+        // Bucket order affects which exact matching candidate is visited first.
+        let mut state = UnitigBlockState {
+            unitig_id: 0,
+            total_unitig_len: 0,
+            current_unitig_len: encoded_unitigs.unitig_minimizer_count(0) as u64,
+        };
+        let mut batch = Vec::with_capacity(LOAD_BATCH_POSITIONS);
+        let mut flush = |batch: &mut Vec<u64>| {
+            let chunk_len =
+                (batch.len() / (pool.current_num_threads() * 4).max(1)).max(LOAD_MIN_PAR_CHUNK);
+            let events: Vec<Vec<(usize, u64)>> = pool.install(|| {
+                batch
+                    .par_chunks(chunk_len)
+                    .map(|chunk| {
+                        chunk
+                            .iter()
+                            .filter_map(|&pos_id| {
+                                let uid = (pos_id >> 32) as usize;
+                                let rel = (pos_id & 0xffff_ffff) as usize;
+                                let bytes = encoded_unitigs.unitig_minimizer_at(uid, rel)?;
+                                Some((mphf.lookup(&bytes)? as usize, pos_id))
+                            })
+                            .collect()
+                    })
+                    .collect()
+            });
+            for chunk in events {
+                for (bucket, pos_id) in chunk {
+                    minz_positions.push_at(minz_cursors, bucket, pos_id);
+                }
+            }
+            batch.clear();
+        };
+        for &pos in &bmp_unitigs[0] {
+            let pos = u64::from(pos);
+            advance_unitig_state(&mut state, encoded_unitigs, pos);
+            let rel = pos - state.total_unitig_len;
+            batch.push(((state.unitig_id as u64) << 32) | rel);
+            if batch.len() >= LOAD_BATCH_POSITIONS {
+                flush(&mut batch);
+            }
+        }
+        flush(&mut batch);
+        return;
+    }
 
     let states = precompute_unitig_block_states(bmp_unitigs, encoded_unitigs);
     let cursors = minz_cursors
@@ -954,8 +1104,8 @@ fn populate_unitig_minimizer_storage(
                 let pos = base + pos_bmp as u64;
                 advance_unitig_state(&mut state, encoded_unitigs, pos);
                 let rel = (pos - state.total_unitig_len) as usize;
-                if let Some(bytes) = encoded_unitigs.unitig_minimizers.get(state.unitig_id, rel)
-                    && let Some(idx) = mphf.lookup(bytes)
+                if let Some(bytes) = encoded_unitigs.unitig_minimizer_at(state.unitig_id, rel)
+                    && let Some(idx) = mphf.lookup(&bytes)
                 {
                     let pos_id = ((state.unitig_id as u64) << 32) | rel as u64;
                     let slot = cursors[idx as usize].fetch_add(1, Ordering::Relaxed);
@@ -986,8 +1136,8 @@ fn populate_kmer_minimizer_counts(
                 let pos = base + pos_bmp as u64;
                 let km_id = (pos / ctx.km_glen as u64) as usize;
                 let km_pos = (pos % ctx.km_glen as u64) as usize;
-                if let Some(bytes) = ctx.km_minimizers.get(km_id, km_pos)
-                    && let Some(idx) = ctx.mphf.lookup(bytes)
+                if let Some(bytes) = ctx.km_bases.minimizer_at(km_id, km_pos, ctx.g)
+                    && let Some(idx) = ctx.mphf.lookup(&bytes)
                 {
                     minz_counts[idx as usize] += 1;
                 }
@@ -1035,8 +1185,8 @@ fn populate_kmer_minimizer_storage(
                 let pos = base + pos_bmp as u64;
                 let km_id = (pos / ctx.km_glen as u64) as usize;
                 let km_pos = (pos % ctx.km_glen as u64) as usize;
-                if let Some(bytes) = ctx.km_minimizers.get(km_id, km_pos)
-                    && let Some(idx) = ctx.mphf.lookup(bytes)
+                if let Some(bytes) = ctx.km_bases.minimizer_at(km_id, km_pos, ctx.g)
+                    && let Some(idx) = ctx.mphf.lookup(&bytes)
                 {
                     let pos_id = ((km_id as u64) << 32) | 0x8000_0000 | km_pos as u64;
                     minz_positions.push_at(minz_cursors, idx as usize, pos_id);
@@ -1059,8 +1209,8 @@ fn populate_kmer_minimizer_storage(
                 let pos = base + pos_bmp as u64;
                 let km_id = (pos / ctx.km_glen as u64) as usize;
                 let km_pos = (pos % ctx.km_glen as u64) as usize;
-                if let Some(bytes) = ctx.km_minimizers.get(km_id, km_pos)
-                    && let Some(idx) = ctx.mphf.lookup(bytes)
+                if let Some(bytes) = ctx.km_bases.minimizer_at(km_id, km_pos, ctx.g)
+                    && let Some(idx) = ctx.mphf.lookup(&bytes)
                 {
                     let pos_id = ((km_id as u64) << 32) | 0x8000_0000 | km_pos as u64;
                     let slot = cursors[idx as usize].fetch_add(1, Ordering::Relaxed);
@@ -1094,8 +1244,8 @@ fn collect_unitig_batch_counts(
                 for &pos_id in chunk {
                     let unitig_id = (pos_id >> 32) as usize;
                     let rel = (pos_id & 0xffff_ffff) as usize;
-                    if let Some(bytes) = encoded_unitigs.unitig_minimizers.get(unitig_id, rel)
-                        && let Some(idx) = mphf.lookup(bytes)
+                    if let Some(bytes) = encoded_unitigs.unitig_minimizer_at(unitig_id, rel)
+                        && let Some(idx) = mphf.lookup(&bytes)
                     {
                         indices.push(idx as usize);
                     }
@@ -1122,8 +1272,8 @@ fn collect_kmer_batch_counts(
                 for &pos_id in chunk {
                     let km_id = (pos_id >> 32) as usize;
                     let km_pos = (pos_id & 0x7fff_ffff) as usize;
-                    if let Some(bytes) = ctx.km_minimizers.get(km_id, km_pos)
-                        && let Some(idx) = ctx.mphf.lookup(bytes)
+                    if let Some(bytes) = ctx.km_bases.minimizer_at(km_id, km_pos, ctx.g)
+                        && let Some(idx) = ctx.mphf.lookup(&bytes)
                     {
                         indices.push(idx as usize);
                     }
@@ -1276,4 +1426,103 @@ fn decode_kmer(bytes: &[u8], k: usize) -> Vec<u8> {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod loader_order_tests {
+    use super::*;
+
+    #[test]
+    fn count_buffer_becomes_offsets_without_copying() {
+        for counts in [vec![], vec![0], vec![2, 0, 3, 1]] {
+            let mut reserved = Vec::with_capacity(counts.len() + 1);
+            reserved.extend_from_slice(&counts);
+            let ptr = reserved.as_ptr();
+            let index = MinzPositionIndex::from_counts(reserved);
+            assert_eq!(index.offsets.as_ptr(), ptr);
+            assert_eq!(index.len(), counts.len());
+            assert_eq!(index.values.len(), counts.iter().sum());
+            for (bucket, &count) in counts.iter().enumerate() {
+                assert_eq!(index.get(bucket).len(), count);
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_fill_preserves_every_bucket_in_serial_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let fasta = temp.path().join("transcripts.fa");
+        let mut state = 19u64;
+        let mut text = String::new();
+        for transcript in 0..5 {
+            text.push_str(&format!(">tx{transcript}\n"));
+            for _ in 0..2000 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                text.push(b"ACGT"[(state & 3) as usize] as char);
+            }
+            text.push('\n');
+        }
+        std::fs::write(&fasta, text).unwrap();
+        let path = temp.path().join("index.idx");
+        crate::index::build_index(&path, &[fasta], crate::index::IndexBuildOptions::default())
+            .unwrap();
+        let serial = build_bifrost_index_threaded(&path, 1).unwrap();
+        let parallel = build_bifrost_index_threaded(&path, 4).unwrap();
+        assert_eq!(
+            serial.minz_positions.offsets,
+            parallel.minz_positions.offsets
+        );
+        assert_eq!(serial.minz_positions.values, parallel.minz_positions.values);
+        let compact = build_bifrost_index_quant_threaded(&path, false, 4).unwrap();
+        assert!(compact.ec_blocks.is_empty());
+        assert_eq!(
+            serial.minz_positions.offsets,
+            compact.minz_positions.offsets
+        );
+        assert_eq!(serial.minz_positions.values, compact.minz_positions.values);
+        for (uid, blocks) in serial.ec_blocks.iter().enumerate() {
+            for (bid, block) in blocks.iter().enumerate() {
+                assert_eq!(compact.flat_ec.ec(uid, bid), block.ec);
+                assert_eq!(
+                    compact.flat_ec.block_bounds(uid, bid),
+                    Some((block.lb, block.ub))
+                );
+            }
+            assert_eq!(compact.flat_ec.block_bounds(uid, blocks.len()), None);
+        }
+        assert_eq!(compact.flat_ec.block_bounds(usize::MAX, 0), None);
+        let positional = build_bifrost_index_quant_threaded(&path, true, 2).unwrap();
+        assert!(!positional.ec_blocks.is_empty());
+        assert!(positional.has_strand_annotations());
+        for seq in &serial.unitigs {
+            for read in seq.windows(100).step_by(37) {
+                for strand in [
+                    super::super::Strand::Unstranded,
+                    super::super::Strand::Reverse,
+                ] {
+                    for general in [false, true] {
+                        let mut debug_full = super::super::ReadDebugState::default();
+                        let mut debug_compact = super::super::ReadDebugState::default();
+                        let full = super::super::ec_for_read_bifrost(
+                            &serial,
+                            read,
+                            strand,
+                            general.then_some(&mut debug_full),
+                            super::super::PseudoalignOptions::default(),
+                        );
+                        let lean = super::super::ec_for_read_bifrost(
+                            &compact,
+                            read,
+                            strand,
+                            general.then_some(&mut debug_compact),
+                            super::super::PseudoalignOptions::default(),
+                        );
+                        assert_eq!(format!("{full:?}"), format!("{lean:?}"));
+                    }
+                }
+            }
+        }
+    }
 }

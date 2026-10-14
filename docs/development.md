@@ -21,8 +21,8 @@ cargo test --workspace --all-features
 
 ## Release workflow
 
-The crate version lives in `crates/kallistors/Cargo.toml`. Version 0.4.2 is prepared in this
-checkout. Its [release notes](releases/0.4.2.md) describe the fixes, dependency updates,
+The crate version lives in `crates/kallistors/Cargo.toml`. Version 0.5.0 is prepared in this
+checkout. Its [release notes](releases/0.5.0.md) describe the performance changes,
 validation evidence, and remaining compatibility differences.
 
 For a release:
@@ -31,7 +31,7 @@ For a release:
    the README, and `docs/releases/<version>.md`; retain dates and versions on historical reports.
 2. Run the required fmt/clippy/test checks above with the locked dependencies. Run any explicitly
    enabled external-data regressions needed for the changed behavior.
-3. Build and check package publication locally:
+3. Build and check the publication package:
 
    ```bash
    cargo build --locked --release --package kallistors --bin kallistors
@@ -43,7 +43,7 @@ For a release:
    compiles the crate package without publishing. Check that the package includes the license
    text and read fixtures, and excludes downloaded data and generated benchmark outputs.
    Keep `crates/kallistors/LICENSE` identical to the root `LICENSE`.
-4. Commit the reviewed release contents and tag that commit `v0.4.2`. Pushing the tag starts
+4. Commit the reviewed release contents and tag that commit `v0.5.0`. Pushing the tag starts
    publication; the release notes are consumed directly by the binary workflow.
 
 Two GitHub workflows handle release publication:
@@ -111,15 +111,15 @@ commands and the profiling procedure's interpretation.
 
 ## GENCODE v50 comparison and regression workflow
 
-The [local comparison guide](local_read_comparison_2026-10-14.md) documents the three public ENA
+The [read comparison guide](read_comparison_2026-10-14.md) documents the three public ENA
 runs, download checksums, fastp trimming, index building, and multicore timing commands. The
 [fix report](quantification_fixes_2026-10-14.md) records the latest complete EC validation and
 the remaining fragment-sampling differences.
 
 ```bash
-# Optional local R/fastp environment; R is not needed to run kallistors.
+# Optional R/fastp environment; R is not needed to run kallistors.
 mamba env create -f environment.yml
-mamba run -n kallistors-r bash scripts/prepare_local_benchmark.sh
+mamba run -n kallistors-r bash scripts/prepare_benchmark.sh
 
 # Prepare the shared reference with an upstream v0.52.0 executable.
 target/tools/kallisto-0.52.0 index -t 8 \
@@ -132,7 +132,7 @@ KALLISTORS_TEST_BIN="$PWD/target/release/kallistors" \
   cargo test --locked -p kallistors --test single_ttn_regression -- --ignored
 
 # Optional fresh eight-thread comparison; final outputs are copied outside timing.
-python3 scripts/benchmark_local_reads.py \
+python3 scripts/benchmark_reads.py \
   --samples SRR13638690_larger --thread-counts 8 --keep-last-output \
   --out-prefix target/benchmarks/gencode50-release
 ```
@@ -158,7 +158,7 @@ target/release/kallistors trace-reads \
 
 ## Real-data subset parity
 
-Run deterministic paired-prefix parity against the local real dataset:
+Run deterministic paired-prefix parity against the real-read dataset:
 
 ```bash
 python3 scripts/real_subset_parity.py \
@@ -228,3 +228,9 @@ For compatibility validation, run paired quant on the same reads with:
 
 The expected first-order check is exact `run_info.json` count parity. `abundance.tsv` comparisons
 use the same tolerance-based diff workflow described above.
+
+## Performance comparison
+
+The [0.5.0 performance report](performance_0.5.0.md) records eight-thread comparisons
+against original kallisto, CPU contention, complete EC validation and the
+`scripts/benchmark_quant_variants.py` workflow.

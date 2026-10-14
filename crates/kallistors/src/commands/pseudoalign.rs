@@ -91,23 +91,13 @@ pub fn run(
     let load_positional_info = filter
         .map(|v| !v.single_overhang && v.fragment_length > 0)
         .unwrap_or(false);
-    let index = if load_positional_info {
-        if kallisto_direct_kmer {
-            kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(index, true)
-        } else if kallisto_fallback {
-            kallistors::pseudoalign::build_bifrost_index_with_positions_and_kmer(index, true)
-        } else {
-            kallistors::pseudoalign::build_bifrost_index_with_positions_threaded(
-                index, true, threads,
-            )
-        }
-    } else if kallisto_direct_kmer {
-        kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(index, false)
-    } else if kallisto_fallback {
-        kallistors::pseudoalign::build_bifrost_index_with_kmer(index)
-    } else {
-        kallistors::pseudoalign::build_bifrost_index_with_positions_threaded(index, false, threads)
-    }
+    let index = super::build_mapping_index(
+        index,
+        load_positional_info,
+        threads,
+        options,
+        debug_out.is_some(),
+    )
     .map_err(|err| anyhow!("pseudoalign failed: {err}"))?;
     let (res, report) = if let Some(reader2) = reader2.as_mut() {
         if debug_out.is_some() {

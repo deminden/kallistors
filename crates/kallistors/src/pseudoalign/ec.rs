@@ -148,3 +148,77 @@ pub(crate) fn lookup_ec(index: &KmerEcIndex, code: u64) -> Option<&[u32]> {
     }
     None
 }
+
+/// Reuse exact words only when the scanner advances one base; jumps re-encode.
+pub(crate) struct KmerPairCursor {
+    k: usize,
+    mask: u64,
+    previous: Option<(usize, u64, u64)>,
+}
+
+impl KmerPairCursor {
+    pub(crate) fn new(k: usize) -> Self {
+        Self {
+            k,
+            mask: if k == 32 {
+                u64::MAX
+            } else {
+                (1u64 << (2 * k)) - 1
+            },
+            previous: None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn encode(&mut self, kmer: &[u8], pos: usize) -> Option<(u64, u64)> {
+        let codes = if self.k > 0
+            && kmer.len() == self.k
+            && let Some((previous_pos, forward, reverse)) = self.previous
+            && previous_pos.checked_add(1) == Some(pos)
+        {
+            let code = BASE_CODES[kmer[self.k - 1] as usize];
+            if code == INVALID_BASE_CODE {
+                None
+            } else {
+                let code = u64::from(code);
+                Some((
+                    ((forward << 2) | code) & self.mask,
+                    (reverse >> 2) | ((3 - code) << (2 * (self.k - 1))),
+                ))
+            }
+        } else {
+            encode_kmer_pair(kmer)
+        };
+        self.previous = codes.map(|(forward, reverse)| (pos, forward, reverse));
+        codes
+    }
+}
+
+#[cfg(test)]
+mod rolling_read_tests {
+    use super::*;
+
+    #[test]
+    fn adjacent_words_preserve_byte_encoding_with_jumps_and_invalid_bases() {
+        let seq: Vec<u8> = (0..180)
+            .map(|i| b"ACGTacgtN"[(i * i + 3 * i + i / 11) % 9])
+            .collect();
+        let valid: Vec<u8> = (0..180)
+            .map(|i| b"ACGTacgt"[(i * i + 3 * i + i / 11) % 8])
+            .collect();
+        for seq in [&seq, &valid] {
+            for k in 1..=32 {
+                let mut cursor = KmerPairCursor::new(k);
+                let positions = (0..=seq.len() - k).chain([19, 20, 21, 70, 1, 2, 3]);
+                for pos in positions {
+                    let kmer = &seq[pos..pos + k];
+                    assert_eq!(
+                        cursor.encode(kmer, pos),
+                        encode_kmer_pair(kmer),
+                        "k={k} pos={pos}"
+                    );
+                }
+            }
+        }
+    }
+}

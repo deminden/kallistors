@@ -96,9 +96,9 @@ with alternating binary order and the median reported. The final measured abunda
 retained outside the timed region:
 
 ```bash
-python3 scripts/benchmark_local_reads.py \
+python3 scripts/benchmark_reads.py \
   --samples SRR13638690_larger --thread-counts 8 --keep-last-output \
-  --out-prefix target/benchmarks/local-real-2026-10-14/srr13638690-8thread-fixed
+  --out-prefix target/benchmarks/real-reads-2026-10-14/srr13638690-8thread-fixed
 ```
 
 At the user's request, the remaining single-end repetitions were stopped. The paired configuration
@@ -119,7 +119,7 @@ abundance comparison is reported. The complete single-end EC comparison and isol
 quantification regression described above passed.
 
 The final paired quantification outputs are under
-`target/benchmarks/local-real-2026-10-14/srr13638690-8thread-fixed.outputs/`.
+`target/benchmarks/real-reads-2026-10-14/srr13638690-8thread-fixed.outputs/`.
 Paired run and summary TSVs share the `srr13638690-8thread-fixed` prefix. Because the benchmark was
 terminated before its end-of-run write, these TSV timings were recovered from console output,
 rounded to 0.001 seconds; `.status.json` records that limitation and the single-end stop. The runner

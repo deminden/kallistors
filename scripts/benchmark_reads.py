@@ -91,7 +91,7 @@ def main() -> None:
         help="retain each tool's final measured quant output for abundance comparison (copying is untimed)",
     )
     parser.add_argument(
-        "--out-prefix", type=Path, default=Path("target/benchmarks/local-real-2026-10-14/quant")
+        "--out-prefix", type=Path, default=Path("target/benchmarks/real-reads-2026-10-14/quant")
     )
     args = parser.parse_args()
 
@@ -151,9 +151,9 @@ def main() -> None:
         read_pair = samples[sample]
         for read in read_pair:
             if not read.is_file():
-                parser.error(f"missing {sample} trimmed FASTQ: {read}; run scripts/prepare_local_benchmark.sh")
+                parser.error(f"missing {sample} trimmed FASTQ: {read}; run scripts/prepare_benchmark.sh")
 
-    temp_root = (repo / "target/benchmarks/local-real-2026-10-14/tmp").resolve()
+    temp_root = (repo / "target/benchmarks/real-reads-2026-10-14/tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)
     raw_rows: list[dict[str, Any]] = []
     summary_rows: list[dict[str, Any]] = []

@@ -1,10 +1,11 @@
 # Eight-thread paired quantification bottleneck — 2026-10-14
 
-This report covers an unreleased optimization after v0.4.2, based on commit
-`a8795c2165048578c6a72479f83f692cb0dedc79`. The published v0.4.2 binaries do not contain it.
+This report covers the first performance optimization now included in 0.5.0.
+The published v0.4.2 binaries do not contain it. Further changes are described in the
+[0.5.0 performance report](performance_0.5.0.md).
 The input is the same fastp-trimmed SRR13638690 sample (4,411,003 pairs), shared upstream-built
 GENCODE v50 ALL-transcript index (670,670 targets), and Apple Silicon host used in the
-[earlier comparison](local_read_comparison_2026-10-14.md). Every full-read run here uses eight threads.
+[earlier comparison](read_comparison_2026-10-14.md). Every full-read run here uses eight threads.
 
 ## Diagnosis
 
@@ -24,18 +25,10 @@ disabled. Timestamped stderr locates the boundaries between loading, mapping, an
 stores its D-list dummy unitig in the loaded index and uses it when a D-list hit requires it;
 ordinary matching does not perform this Rust reference-wide flag count.
 
-| Stage | kallistors v0.4.2 profile | Fixed kallistors first run | Instrumented upstream |
-| --- | ---: | ---: | ---: |
-| Index graph decode + minimizer count/fill | 7.416 s | 7.609 s | About 5.585 s through startup |
-| Mapping / EC merge | 62.286 s | 16.758 s | About 11.269 s |
-| EM | 9.017 s | 9.015 s | About 31.211 s |
-| Full process wall time | 79.687 s | 34.275 s | 48.733 s |
-
-The Rust stage timers for threaded decompression and pseudoalignment overlap: producer time
-includes queue waits, and the pseudoalignment timer includes worker joining and EC merge. Do not
-sum those two timers. Upstream's boundaries are inferred from stderr timestamps and are not
-identical instrumentation. The baseline wall time includes two three-second sampling captures;
-it is diagnostic evidence, not an unprofiled timing median.
+The upstream profile places mapping at about 11.269 seconds and EM at about 31.211 seconds.
+These stage boundaries are inferred from stderr timestamps rather than Rust's instrumentation.
+Producer and mapping timers overlap, so they should not be summed. Profiles explain bottlenecks;
+the official-binary wall-time comparison below provides the direct performance measurement.
 
 ## Fix and preservation of behavior
 
@@ -74,12 +67,8 @@ All six complete maps remain exact against upstream:
 The full large paired run has 4,411,003 processed fragments, 4,246,701 aligned, and 209,744 unique,
 matching upstream. The comparison JSON is `ec/upstream-summary.json` under the artifact directory.
 
-Paired abundance also remains numerically unchanged from the preserved v0.4.2 binary in the
-first and final measured fixed outputs: all 670,670 effective lengths are identical, maximum
-estimated-count difference is 1.63e-9, and maximum TPM difference is 1.09e-11. Tiny differences reflect floating-point summation order
-with threaded EC collection; the fragment model and observation histogram are unchanged.
-The residual abundance differences from upstream documented in the earlier audit therefore
-remain. This optimization fixes speed, not the separate fragment-sampling policy difference.
+The fragment model and observation histogram are unchanged. Residual abundance differences
+from original kallisto described in the quantification audit remain.
 
 Validation passed:
 
@@ -122,7 +111,7 @@ warmup and one measured run per tool, at eight threads and paired-end only, with
 outside timing. It is a single-run check, not a repeated median or a scaling benchmark:
 
 ```bash
-python3 scripts/benchmark_local_reads.py \
+python3 scripts/benchmark_reads.py \
   --samples SRR13638690_larger --modes paired --thread-counts 8 --runs 1 \
   --keep-last-output --out-prefix target/paired-performance-2026-10-14/quant-comparison
 ```
@@ -143,6 +132,4 @@ artifact directory. The first stage-timed fixed run was also close at 34.275 sec
 focused comparison is not a repeated-median estimate and does not establish performance for
 other datasets or thread counts.
 
-Local profiling artifacts, stage logs, EC maps, comparison JSON, and the preserved v0.4.2 binary
-are under ignored `target/paired-performance-2026-10-14/`. The upstream diagnostic build and its
-tracked patch are documented in [the build guide](kallisto_debug_build.md).
+The diagnostic upstream build and its patch are documented in [the build guide](kallisto_debug_build.md).

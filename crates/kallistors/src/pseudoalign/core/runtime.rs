@@ -1,8 +1,8 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt::Write as _;
 use std::sync::OnceLock;
 
-use super::super::minimizers::minimizers_for_kmer_into;
+use super::super::minimizers::minimizers_for_encoded_kmer_into;
 use super::super::{BifrostIndex, PseudoalignOptions};
 
 // Runtime switches and tiny per-thread caches keep hot read loops allocation-light.
@@ -119,6 +119,12 @@ impl MinimizerCandidateCache {
 
     #[inline]
     fn put(&mut self, key: u64, values: &[([u8; 8], usize)]) {
+        // More ties than the inline capacity must be recomputed in full.
+        if values.len() > 8 {
+            let slot = self.slot(key);
+            self.entries[slot].state = 0;
+            return;
+        }
         let mut entry = MinimizerCandidateCacheEntry {
             key,
             count: values.len().min(8) as u8,
@@ -189,6 +195,8 @@ impl FastKmerMatchCache {
 }
 
 thread_local! {
+    static MPHF_LOOKUP_CACHE: RefCell<MphfLookupCache> = RefCell::new(MphfLookupCache::default());
+    static CACHE_CONTEXT: Cell<Option<(u64, usize, usize)>> = const { Cell::new(None) };
     static FAST_KMER_MATCH_CACHE: RefCell<FastKmerMatchCache> =
         RefCell::new(FastKmerMatchCache::new());
     static BLOCK_LOOKUP_CACHE: RefCell<BlockLookupCache> =
@@ -197,10 +205,52 @@ thread_local! {
         RefCell::new(MinimizerCandidateCache::new());
 }
 
+#[inline]
+pub(crate) fn ensure_cache_context(index: &BifrostIndex) {
+    ensure_cache_context_key((index.cache_id, index.k, index.g));
+}
+
+#[inline]
+fn ensure_cache_context_key(context: (u64, usize, usize)) {
+    CACHE_CONTEXT.with(|owner| {
+        let previous = owner.get();
+        if previous != Some(context) {
+            if previous.is_some() {
+                MPHF_LOOKUP_CACHE
+                    .with(|cache| cache.borrow_mut().entries.fill(MphfCacheEntry::default()));
+                FAST_KMER_MATCH_CACHE.with(|cache| {
+                    cache
+                        .borrow_mut()
+                        .entries
+                        .fill(FastKmerMatchCacheEntry::default())
+                });
+                BLOCK_LOOKUP_CACHE.with(|cache| {
+                    cache
+                        .borrow_mut()
+                        .entries
+                        .fill(BlockLookupCacheEntry::default())
+                });
+                MINIMIZER_CANDIDATE_CACHE.with(|cache| {
+                    cache
+                        .borrow_mut()
+                        .entries
+                        .fill(MinimizerCandidateCacheEntry::default())
+                });
+            }
+            owner.set(Some(context));
+        }
+    });
+}
+
 pub(crate) fn reset_thread_local_caches() {
+    MPHF_LOOKUP_CACHE.with(|cache| *cache.borrow_mut() = MphfLookupCache::default());
     FAST_KMER_MATCH_CACHE.with(|tl| *tl.borrow_mut() = FastKmerMatchCache::new());
     BLOCK_LOOKUP_CACHE.with(|tl| *tl.borrow_mut() = BlockLookupCache::new());
     MINIMIZER_CANDIDATE_CACHE.with(|tl| *tl.borrow_mut() = MinimizerCandidateCache::new());
+}
+
+pub(crate) fn with_mphf_lookup_cache<T>(f: impl FnOnce(&mut MphfLookupCache) -> T) -> T {
+    MPHF_LOOKUP_CACHE.with(|cache| f(&mut cache.borrow_mut()))
 }
 
 pub(crate) fn read_fast_match_cache(key: u64, flags: u8) -> Option<Option<FastKmerMatch>> {
@@ -309,6 +359,7 @@ pub(crate) fn minimizer_candidates_cached_into_with_code(
     kmer: &[u8],
     g: usize,
     fwd_code: u64,
+    rev_code: u64,
     out: &mut Vec<([u8; 8], usize)>,
     cache_disabled: bool,
 ) -> bool {
@@ -327,7 +378,7 @@ pub(crate) fn minimizer_candidates_cached_into_with_code(
             return true;
         }
     }
-    if !minimizers_for_kmer_into(kmer, g, out) {
+    if !minimizers_for_encoded_kmer_into(kmer, g, fwd_code, rev_code, out) {
         return false;
     }
     if !cache_disabled {
@@ -350,4 +401,47 @@ pub(crate) fn minimizer_bucket_has_overcrowded_marker(
         .get(bucket_idx)
         .iter()
         .any(|&pos_id| (pos_id >> 32) as u32 == u32::MAX && (pos_id & 0x8000_0000) != 0)
+}
+
+#[cfg(test)]
+mod cache_context_tests {
+    use super::*;
+
+    #[test]
+    fn cache_entries_never_cross_index_or_encoding_context() {
+        reset_thread_local_caches();
+        ensure_cache_context_key((100, 31, 23));
+        write_fast_match_cache(
+            42,
+            15,
+            Some(FastKmerMatch {
+                unitig_id: 7,
+                ..FastKmerMatch::default()
+            }),
+        );
+        MINIMIZER_CANDIDATE_CACHE.with(|cache| cache.borrow_mut().put(42, &[([1; 8], 3)]));
+        BLOCK_LOOKUP_CACHE.with(|cache| cache.borrow_mut().put(7, 3, 0, 0, 10));
+        ensure_cache_context_key((100, 31, 23));
+        assert_eq!(
+            read_fast_match_cache(42, 15).flatten().unwrap().unitig_id,
+            7
+        );
+        ensure_cache_context_key((101, 31, 23));
+        assert!(read_fast_match_cache(42, 15).is_none());
+        assert!(MINIMIZER_CANDIDATE_CACHE.with(|cache| cache.borrow().get(42).is_none()));
+        assert!(BLOCK_LOOKUP_CACHE.with(|cache| cache.borrow().get(7, 3).is_none()));
+        write_fast_match_cache(42, 15, None);
+        ensure_cache_context_key((101, 31, 21));
+        assert!(read_fast_match_cache(42, 15).is_none());
+    }
+
+    #[test]
+    fn candidate_cache_never_truncates_a_tie_list() {
+        let mut cache = MinimizerCandidateCache::new();
+        cache.put(42, &[([1; 8], 3); 8]);
+        cache.put(42, &[([1; 8], 3); 9]);
+        assert!(cache.get(42).is_none());
+        cache.put(43, &[([1; 8], 3); 8]);
+        assert_eq!(cache.get(43).unwrap().len(), 8);
+    }
 }

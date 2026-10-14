@@ -4,11 +4,11 @@ This page indexes benchmark results and correctness evidence. The inputs and raw
 part of the repository. Results are machine- and cache-sensitive; compare only runs measured with
 the same inputs, binaries, and timing method.
 
-The local paired/single-end comparison using GENCODE v50 and three ENA human RNA-seq runs is recorded
-in [local_read_comparison_2026-10-14.md](local_read_comparison_2026-10-14.md). Its download,
+The paired/single-end comparison using GENCODE v50 and three ENA human RNA-seq runs is recorded
+in [read_comparison_2026-10-14.md](read_comparison_2026-10-14.md). Its download,
 trimming, repeated index-build, and multicore quantification workflows are implemented by
-`scripts/prepare_local_benchmark.sh`, `scripts/benchmark_local_index.py`, and
-`scripts/benchmark_local_reads.py`.
+`scripts/prepare_benchmark.sh`, `scripts/benchmark_index.py`, and
+`scripts/benchmark_reads.py`.
 
 The [quantification mismatch audit](quantification_mismatch_audit_2026-10-14.md) identifies
 paired-end effective-length differences and a minimal single-end TTN scanner reproducer.
@@ -16,13 +16,26 @@ The [fix report](quantification_fixes_2026-10-14.md) records both corrections, f
 and the repeated eight-thread comparison after the fixes. The original October 14 timing tables
 are historical measurements from before these corrections.
 
-## Current release evidence — 0.4.2
+## 0.5.0 performance evidence
 
-An [unreleased performance fix](paired_performance_fix_2026-10-14.md) removes a per-read on-list
-cardinality scan in both scanners and preserves exact full EC parity in all six cases. A focused
-eight-thread paired check took 48.940 seconds upstream versus 33.955 seconds for the fixed build,
-from one measured run after a warmup per tool. This is documented separately from the published
-v0.4.2 measurements below.
+The [performance report](performance_0.5.0.md) records the implementation included in
+0.5.0: full fastp-trimmed SRR13638690 paired reads, GENCODE v50 ALL transcripts, Apple Silicon,
+eight threads, full process wall time including load, default HDF5 output and shutdown.
+
+| Tool | Full elapsed time | Peak RSS |
+| --- | ---: | ---: |
+| Original kallisto v0.52.0 | 47.673 s | 2.85 GiB |
+| kallistors 0.5.0 | 17.532 s | 3.01 GiB |
+
+**2.72x faster; 63.22% less elapsed time; 5.7% more peak memory (0.16 GiB extra).**
+One measured pair with already warmed inputs and no additional warmup, using macOS
+`/usr/bin/time -l`. RSS covers the complete process lifetime; GiB = 2^30 bytes. CPU contention
+is recorded in the [performance report](performance_0.5.0.md), alongside exact byte counts,
+allocation diagnosis, limitations and reproduction. Complete EC maps match original kallisto in
+all six cases. Earlier diagnosis is in the
+[on-list bottleneck report](paired_performance_fix_2026-10-14.md).
+
+## Historical release evidence — 0.4.2
 
 GENCODE v50 ALL transcripts, shared upstream-built index, fastp-trimmed SRR13638690, Apple Silicon
 macOS, eight threads, one warmup and the median of three measured runs:
@@ -31,8 +44,8 @@ macOS, eight threads, one warmup and the median of three measured runs:
 | --- | ---: | ---: | --- |
 | paired | 46.694 s | 78.123 s | Exact |
 
-The large paired workload remains slower in kallistors. Complete EC count maps match for all three
-October datasets in both read modes. Remaining paired abundance differences arise from fragment
+In this historical 0.4.2 measurement, the large paired workload was slower in kallistors.
+Complete EC count maps match for all three October datasets in both read modes. Remaining paired abundance differences arise from fragment
 observation sampling; the largest paired TPM mass difference fell from 3.94% to 0.080%.
 The large single-end post-fix timing was stopped after warmups, so there is no new single-end
 median. See the [fix report](quantification_fixes_2026-10-14.md) for provenance and limitations.
@@ -135,19 +148,6 @@ Input:
 - Flags: `--single -l 200 -s 20 -t 32`
 - Method: one warmup per binary, alternating measured runs
 
-### Patched Rust vs Original Rust
-
-The original Rust binary was a clean release build from commit
-`82008709d72d5975d997bf05935767d2d63d0308`.
-
-| subset | runs | original Rust mean | patched Rust mean | elapsed delta | original RSS | patched RSS |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,048,576 reads | 5 | `20.10s` | `20.61s` | `+2.5%` slower | `5004 MiB` | `5693 MiB` |
-| 2,097,152 reads | 3 | `23.40s` | `23.37s` | `0.1%` faster | `5020 MiB` | `5702 MiB` |
-
-The speed impact is effectively neutral at larger prefixes, with about `680-690 MiB` more peak RSS
-from loading full positional sets.
-
 ### Patched Rust vs Upstream Kallisto
 
 | subset | runs | upstream kallisto mean | patched Rust mean | elapsed delta | kallisto RSS | patched RSS |
@@ -172,3 +172,9 @@ Result:
 
 Use `scripts/bench_index_build.py` to regenerate an index-build report for another machine, FASTA,
 or thread count.
+
+## Performance methodology
+
+The [0.5.0 performance report](performance_0.5.0.md) records eight-thread comparisons
+against original kallisto, CPU contention, exact EC evidence and the reproducible
+`scripts/benchmark_quant_variants.py` workflow.

@@ -36,6 +36,7 @@ pub(crate) fn ec_for_read_bifrost(
         }
         return None;
     }
+    super::runtime::ensure_cache_context(index);
     if fast_path_enabled(index, dbg.is_some(), options) {
         return ec_for_read_bifrost_fast(index, seq, strand, dbg, options);
     }

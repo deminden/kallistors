@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use super::utils::EcCountMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
@@ -17,7 +17,7 @@ pub fn pseudoalign_paired_naive<R1: ReadSource, R2: ReadSource>(
     reader2: &mut R2,
 ) -> Result<EcCounts> {
     let mut ec_list: Vec<Vec<u32>> = Vec::new();
-    let mut ec_map: HashMap<Vec<u32>, usize> = HashMap::new();
+    let mut ec_map: EcCountMap = EcCountMap::default();
     let mut counts: Vec<u32> = Vec::new();
     let mut reads_processed = 0u64;
     let mut reads_aligned = 0u64;
@@ -301,7 +301,7 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
     strand: Strand,
     options: PseudoalignOptions,
     counts: &mut EcCounts,
-    ec_map: &mut HashMap<Vec<u32>, usize>,
+    ec_map: &mut EcCountMap,
 ) -> Result<()> {
     if left_batch.len() != right_batch.len() {
         return Err(Error::InvalidFormat("paired FASTQ length mismatch".into()));
@@ -477,7 +477,7 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
     options: PseudoalignOptions,
 ) -> Result<EcCounts> {
     let mut ec_list: Vec<Vec<u32>> = Vec::new();
-    let mut ec_map: HashMap<Vec<u32>, usize> = HashMap::new();
+    let mut ec_map: EcCountMap = EcCountMap::default();
     let mut counts: Vec<u32> = Vec::new();
     let mut reads_processed = 0u64;
     let mut reads_aligned = 0u64;

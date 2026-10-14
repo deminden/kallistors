@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use super::utils::EcCountMap;
 use std::thread;
 use std::time::Instant;
 
@@ -50,7 +50,7 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
 
     let threads = threads.max(1);
     let mut merged = EcCounts::new(options.bias);
-    let mut merged_map: HashMap<Vec<u32>, usize> = HashMap::new();
+    let mut merged_map: EcCountMap = EcCountMap::default();
     let mut final_error: Option<Error> = None;
 
     thread::scope(|scope| {
@@ -66,7 +66,7 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
             let rx = work_rx.clone();
             handles.push(scope.spawn(move || -> Result<EcCounts> {
                 let mut acc = EcCounts::new(options.bias);
-                let mut acc_map: HashMap<Vec<u32>, usize> = HashMap::new();
+                let mut acc_map: EcCountMap = EcCountMap::default();
                 while let Ok(batch) = rx.recv() {
                     super::single::pseudoalign_single_end_bifrost_batch_into(
                         index,
@@ -162,7 +162,7 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
 
     let threads = threads.max(1);
     let mut merged = EcCounts::new(options.bias);
-    let mut merged_map: HashMap<Vec<u32>, usize> = HashMap::new();
+    let mut merged_map: EcCountMap = EcCountMap::default();
     let mut final_error: Option<Error> = None;
 
     thread::scope(|scope| {
@@ -180,7 +180,7 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
             let rx = work_rx.clone();
             handles.push(scope.spawn(move || -> Result<EcCounts> {
                 let mut acc = EcCounts::new(options.bias);
-                let mut acc_map: HashMap<Vec<u32>, usize> = HashMap::new();
+                let mut acc_map: EcCountMap = EcCountMap::default();
                 while let Ok((left, right)) = rx.recv() {
                     super::paired::pseudoalign_paired_bifrost_batch_into(
                         index,

@@ -1,7 +1,7 @@
 # Modified kallisto build and debug usage
 
 Two diagnostic workflows are documented here. The October 14 v0.52.0 quantification audit uses
-the tracked patch below. The older `kallisto_src` workflow later on this page uses a separate local
+the tracked patch below. The older `kallisto_src` workflow later on this page uses a separate
 patch whose CLI tracing flags are not in the tracked audit patch or stock upstream kallisto.
 
 ## Reproducible v0.52.0 quantification audit build
@@ -41,7 +41,7 @@ directory. Optional environment controls:
 Numeric transcript and unitig IDs depend on the index. The no-HDF5/no-BAM diagnostic binary is
 for correctness investigation; use the official release executable for benchmark timing.
 
-## Historical local tracing build
+## Historical tracing build
 
 ## Build (macOS arm64 + BAM support)
 

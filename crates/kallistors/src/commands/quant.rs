@@ -96,38 +96,6 @@ pub fn run(args: QuantArgs) -> Result<()> {
     let load_positional_info = filter
         .map(|v| !v.single_overhang && v.fragment_length > 0)
         .unwrap_or(false);
-    let index = if load_positional_info {
-        if args.kallisto_direct_kmer {
-            kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(&args.index, true)
-        } else if args.kallisto_fallback {
-            kallistors::pseudoalign::build_bifrost_index_with_positions_and_kmer(&args.index, true)
-        } else {
-            kallistors::pseudoalign::build_bifrost_index_with_positions_threaded(
-                &args.index,
-                true,
-                args.threads,
-            )
-        }
-    } else if args.kallisto_direct_kmer {
-        kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(&args.index, false)
-    } else if args.kallisto_fallback {
-        kallistors::pseudoalign::build_bifrost_index_with_kmer(&args.index)
-    } else {
-        kallistors::pseudoalign::build_bifrost_index_with_positions_threaded(
-            &args.index,
-            false,
-            args.threads,
-        )
-    }
-    .map_err(|err| anyhow!("pseudoalign failed: {err}"))?;
-
-    let mut reader1 = kallistors::io::open_fastq_reader(reads1)?;
-    let mut reader2 = if let Some(reads2) = reads2 {
-        Some(kallistors::io::open_fastq_reader(reads2)?)
-    } else {
-        None
-    };
-
     let options = kallistors::pseudoalign::PseudoalignOptions {
         min_range: 1,
         do_union: false,
@@ -146,6 +114,22 @@ pub fn run(args: QuantArgs) -> Result<()> {
         bias: args.bias,
         max_bias: 1_000_000,
         investigation: super::investigation_options_from_env(),
+    };
+
+    let index = super::build_mapping_index(
+        &args.index,
+        load_positional_info,
+        args.threads,
+        options,
+        false,
+    )
+    .map_err(|err| anyhow!("pseudoalign failed: {err}"))?;
+
+    let mut reader1 = kallistors::io::open_fastq_reader(reads1)?;
+    let mut reader2 = if let Some(reads2) = reads2 {
+        Some(kallistors::io::open_fastq_reader(reads2)?)
+    } else {
+        None
     };
 
     let start = Instant::now();
@@ -211,7 +195,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
     };
     let result = {
         let _em_timing = kallistors::timing::scoped(kallistors::timing::Stage::Em);
-        kallistors::quant::em_quantify_with_fragment_histogram(
+        kallistors::quant::em_quantify_with_fragment_histogram_threaded(
             &ec_input,
             &index.transcript_lengths,
             transcript_seqs.as_deref(),
@@ -222,6 +206,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
                 fragment_length_hist.as_deref()
             },
             quant_options,
+            args.threads,
         )?
     };
 

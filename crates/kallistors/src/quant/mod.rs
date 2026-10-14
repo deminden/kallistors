@@ -13,6 +13,7 @@ use crate::index::Index;
 use crate::pseudoalign::StrandSpecific;
 use crate::{Error, Result};
 use hdf5_pure::{CharacterSet, DatasetBuilder, Datatype, FileBuilder, StringPadding};
+use rayon::prelude::*;
 
 const MIN_ALPHA: f64 = 1e-8;
 const ALPHA_LIMIT: f64 = 1e-7;
@@ -28,9 +29,56 @@ struct EmMultiEc {
 
 struct EmWork {
     singleton_alpha: Vec<f64>,
+    active_transcripts: Vec<usize>,
     multi_ecs: Vec<EmMultiEc>,
     multi_transcripts: Vec<usize>,
     multi_weights: Vec<f64>,
+}
+
+// Each transcript's incoming edges retain their original EC/edge order.
+// Independent transcript sums can then run concurrently without reordering f64 additions.
+struct EmIncoming {
+    offsets: Vec<usize>,
+    edge_indices: Vec<usize>,
+    ec_indices: Vec<usize>,
+    weights: Vec<f64>,
+}
+
+impl EmIncoming {
+    fn new(work: &EmWork) -> Self {
+        let mut offsets = vec![0; work.singleton_alpha.len() + 1];
+        for &tr in &work.multi_transcripts {
+            offsets[tr + 1] += 1;
+        }
+        for tr in 0..work.singleton_alpha.len() {
+            offsets[tr + 1] += offsets[tr];
+        }
+        let mut cursors = offsets[..work.singleton_alpha.len()].to_vec();
+        let edges = work.multi_transcripts.len();
+        let mut incoming = Self {
+            offsets,
+            edge_indices: vec![0; edges],
+            ec_indices: vec![0; edges],
+            weights: vec![0.0; edges],
+        };
+        for (ec_id, ec) in work.multi_ecs.iter().enumerate() {
+            for edge in ec.transcript_range {
+                let tr = work.multi_transcripts[edge];
+                let slot = cursors[tr];
+                cursors[tr] += 1;
+                incoming.edge_indices[slot] = edge;
+                incoming.ec_indices[slot] = ec_id;
+                incoming.weights[slot] = work.multi_weights[edge];
+            }
+        }
+        incoming
+    }
+
+    fn refresh_weights(&mut self, work: &EmWork) {
+        for (weight, &edge) in self.weights.iter_mut().zip(&self.edge_indices) {
+            *weight = work.multi_weights[edge];
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -492,6 +540,28 @@ pub fn em_quantify_with_fragment_histogram(
     fragment_length_hist: Option<&[u32]>,
     options: QuantOptions,
 ) -> Result<QuantResult> {
+    em_quantify_with_fragment_histogram_threaded(
+        input,
+        transcript_lengths,
+        transcript_sequences,
+        bias_counts,
+        fragment_length_hist,
+        options,
+        1,
+    )
+}
+
+/// Quantify with parallel EC denominators and independent transcript updates.
+/// Each transcript retains its original contribution order for exact f64 sums.
+pub fn em_quantify_with_fragment_histogram_threaded(
+    input: &EcCountsInput,
+    transcript_lengths: &[u32],
+    transcript_sequences: Option<&[Vec<u8>]>,
+    bias_counts: Option<&BiasCounts>,
+    fragment_length_hist: Option<&[u32]>,
+    options: QuantOptions,
+    threads: usize,
+) -> Result<QuantResult> {
     let num_trans = transcript_lengths.len();
     if num_trans == 0 {
         return Err(Error::InvalidFormat("no transcripts provided".into()));
@@ -519,6 +589,29 @@ pub fn em_quantify_with_fragment_histogram(
 
     let mut em_work = prepare_em_work(&input.ec_list.classes, &input.counts, &eff_lens);
 
+    let em_pool = if threads > 1 && !em_work.multi_ecs.is_empty() {
+        Some(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .map_err(|err| {
+                    Error::InvalidFormat(format!("failed to build EM thread pool: {err}"))
+                })?,
+        )
+    } else {
+        None
+    };
+    let mut incoming = em_pool.as_ref().map(|_| EmIncoming::new(&em_work));
+    let mut scales = if em_pool.is_some() {
+        vec![None; em_work.multi_ecs.len()]
+    } else {
+        Vec::new()
+    };
+    let mut next_active = if em_pool.is_some() {
+        vec![0.0; em_work.active_transcripts.len()]
+    } else {
+        Vec::new()
+    };
     let mut final_round = false;
     for iter in 0..options.max_iter {
         if options.bias
@@ -537,28 +630,75 @@ pub fn em_quantify_with_fragment_histogram(
             eff_lens = updated_eff;
             post_bias = Some(bias_model);
             refresh_multi_weights(&mut em_work, &eff_lens);
+            if let Some(incoming) = &mut incoming {
+                incoming.refresh_weights(&em_work);
+            }
         }
 
-        next_alpha.copy_from_slice(&em_work.singleton_alpha);
-
-        for ec in &em_work.multi_ecs {
-            let mut denom = 0.0;
-            for i in ec.transcript_range {
-                let tr = em_work.multi_transcripts[i];
-                denom += alpha[tr] * em_work.multi_weights[i];
+        if let (Some(pool), Some(incoming)) = (&em_pool, &incoming) {
+            pool.install(|| {
+                scales
+                    .par_iter_mut()
+                    .zip(&em_work.multi_ecs)
+                    .for_each(|(scale, ec)| {
+                        let transcripts = &em_work.multi_transcripts[ec.transcript_range];
+                        let weights = &em_work.multi_weights[ec.transcript_range];
+                        let mut denom = 0.0;
+                        for (&tr, &weight) in transcripts.iter().zip(weights) {
+                            denom += alpha[tr] * weight;
+                        }
+                        *scale = if denom < TOLERANCE {
+                            None
+                        } else {
+                            Some(ec.count / denom)
+                        };
+                    });
+            });
+            pool.install(|| {
+                next_active
+                    .par_iter_mut()
+                    .zip(&em_work.active_transcripts)
+                    .for_each(|(next, &tr)| {
+                        let mut sum = em_work.singleton_alpha[tr];
+                        let a = alpha[tr];
+                        let range = incoming.offsets[tr]..incoming.offsets[tr + 1];
+                        for (&ec, &weight) in incoming.ec_indices[range.clone()]
+                            .iter()
+                            .zip(&incoming.weights[range])
+                        {
+                            if let Some(scale) = scales[ec] {
+                                sum += weight * a * scale;
+                            }
+                        }
+                        *next = sum;
+                    });
+            });
+            for (&tr, &next) in em_work.active_transcripts.iter().zip(&next_active) {
+                next_alpha[tr] = next;
             }
-            if denom < TOLERANCE {
-                continue;
+        } else {
+            for &tr in &em_work.active_transcripts {
+                next_alpha[tr] = em_work.singleton_alpha[tr];
             }
-            let scale = ec.count / denom;
-            for i in ec.transcript_range {
-                let tr = em_work.multi_transcripts[i];
-                next_alpha[tr] += em_work.multi_weights[i] * alpha[tr] * scale;
+            for ec in &em_work.multi_ecs {
+                let transcripts = &em_work.multi_transcripts[ec.transcript_range];
+                let weights = &em_work.multi_weights[ec.transcript_range];
+                let mut denom = 0.0;
+                for (&tr, &weight) in transcripts.iter().zip(weights) {
+                    denom += alpha[tr] * weight;
+                }
+                if denom < TOLERANCE {
+                    continue;
+                }
+                let scale = ec.count / denom;
+                for (&tr, &weight) in transcripts.iter().zip(weights) {
+                    next_alpha[tr] += weight * alpha[tr] * scale;
+                }
             }
         }
 
         let mut chcount = 0;
-        for i in 0..num_trans {
+        for &i in &em_work.active_transcripts {
             if next_alpha[i] > ALPHA_CHANGE_LIMIT {
                 let rel = (next_alpha[i] - alpha[i]).abs() / next_alpha[i];
                 if rel > ALPHA_CHANGE {
@@ -566,6 +706,11 @@ pub fn em_quantify_with_fragment_histogram(
                 }
             }
             alpha[i] = next_alpha[i];
+        }
+        if iter == 0 {
+            // Unobserved transcripts start with the same uniform prior, but become
+            // zero after the first update and need no further convergence work.
+            alpha.copy_from_slice(&next_alpha);
         }
 
         let stop_em = chcount == 0 && iter > options.min_rounds;
@@ -652,26 +797,28 @@ fn em_quantify_fixed_eff_lens(
 
     let mut final_round = false;
     for iter in 0..max_iter {
-        next_alpha.copy_from_slice(&em_work.singleton_alpha);
+        for &tr in &em_work.active_transcripts {
+            next_alpha[tr] = em_work.singleton_alpha[tr];
+        }
 
         for ec in &em_work.multi_ecs {
+            let transcripts = &em_work.multi_transcripts[ec.transcript_range];
+            let weights = &em_work.multi_weights[ec.transcript_range];
             let mut denom = 0.0;
-            for i in ec.transcript_range {
-                let tr = em_work.multi_transcripts[i];
-                denom += alpha[tr] * em_work.multi_weights[i];
+            for (&tr, &weight) in transcripts.iter().zip(weights) {
+                denom += alpha[tr] * weight;
             }
             if denom < TOLERANCE {
                 continue;
             }
             let scale = ec.count / denom;
-            for i in ec.transcript_range {
-                let tr = em_work.multi_transcripts[i];
-                next_alpha[tr] += em_work.multi_weights[i] * alpha[tr] * scale;
+            for (&tr, &weight) in transcripts.iter().zip(weights) {
+                next_alpha[tr] += weight * alpha[tr] * scale;
             }
         }
 
         let mut chcount = 0;
-        for i in 0..num_trans {
+        for &i in &em_work.active_transcripts {
             if next_alpha[i] > ALPHA_CHANGE_LIMIT {
                 let rel = (next_alpha[i] - alpha[i]).abs() / next_alpha[i];
                 if rel > ALPHA_CHANGE {
@@ -679,6 +826,9 @@ fn em_quantify_fixed_eff_lens(
                 }
             }
             alpha[i] = next_alpha[i];
+        }
+        if iter == 0 {
+            alpha.copy_from_slice(&next_alpha);
         }
 
         let stop_em = chcount == 0 && iter > min_rounds;
@@ -733,8 +883,21 @@ fn prepare_em_work(ec_classes: &[Vec<u32>], counts: &[u32], eff_lens: &[f64]) ->
             });
         }
     }
+    let mut active = vec![false; eff_lens.len()];
+    for (tr, &count) in singleton_alpha.iter().enumerate() {
+        active[tr] = count != 0.0;
+    }
+    for &tr in &multi_transcripts {
+        active[tr] = true;
+    }
+    let active_transcripts = active
+        .into_iter()
+        .enumerate()
+        .filter_map(|(tr, observed)| observed.then_some(tr))
+        .collect();
     EmWork {
         singleton_alpha,
+        active_transcripts,
         multi_ecs,
         multi_transcripts,
         multi_weights,

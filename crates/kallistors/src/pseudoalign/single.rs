@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use super::utils::EcCountMap;
 
 use crate::Result;
 use crate::bias::BiasCounts;
@@ -15,7 +15,7 @@ pub fn pseudoalign_single_end<R: ReadSource>(
     reader: &mut R,
 ) -> Result<EcCounts> {
     let mut ec_list: Vec<Vec<u32>> = Vec::new();
-    let mut ec_map: HashMap<Vec<u32>, usize> = HashMap::new();
+    let mut ec_map: EcCountMap = EcCountMap::default();
     let mut counts: Vec<u32> = Vec::new();
     let mut reads_processed = 0u64;
     let mut reads_aligned = 0u64;
@@ -200,7 +200,7 @@ pub(crate) fn pseudoalign_single_end_bifrost_batch_into(
     filter: Option<FragmentFilter>,
     options: PseudoalignOptions,
     counts: &mut EcCounts,
-    ec_map: &mut HashMap<Vec<u32>, usize>,
+    ec_map: &mut EcCountMap,
 ) {
     for idx in 0..batch.len() {
         let seq = unsafe { batch.seq_unchecked(idx) };
@@ -284,7 +284,7 @@ fn pseudoalign_single_end_bifrost_inner<R: ReadSource>(
     options: PseudoalignOptions,
 ) -> Result<EcCounts> {
     let mut ec_list: Vec<Vec<u32>> = Vec::new();
-    let mut ec_map: HashMap<Vec<u32>, usize> = HashMap::new();
+    let mut ec_map: EcCountMap = EcCountMap::default();
     let mut counts: Vec<u32> = Vec::new();
     let mut reads_processed = 0u64;
     let mut reads_aligned = 0u64;

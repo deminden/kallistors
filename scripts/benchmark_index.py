@@ -60,7 +60,7 @@ def main() -> None:
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument(
-        "--out-prefix", type=Path, default=Path("target/benchmarks/local-real-2026-10-14/index")
+        "--out-prefix", type=Path, default=Path("target/benchmarks/real-reads-2026-10-14/index")
     )
     args = parser.parse_args()
 
@@ -78,7 +78,7 @@ def main() -> None:
         if not binary.is_file():
             parser.error(f"missing {tool} executable: {binary}")
 
-    temp_root = (repo / "target/benchmarks/local-real-2026-10-14/tmp").resolve()
+    temp_root = (repo / "target/benchmarks/real-reads-2026-10-14/tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)
     raw_rows: list[dict[str, Any]] = []
     measured: dict[str, list[tuple[float, int]]] = {tool: [] for tool in binaries}

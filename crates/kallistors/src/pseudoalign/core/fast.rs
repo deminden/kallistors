@@ -2,7 +2,7 @@ use super::super::debug::{
     DroppedHitTrace, JumpDecisionTrace, MinimizerCandidateTrace, ReadDebugState,
     format_positions_sample,
 };
-use super::super::ec::{encode_kmer_pair, intersect_sorted};
+use super::super::ec::{KmerPairCursor, encode_kmer_pair, intersect_sorted};
 use super::super::minimizers::minimizer_tail_for_kmer;
 use super::super::{BifrostIndex, Hit, MatchInfo, PseudoalignOptions, ReadEc, Strand};
 use super::matcher::{
@@ -261,12 +261,12 @@ fn match_kmer_at_pos_fast_uncached_with_codes(
         kmer,
         index.g,
         read_fwd,
+        read_rev,
         min_candidates,
         minimizer_cache_disabled,
     ) {
         return None;
     }
-    let tail_candidate = minimizer_tail_for_kmer(kmer, index.g);
     match_kmer_at_pos_fast_uncached_with_candidates(
         index,
         kmer,
@@ -276,7 +276,6 @@ fn match_kmer_at_pos_fast_uncached_with_codes(
         allow_rev,
         diff,
         min_candidates,
-        tail_candidate,
         cache,
         allow_relaxed,
         allow_tail_minimizer,
@@ -293,7 +292,6 @@ fn match_kmer_at_pos_fast_uncached_with_candidates(
     allow_rev: bool,
     diff: usize,
     min_candidates: &[([u8; 8], usize)],
-    tail_candidate: Option<([u8; 8], usize)>,
     cache: &mut MphfLookupCache,
     allow_relaxed: bool,
     allow_tail_minimizer: bool,
@@ -347,7 +345,8 @@ fn match_kmer_at_pos_fast_uncached_with_candidates(
     if matched.is_some() || !allow_tail_minimizer {
         return matched;
     }
-    if let Some((tail_bytes, tail_pos)) = tail_candidate
+    // The tail is consulted only after the primary candidates fail.
+    if let Some((tail_bytes, tail_pos)) = minimizer_tail_for_kmer(kmer, index.g)
         && !min_candidates
             .iter()
             .any(|&(min_bytes, min_pos)| min_bytes == tail_bytes && min_pos == tail_pos)
@@ -399,11 +398,6 @@ fn match_kmer_at_pos_fast_uncached_with_candidates(
     matched
 }
 
-#[inline]
-fn fast_match_cache_key_from_codes(fwd: u64, rev: u64) -> u64 {
-    fwd ^ rev.rotate_left(17)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn match_kmer_at_pos_fast_with_codes(
     index: &BifrostIndex,
@@ -419,13 +413,18 @@ fn match_kmer_at_pos_fast_with_codes(
     allow_tail_minimizer: bool,
     minimizer_cache_disabled: bool,
     match_cache_disabled: bool,
+    cache_misses: bool,
 ) -> Option<FastKmerMatch> {
-    let cache_key = fast_match_cache_key_from_codes(read_fwd, read_rev);
+    // The full forward word is unique within the owning index/k context.
+    let cache_key = read_fwd;
     let flags = ((allow_forward as u8) << 3)
         | ((allow_rev as u8) << 2)
         | ((allow_relaxed as u8) << 1)
         | (allow_tail_minimizer as u8);
-    if !match_cache_disabled && let Some(cached) = read_fast_match_cache(cache_key, flags) {
+    if !match_cache_disabled
+        && let Some(cached) = read_fast_match_cache(cache_key, flags)
+        && (cache_misses || cached.is_some())
+    {
         return cached;
     }
     let matched = match_kmer_at_pos_fast_uncached_with_codes(
@@ -442,7 +441,7 @@ fn match_kmer_at_pos_fast_with_codes(
         allow_tail_minimizer,
         minimizer_cache_disabled,
     );
-    if !match_cache_disabled {
+    if !match_cache_disabled && (cache_misses || matched.is_some()) {
         write_fast_match_cache(cache_key, flags, matched);
     }
     matched
@@ -452,14 +451,26 @@ pub(crate) fn ec_for_read_bifrost_fast(
     index: &BifrostIndex,
     seq: &[u8],
     strand: Strand,
+    dbg: Option<&mut ReadDebugState>,
+    options: PseudoalignOptions,
+) -> Option<ReadEc> {
+    super::runtime::with_mphf_lookup_cache(|cache| {
+        ec_for_read_bifrost_fast_with_cache(index, seq, strand, dbg, options, cache)
+    })
+}
+
+fn ec_for_read_bifrost_fast_with_cache(
+    index: &BifrostIndex,
+    seq: &[u8],
+    strand: Strand,
     mut dbg: Option<&mut ReadDebugState>,
     options: PseudoalignOptions,
+    cache: &mut MphfLookupCache,
 ) -> Option<ReadEc> {
     let mut current: Vec<u32> = Vec::new();
     let mut next: Vec<u32> = Vec::new();
     let mut min_candidates: Vec<([u8; 8], usize)> = Vec::with_capacity(8);
     let mut jump_candidates: Vec<([u8; 8], usize)> = Vec::with_capacity(8);
-    let mut cache = MphfLookupCache::default();
     let allow_forward_base = strand != Strand::Reverse;
     let allow_rev_base = strand != Strand::Forward;
     let mut has_hit = false;
@@ -483,6 +494,7 @@ pub(crate) fn ec_for_read_bifrost_fast(
         "KALLISTORS_DISABLE_MINIMIZER_CACHE",
     );
     let match_cache_disabled = env_flag(&DISABLE_MATCH_CACHE, "KALLISTORS_DISABLE_MATCH_CACHE");
+    let mut kmer_cursor = KmerPairCursor::new(index.k);
     let mut pos = 0usize;
     let last_pos = seq.len() - index.k;
     while pos <= last_pos {
@@ -501,7 +513,7 @@ pub(crate) fn ec_for_read_bifrost_fast(
             }
         }
         let kmer = &seq[pos..pos + index.k];
-        let kmer_codes = encode_kmer_pair(kmer);
+        let kmer_codes = kmer_cursor.encode(kmer, pos);
         let kmer_in_dlist = index
             .dlist
             .as_ref()
@@ -527,6 +539,7 @@ pub(crate) fn ec_for_read_bifrost_fast(
                 kmer,
                 index.g,
                 read_fwd,
+                read_rev,
                 &mut min_candidates,
                 minimizer_cache_disabled,
             ) {
@@ -534,7 +547,7 @@ pub(crate) fn ec_for_read_bifrost_fast(
                 continue;
             }
             for (min_bytes, min_pos) in &min_candidates {
-                let bucket = minimizer_bucket_idx(index, &mut cache, min_bytes);
+                let bucket = minimizer_bucket_idx(index, cache, min_bytes);
                 let positions_len = bucket
                     .map(|idx| index.minz_positions.get(idx).len())
                     .unwrap_or(0);
@@ -560,7 +573,7 @@ pub(crate) fn ec_for_read_bifrost_fast(
                 });
             }
         }
-        let matched = if let Some(matched) = match_kmer_at_pos_fast_uncached_with_codes(
+        let matched = if let Some(matched) = match_kmer_at_pos_fast_with_codes(
             index,
             kmer,
             read_fwd,
@@ -569,10 +582,12 @@ pub(crate) fn ec_for_read_bifrost_fast(
             allow_rev_base,
             diff,
             &mut min_candidates,
-            &mut cache,
+            cache,
             true,
             !in_backoff,
             minimizer_cache_disabled,
+            match_cache_disabled || dbg.is_some(),
+            false,
         ) {
             matched
         } else if !options.kallisto_strict
@@ -745,11 +760,12 @@ pub(crate) fn ec_for_read_bifrost_fast(
                         allow_rev_base,
                         diff,
                         &mut jump_candidates,
-                        &mut cache,
+                        cache,
                         true,
                         !in_backoff,
                         minimizer_cache_disabled,
                         match_cache_disabled,
+                        true,
                     )
                 });
                 if next_hit.is_none()
@@ -838,11 +854,12 @@ pub(crate) fn ec_for_read_bifrost_fast(
                                         allow_rev_base,
                                         diff,
                                         &mut jump_candidates,
-                                        &mut cache,
+                                        cache,
                                         true,
                                         !in_backoff,
                                         minimizer_cache_disabled,
                                         match_cache_disabled,
+                                        true,
                                     )
                                 });
                             if mid_hit.is_none()
@@ -1023,11 +1040,12 @@ pub(crate) fn ec_for_read_bifrost_fast(
                                         allow_rev_base,
                                         diff,
                                         &mut jump_candidates,
-                                        &mut cache,
+                                        cache,
                                         options.investigation.candidate_reuse,
                                         !in_backoff,
                                         minimizer_cache_disabled,
                                         match_cache_disabled,
+                                        true,
                                     )
                                 });
                             if let Some(scan_hit) = scan_hit {

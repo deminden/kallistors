@@ -8,21 +8,30 @@ A Rust implementation of kallisto-style pseudoalignment and RNA-seq quantificati
 - Quantifies paired-end and single-end reads, with kallisto-style `abundance.tsv`, `run_info.json`,
   and default `abundance.h5` output.
 - Supports single-cell BUS workflows, including supported BAM input and output modes.
-- Version 0.4.2 fixes paired effective-length calculation and a single-end TTN scanner discrepancy.
-  See the [release notes](docs/releases/0.4.2.md) and [changelog](CHANGELOG.md).
+- Version **0.5.0** accelerates index loading, matching and EM while preserving exact EC parity.
+  See the [release notes](docs/releases/0.5.0.md) and [changelog](CHANGELOG.md).
 
-Speed depends on the dataset, thread count, and machine. On Apple Silicon with the full GENCODE v50
-reference, the published v0.4.2 large paired comparison at eight threads took **46.69 s for kallisto versus
-78.12 s for kallistors** (one warmup and the median of three measured runs). Earlier runs showed
-wins for index building and some single-end workloads. See [benchmarks](docs/benchmarks.md) for
-the methods, historical results, and limits of each comparison.
+## Performance
 
-The current development version removes a reference-wide on-list count from every read. A focused
-eight-thread paired check took **33.96 s versus kallisto's 48.94 s**, with one measured run after
-warmups. Full EC parity is preserved across all six documented cases; profiling and timing are in the
-[unreleased paired performance report](docs/paired_performance_fix_2026-10-14.md).
+On Apple Silicon, full paired quantification of **4.41 million fastp-trimmed read pairs** against
+**670,670 GENCODE v50 ALL transcripts** at **8 threads**, including index loading and default HDF5 output:
 
-## Compatibility notes (v0.4.2)
+| Tool | Total elapsed time | Peak RSS |
+| --- | ---: | ---: |
+| Original kallisto v0.52.0 | 47.673 s | 2.85 GiB |
+| kallistors 0.5.0 | 17.532 s | 3.01 GiB |
+
+**2.72x faster; 63.22% less time; 5.7% more peak resident memory.** One measured pair with
+already warmed inputs, using macOS `/usr/bin/time -l`; background CPU activity was recorded.
+Speed and memory depend on workload and hardware. Full EC count maps remain exact in all
+**six paired/single-end cases**.
+
+The [performance report](docs/performance_0.5.0.md) records the method, memory allocation diagnosis,
+performance changes and validation against original kallisto. The
+[initial bottleneck report](docs/paired_performance_fix_2026-10-14.md) explains the per-read on-list
+scan removed in 0.5.0; [benchmarks](docs/benchmarks.md) retain historical release results.
+
+## Compatibility notes (v0.5.0)
 
 Coverage is described below; unlisted kallisto options and modes need their own compatibility checks.
 
@@ -38,7 +47,8 @@ Coverage is described below; unlisted kallisto options and modes need their own 
 | Long-read and fusion detection | Long-read BUS filtering/output is implemented; general long-read quant and fusion detection are not implemented |
 | CLI option coverage | Partial |
 
-Current real-data validation ([October 14 fix report](docs/quantification_fixes_2026-10-14.md)):
+Current real-data validation ([0.5.0 performance validation](docs/performance_0.5.0.md)
+and [0.4.2 quantification corrections](docs/quantification_fixes_2026-10-14.md)):
 
 - Complete nonzero EC count maps match kallisto v0.52.0 for ERR2260014, DRR023395, and SRR13638690
   in both paired and single-end modes, using the same GENCODE v50 ALL-transcript index.
@@ -46,9 +56,8 @@ Current real-data validation ([October 14 fix report](docs/quantification_fixes_
   1.05% to 0.010% on the medium sample, and 3.94% to 0.080% on the largest sample.
 - Kallistors collects all qualifying fragment observations. Upstream samples near its observation
   goal, with multithreaded overshoot, so paired abundance can still differ despite exact EC counts.
-- Small and medium single-end estimates agree within floating-point precision. The large
-  single-end EC map and warmup counters match; its post-fix timing stopped after warmups,
-  and no new full abundance comparison or timing median is reported.
+- Serial and threaded EM regressions agree exactly, including empirical fragment models and
+  bias-weight refresh. A new single-end speed median is not claimed.
 
 Additional recorded validation and output compatibility:
 
@@ -245,10 +254,14 @@ Notes:
 - Instrumented upstream kallisto build notes are in
   [docs/kallisto_debug_build.md](docs/kallisto_debug_build.md).
 - Reproducible downloads, MD5/gzip checks, fastp trimming, and repeated comparisons are documented
-  in [the local comparison guide](docs/local_read_comparison_2026-10-14.md). The optional
+  in [the read comparison guide](docs/read_comparison_2026-10-14.md). The optional
   [R 4.6.1 / fastp environment](environment.yml) supports this workflow; R is not required by the CLI.
 
 ### As a Crate
+
+Existing quantification APIs remain serial. Use `em_quantify_with_fragment_histogram_threaded`
+with an explicit thread count for parallel EM. The CLI `quant -t N` uses N threads for mapping
+and EM in successive phases; default thread count, index format and output layout are unchanged.
 
 Add to `Cargo.toml`:
 ```toml
