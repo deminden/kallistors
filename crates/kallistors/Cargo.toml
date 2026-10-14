@@ -1,6 +1,6 @@
 [package]
 name = "kallistors"
-version = "0.4.1"
+version = "0.4.2"
 description = "A Rust reimplementation of kallisto-style pseudoalignment and RNA-seq quantification."
 readme = "../../README.md"
 edition.workspace = true
@@ -15,20 +15,21 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
-clap = { version = "4.6.4", features = ["derive"] }
-thiserror = "2.0.19"
-croaring-sys = "4.7.1"
+clap = { version = "4.6.7", features = ["derive"] }
+thiserror = "2.0.21"
+croaring-sys = "5.2.2"
 boomphf = "0.6.0"
-flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
-hdf5-pure = "0.21.2"
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
+hdf5-pure = "0.47.0"
 rayon = "1.12.0"
-crossbeam-channel = "0.5.16"
-time = { version = "0.3.54", features = ["formatting", "local-offset"] }
+crossbeam-channel = "0.5.17"
+time = { version = "0.3.55", features = ["formatting", "local-offset"] }
 mimalloc = { version = "0.1.52", features = ["local_dynamic_tls"] }
-noodles-bam = "0.91.0"
-noodles-bgzf = "0.48.0"
-noodles-core = "0.20.0"
-noodles-sam = "0.86.0"
+noodles-bam = "0.96.0"
+noodles-bgzf = "0.52.0"
+noodles-core = "0.21.0"
+noodles-csi = "0.62.0"
+noodles-sam = "0.91.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"

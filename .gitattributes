@@ -1,0 +1,2 @@
+# Patch context lines preserve upstream whitespace, including blank-line prefixes.
+scripts/diagnostics/*.patch -whitespace

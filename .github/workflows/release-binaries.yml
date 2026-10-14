@@ -55,10 +55,18 @@ jobs:
             exit 0
           fi
 
-          gh release create "${TAG_NAME}" \
-            --verify-tag \
-            --title "${TAG_NAME}" \
-            --notes "Release ${TAG_NAME}"
+          notes_file="docs/releases/${TAG_NAME#v}.md"
+          if [[ -f "${notes_file}" ]]; then
+            gh release create "${TAG_NAME}" \
+              --verify-tag \
+              --title "${TAG_NAME}" \
+              --notes-file "${notes_file}"
+          else
+            gh release create "${TAG_NAME}" \
+              --verify-tag \
+              --title "${TAG_NAME}" \
+              --generate-notes
+          fi
 
   build:
     name: Build ${{ matrix.target }}
@@ -112,6 +120,15 @@ jobs:
 
           cp "${binary}" "${dist_dir}/"
           cp README.md LICENSE "${dist_dir}/"
+          if [[ -f CHANGELOG.md ]]; then
+            cp CHANGELOG.md "${dist_dir}/"
+          fi
+          if [[ -f environment.yml ]]; then
+            cp environment.yml "${dist_dir}/"
+          fi
+          if [[ -d docs ]]; then
+            cp -R docs "${dist_dir}/docs"
+          fi
 
           if [[ "${{ matrix.archive }}" == "zip" ]]; then
             powershell -NoProfile -Command "Compress-Archive -Path '${dist_dir}' -DestinationPath '${asset_stem}.zip' -Force"

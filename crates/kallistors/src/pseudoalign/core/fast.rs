@@ -474,6 +474,7 @@ pub(crate) fn ec_for_read_bifrost_fast(
     let mut online_intersection: Vec<u32> = Vec::new();
     let mut has_online_intersection = false;
     let mut backoff_until: Option<usize> = None;
+    let mut fallback_probe_pending = false;
     let mut fallback_rev_buf: Vec<u8> = Vec::new();
     let minimizer_cache_disabled = env_flag(
         &DISABLE_MINIMIZER_CACHE,
@@ -515,6 +516,7 @@ pub(crate) fn ec_for_read_bifrost_fast(
             pos += 1;
             continue;
         };
+        let fallback_probe = std::mem::take(&mut fallback_probe_pending);
         if dlist_dummy.is_some() && kmer_in_dlist {
             append_dummy_hit = true;
         }
@@ -704,6 +706,12 @@ pub(crate) fn ec_for_read_bifrost_fast(
             });
         }
         has_hit = true;
+        // Kallisto probes the next valid k-mer after a failed jump before returning
+        // to its outer jump loop. That probe cannot itself initiate a jump.
+        if fallback_probe {
+            pos += 1;
+            continue;
+        }
         if !accept_for_stream && in_backoff {
             let can_terminal_jump =
                 jump_distance_for_match(index, uid, block_idx, start, forward_strand)
@@ -1064,6 +1072,7 @@ pub(crate) fn ec_for_read_bifrost_fast(
                 }
                 if use_backoff {
                     backoff_until = Some(next_pos);
+                    fallback_probe_pending = true;
                 }
             }
         }
@@ -1074,7 +1083,6 @@ pub(crate) fn ec_for_read_bifrost_fast(
             pos = next_pos.saturating_add(1);
             continue;
         }
-        let _ = in_backoff;
         pos += 1;
     }
 

@@ -264,7 +264,7 @@ fn decode_compressed_sequence(data: &[u8], len: usize) -> Vec<u8> {
 fn decode_kmer(bytes: &[u8], k: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(k);
     let mut longs: Vec<u64> = Vec::with_capacity(bytes.len() / 8);
-    for chunk in bytes.chunks_exact(8) {
+    for chunk in bytes.as_chunks::<8>().0 {
         let mut arr = [0u8; 8];
         arr.copy_from_slice(chunk);
         longs.push(u64::from_le_bytes(arr));

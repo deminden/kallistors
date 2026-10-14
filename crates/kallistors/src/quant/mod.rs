@@ -12,7 +12,7 @@ use crate::ec::EcList;
 use crate::index::Index;
 use crate::pseudoalign::StrandSpecific;
 use crate::{Error, Result};
-use hdf5_pure::{DatasetBuilder, Datatype, FileBuilder};
+use hdf5_pure::{CharacterSet, DatasetBuilder, Datatype, FileBuilder, StringPadding};
 
 const MIN_ALPHA: f64 = 1e-8;
 const ALPHA_LIMIT: f64 = 1e-7;
@@ -273,11 +273,11 @@ fn set_h5_chunking(dataset: &mut DatasetBuilder, len: usize) {
 }
 
 fn fixed_ascii_type(width: usize) -> Datatype {
-    let mut encoded = vec![0x13, 0, 0, 0];
-    encoded.extend_from_slice(&(width as u32).to_le_bytes());
-    Datatype::parse(&encoded)
-        .expect("valid fixed-length ASCII HDF5 datatype")
-        .0
+    Datatype::String {
+        size: width as u32,
+        padding: StringPadding::NullTerminate,
+        charset: CharacterSet::Ascii,
+    }
 }
 
 fn fixed_string_bytes(values: &[&str], width: usize) -> Vec<u8> {
@@ -472,6 +472,26 @@ pub fn em_quantify(
     bias_counts: Option<&BiasCounts>,
     options: QuantOptions,
 ) -> Result<QuantResult> {
+    em_quantify_with_fragment_histogram(
+        input,
+        transcript_lengths,
+        transcript_sequences,
+        bias_counts,
+        None,
+        options,
+    )
+}
+
+/// Quantify using observed fragment lengths for paired-end input, or the supplied
+/// Gaussian fragment model when no empirical histogram is available.
+pub fn em_quantify_with_fragment_histogram(
+    input: &EcCountsInput,
+    transcript_lengths: &[u32],
+    transcript_sequences: Option<&[Vec<u8>]>,
+    bias_counts: Option<&BiasCounts>,
+    fragment_length_hist: Option<&[u32]>,
+    options: QuantOptions,
+) -> Result<QuantResult> {
     let num_trans = transcript_lengths.len();
     if num_trans == 0 {
         return Err(Error::InvalidFormat("no transcripts provided".into()));
@@ -482,11 +502,15 @@ pub fn em_quantify(
         ));
     }
 
-    let means = mean_frag_lens_by_transcript(
-        transcript_lengths,
-        options.mean_fragment_length,
-        options.fragment_length_sd,
-    );
+    let means = if let Some(histogram) = fragment_length_hist {
+        empirical_frag_lens_by_transcript(transcript_lengths, histogram)?
+    } else {
+        mean_frag_lens_by_transcript(
+            transcript_lengths,
+            options.mean_fragment_length,
+            options.fragment_length_sd,
+        )
+    };
     let mut eff_lens = calc_eff_lens(transcript_lengths, &means);
     let mut post_bias = None;
 
@@ -828,6 +852,32 @@ fn mean_frag_lens_by_transcript(lengths: &[u32], mean: f64, sd: f64) -> Vec<f64>
             }
         })
         .collect()
+}
+
+fn empirical_frag_lens_by_transcript(lengths: &[u32], histogram: &[u32]) -> Result<Vec<f64>> {
+    let mut count = 0u64;
+    let mut mass = 0.0;
+    let mut truncated_means = Vec::with_capacity(histogram.len());
+    for (length, &observations) in histogram.iter().enumerate() {
+        count += u64::from(observations);
+        mass += length as f64 * f64::from(observations);
+        truncated_means.push(if count > 0 { mass / count as f64 } else { 0.0 });
+    }
+    if count == 0 {
+        return Err(Error::InvalidFormat(
+            "fragment length histogram has no observations".into(),
+        ));
+    }
+    let marginal_mean = *truncated_means.last().expect("nonempty histogram");
+    Ok(lengths
+        .iter()
+        .map(|&length| {
+            truncated_means
+                .get(length as usize)
+                .copied()
+                .unwrap_or(marginal_mean)
+        })
+        .collect())
 }
 
 fn trunc_gaussian_fld(start: usize, stop: usize, mean: f64, sd: f64) -> Vec<f64> {

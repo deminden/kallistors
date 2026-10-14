@@ -1,37 +1,58 @@
 # kallistors
-kallistors: a Rust implementation of kallisto-style pseudoalignment and quantification.
 
-## At A Glance
-- Paired-end quant was faster than local upstream `kallisto` in the May 19, 2026 real-data
-  benchmark. The median-of-5 full-file result on `7950X3D`, `-t 32` was `kallisto 55.81s`,
-  `kallistors 32.79s` (`1.70x` faster). See [docs/benchmarks.md](docs/benchmarks.md).
-- Builds pure Rust kallisto v13-compatible transcriptome indexes for normal nucleotide FASTA.
-  Last measured GENCODE build: `kallisto 6:24.81`, `kallistors 2:02.23` (`3.15x` faster,
-  about `18%` lower peak RSS).
-- Quant writes kallisto-style `abundance.tsv`, `run_info.json`, and default `abundance.h5`.
+A Rust implementation of kallisto-style pseudoalignment and RNA-seq quantification.
 
-## Compatibility notes (v0.4.1)
+## At a glance
 
-This is a focused reimplementation at the current stage, not a drop-in replacement for `kallisto`.
+- Builds and loads kallisto v13-compatible transcriptome indexes.
+- Quantifies paired-end and single-end reads, with kallisto-style `abundance.tsv`, `run_info.json`,
+  and default `abundance.h5` output.
+- Supports single-cell BUS workflows, including supported BAM input and output modes.
+- Version 0.4.2 fixes paired effective-length calculation and a single-end TTN scanner discrepancy.
+  See the [release notes](docs/releases/0.4.2.md) and [changelog](CHANGELOG.md).
+
+Speed depends on the dataset, thread count, and machine. On Apple Silicon with the full GENCODE v50
+reference, the latest large paired comparison at eight threads took **46.69 s for kallisto versus
+78.12 s for kallistors** (one warmup and the median of three measured runs). Earlier runs showed
+wins for index building and some single-end workloads. See [benchmarks](docs/benchmarks.md) for
+the methods, historical results, and limits of each comparison.
+
+## Compatibility notes (v0.4.2)
+
+Coverage is described below; unlisted kallisto options and modes need their own compatibility checks.
 
 | Area | Status |
 | --- | --- |
 | Existing `kallisto` index loading | Supported |
 | Pure Rust index building | Supported for normal nucleotide transcript FASTA, v13-compatible output; amino-acid BUS indexes are supported with `index --aa` |
-| Paired-end quant | Implemented; recorded deterministic-prefix and full-file checks have exact `run_info.json` count parity |
-| Single-end quant | Implemented, with synthetic and selected parity coverage |
-| Single-cell BUS output | Implemented for fixed technology presets and kallisto-style custom `-x` triples, including batch/interleaved input, batch barcode sidecars, BAM input tags and missing-tag skips, SmartSeq3 tags, `--num`, `--union`, `--no-jump`, `--unmapped` ratio output, amino-acid `--aa` mode for single-cDNA technologies, first-pass `--long` threshold filtering with `--platform`/`--error-rate` and valid `novel.fastq`, long/paired BUS sidecars, pseudobam output, and projected/sorted genome BAM output with BAI index |
+| Paired-end quant | Uses the observed fragment histogram for effective lengths; complete EC counts match upstream in all three documented GENCODE v50 datasets |
+| Single-end quant | Uses the supplied Gaussian fragment model; complete EC counts match upstream in all three documented GENCODE v50 datasets |
+| Single-cell BUS output | Fixed presets and custom `-x` triples; batch/interleaved FASTQ, BAM input tags, SmartSeq3 tags, supported amino-acid and long-read BUS modes, pseudobam, and projected/sorted genome BAM with BAI or CSI index |
 | Sequence-specific bias correction | Optional with `--bias` and `--transcripts` |
 | Bootstrap / H5 output | Supported for quant; `abundance.h5` is written by default, plaintext bootstrap TSVs with `--plaintext` |
 | Long-read and fusion detection | Long-read BUS filtering/output is implemented; general long-read quant and fusion detection are not implemented |
 | CLI option coverage | Partial |
 
-Recorded real-data validation (May 19, 2026 benchmark snapshot):
-- Paired-end parity is exact on the deterministic `1,048,576`-pair subset across `1, 2, 4, 8, 16,
-  32` threads.
+Current real-data validation ([October 14 fix report](docs/quantification_fixes_2026-10-14.md)):
+
+- Complete nonzero EC count maps match kallisto v0.52.0 for ERR2260014, DRR023395, and SRR13638690
+  in both paired and single-end modes, using the same GENCODE v50 ALL-transcript index.
+- Paired TPM mass difference falls from 4.46% to numerical noise on the compact sample,
+  1.05% to 0.010% on the medium sample, and 3.94% to 0.080% on the largest sample.
+- Kallistors collects all qualifying fragment observations. Upstream samples near its observation
+  goal, with multithreaded overshoot, so paired abundance can still differ despite exact EC counts.
+- Small and medium single-end estimates agree within floating-point precision. The large
+  single-end EC map and warmup counters match; its post-fix timing stopped after warmups,
+  and no new full abundance comparison or timing median is reported.
+
+Additional recorded validation and output compatibility:
+
+- In the May 19 GENCODE v49 snapshot, paired-end parity is exact on the deterministic
+  `1,048,576`-pair subset across `1, 2, 4, 8, 16, 32` threads.
 - The recorded full-file paired check matches kallisto counts exactly:
   `n_processed=4,408,640`, `n_pseudoaligned=4,244,771`, `n_unique=276,251`.
-- The measured full-file runtime was faster than local upstream `kallisto` in that snapshot.
+- The historical May 19 Linux/GENCODE v49 snapshot was faster at 32 threads; it is documented
+  separately from the current Apple Silicon/GENCODE v50 results.
 - Pure Rust index output is accepted by both `kallistors` and standard `MAX_KMER_SIZE=32` upstream
   `kallisto inspect/quant` builds on the reduced real subset and the GENCODE validation path.
   Generated indexes are format-compatible for that compile-time width, not byte-identical to
@@ -59,7 +80,7 @@ Building or installing from source requires Rust 1.97 or newer. The project uses
 # Download prebuilt binaries from GitHub Releases, or install the CLI from source.
 #
 # Install the CLI from git
-cargo install --git https://github.com/deminden/kallistors kallistors
+cargo install --locked --git https://github.com/deminden/kallistors kallistors
 
 # Build a kallisto-compatible transcriptome index
 kallistors index \
@@ -111,7 +132,7 @@ kallistors bus \
     --pseudobam \
     reads_1.fq reads_2.fq
 
-# Project pseudobam placements to genome coordinates and write pseudoalignments.bam.bai
+# Project pseudobam placements to genome coordinates and write a BAI or CSI index
 kallistors bus \
     -i path/to/index.idx \
     -o genome_bus_out \
@@ -191,9 +212,11 @@ kallistors quant \
 ```
 
 Notes:
-- Versioned GitHub Releases attach native release archives for Linux x86_64, macOS x86_64,
+
+- Versioned [GitHub Releases](https://github.com/deminden/kallistors/releases) attach native release archives for Linux x86_64, macOS x86_64,
   macOS arm64, and Windows x86_64, plus SHA-256 checksum files.
-- Paired-end quant estimates fragment length mean/sd from pseudoaligned pairs.
+- Paired-end quant uses the observed fragment histogram for transcript-specific conditional means
+  and effective lengths. Single-end uses `-l` and `-s` for its Gaussian fragment model.
 - Quant writes `abundance.tsv`, `run_info.json`, and, unless `--plaintext` is set, `abundance.h5`
   in `out_dir` (matching kallisto field names and upstream-readable HDF5 structure).
 - Bootstrap samples use `-b/--bootstrap-samples`; H5 stores bootstrap count vectors under
@@ -209,22 +232,16 @@ Notes:
   until their placement semantics are made explicit.
 
 ### Performance and validation
+
 - Current benchmark tables, raw artifact paths, and methodology are in
   [docs/benchmarks.md](docs/benchmarks.md).
 - Developer-facing trace workflows, abundance diffs, and parity-debug commands are in
   [docs/development.md](docs/development.md).
 - Instrumented upstream kallisto build notes are in
   [docs/kallisto_debug_build.md](docs/kallisto_debug_build.md).
-
-### Parity expectations
-- Synthetic parity: `variants_parity` requires exact aligned-count parity with `kallisto`.
-- Real paired-prefix parity requires exact `n_processed`, `n_pseudoaligned`, and `n_unique` counts at
-  every checked prefix.
-- The isolated full-index paired regression test is opt-in so CI is not forced to load the large
-  local GENCODE index; run it with `KALLISTORS_RUN_REAL_PAIRED_REGRESSION=1 cargo test -p kallistors --test real_paired_regression`.
-- Tests that compare read-level ECs require exact EC equality for aligned reads.
-- Abundance and percentage comparisons use floating-point tolerances where appropriate; exact
-  bit-for-bit `abundance.tsv` parity is not currently claimed.
+- Reproducible downloads, MD5/gzip checks, fastp trimming, and repeated comparisons are documented
+  in [the local comparison guide](docs/local_read_comparison_2026-10-14.md). The optional
+  [R 4.6.1 / fastp environment](environment.yml) supports this workflow; R is not required by the CLI.
 
 ### As a Crate
 
@@ -262,7 +279,7 @@ use kallistors::io::open_fastq_reader;
 use kallistors::pseudoalign::{
     build_bifrost_index, pseudoalign_paired_bifrost_with_options, PseudoalignOptions, Strand,
 };
-use kallistors::quant::{em_quantify, EcCountsInput, QuantOptions};
+use kallistors::quant::{em_quantify_with_fragment_histogram, EcCountsInput, QuantOptions};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let index_path = Path::new("path/to/index.idx");
@@ -285,7 +302,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         counts: ec.counts,
     };
     let lengths: Vec<u32> = meta.transcripts.iter().map(|t| t.length).collect();
-    let quant = em_quantify(&input, &lengths, None, None, QuantOptions::default())?;
+    let quant = em_quantify_with_fragment_histogram(
+        &input,
+        &lengths,
+        None,
+        None,
+        ec.fragment_length_hist.as_deref(),
+        QuantOptions::default(),
+    )?;
 
     println!("reads processed: {}", ec.reads_processed);
     println!("reads aligned: {}", ec.reads_aligned);
@@ -301,10 +325,10 @@ parity workflows are in [docs/development.md](docs/development.md).
 
 ## Contributing
 
-Contributions are very welcome! 
-If you’d like to help improve `kallistors`, feel free to open an issue to discuss ideas, report bugs, or request features.
+Open an issue to discuss ideas, report bugs, or request features.
 
 Pull requests are encouraged, especially for:
+
 - performance improvements
 - correctness / numerical stability fixes
 - additional tests (including cross-validation vs original)

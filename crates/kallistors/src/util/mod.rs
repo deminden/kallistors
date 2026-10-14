@@ -21,7 +21,7 @@ pub fn aa_to_comma_free(seq: &[u8]) -> Vec<u8> {
 
 pub fn nucleotide_to_comma_free(seq: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(seq.len());
-    for codon in seq.chunks_exact(3) {
+    for codon in seq.as_chunks::<3>().0 {
         out.extend_from_slice(nucleotide_comma_free_codon(codon));
     }
     out

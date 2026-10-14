@@ -762,8 +762,16 @@ impl PseudoBamWriter {
         if self.genome.is_some() {
             let index = noodles_bam::fs::index(&self.path)
                 .map_err(|err| anyhow!("failed to index genomebam: {err}"))?;
-            noodles_bam::bai::fs::write(self.path.with_extension("bam.bai"), &index)
-                .map_err(|err| anyhow!("failed to write genomebam index: {err}"))?;
+            match index {
+                noodles_bam::Index::Bai(index) => {
+                    noodles_bam::bai::fs::write(self.path.with_extension("bam.bai"), &index)
+                        .map_err(|err| anyhow!("failed to write genomebam BAI index: {err}"))?;
+                }
+                noodles_bam::Index::Csi(index) => {
+                    noodles_csi::fs::write(self.path.with_extension("bam.csi"), &index)
+                        .map_err(|err| anyhow!("failed to write genomebam CSI index: {err}"))?;
+                }
+            }
         }
         Ok(())
     }

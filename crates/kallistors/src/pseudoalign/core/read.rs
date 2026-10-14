@@ -62,6 +62,7 @@ pub(crate) fn ec_for_read_bifrost(
     let mut append_dummy_hit = false;
     // Kallisto falls back to incremental scanning after a failed jump; track that window.
     let mut backoff_until: Option<usize> = None;
+    let mut fallback_probe_pending = false;
     // Legacy parity switch kept for CLI compatibility.
     let _kallisto_sparse_hits = options.kallisto_sparse_hits;
 
@@ -99,6 +100,7 @@ pub(crate) fn ec_for_read_bifrost(
             pos += 1;
             continue;
         }
+        let fallback_probe = std::mem::take(&mut fallback_probe_pending);
         let use_revcomp = rev_buf.as_slice() < kmer;
         let kmer_canon = if use_revcomp {
             rev_buf.as_slice()
@@ -689,6 +691,12 @@ pub(crate) fn ec_for_read_bifrost(
             });
         }
         has_hit = true;
+        // Complete the next valid k-mer's fallback probe without starting another
+        // jump, matching kallisto's inner probe followed by its outer jump loop.
+        if fallback_probe {
+            pos += 1;
+            continue;
+        }
         if !accept_for_stream && in_backoff {
             let can_terminal_jump =
                 jump_distance_for_match(index, uid, block_idx, start, forward_strand)
@@ -929,6 +937,7 @@ pub(crate) fn ec_for_read_bifrost(
                 }
                 if use_backoff {
                     backoff_until = Some(next_pos);
+                    fallback_probe_pending = true;
                 }
             }
         }

@@ -1,0 +1,148 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8a7c700..6aff569 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-cmake_minimum_required(VERSION 3.0.0)
++cmake_minimum_required(VERSION 3.5)
+ 
+ project(kallisto)
+ 
+diff --git a/ext/bifrost/CMakeLists.txt b/ext/bifrost/CMakeLists.txt
+index a605f7c..5a88051 100644
+--- a/ext/bifrost/CMakeLists.txt
++++ b/ext/bifrost/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-cmake_minimum_required(VERSION 3.0.0)
++cmake_minimum_required(VERSION 3.5)
+ 
+ project(Bifrost)
+ 
+@@ -35,8 +35,8 @@ endif(COMPILATION_ARCH MATCHES "OFF")
+ 
+ if(ENABLE_AVX2 MATCHES "OFF")
+ 	message("Disabling AVX2 instructions")
+-	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mno-avx2")
+-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mno-avx2")
++	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
++	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+ endif(ENABLE_AVX2 MATCHES "OFF")
+ 
+ # Manages build types
+diff --git a/ext/bifrost/src/DataStorage.tcc b/ext/bifrost/src/DataStorage.tcc
+index 764c9b5..b871b89 100755
+--- a/ext/bifrost/src/DataStorage.tcc
++++ b/ext/bifrost/src/DataStorage.tcc
+@@ -78,7 +78,7 @@ DataStorage<U>::DataStorage(const DataStorage& o) : color_sets(nullptr), shared_
+ 
+         unitig_cs_link = new std::atomic<uint64_t>[sz_link];
+ 
+-        for (size_t i = 0; i != sz_link; ++i) unitig_cs_link[i] = o.sz_link[i].load();
++        for (size_t i = 0; i != sz_link; ++i) unitig_cs_link[i] = o.unitig_cs_link[i].load();
+     }
+ 
+     if ((o.data != nullptr) && (o.sz_cs != 0)){
+diff --git a/src/PlaintextWriter.cpp b/src/PlaintextWriter.cpp
+index ad21f2c..d0c2ad7 100644
+--- a/src/PlaintextWriter.cpp
++++ b/src/PlaintextWriter.cpp
+@@ -1,3 +1,4 @@
++#include <iomanip>
+ #include "PlaintextWriter.h"
+ #include <iomanip>
+ #include <sstream>
+@@ -36,6 +37,7 @@ void plaintext_writer(
+ 
+   std::ofstream of;
+   of.open( out_name );
++  of << std::setprecision(17);
+ 
+   if (!of.is_open()) {
+     std::cerr << "Error: Couldn't open file: " << out_name << std::endl;
+diff --git a/src/ProcessReads.cpp b/src/ProcessReads.cpp
+index 861186b..5521f33 100644
+--- a/src/ProcessReads.cpp
++++ b/src/ProcessReads.cpp
+@@ -990,7 +990,7 @@ void ReadProcessor::operator()() {
+       } else {
+         // get new sequences
+         mp.SR->fetchSequences(buffer, bufsize, seqs, names, quals, flags, umis, readbatch_id,
+-                              mp.opt.pseudobam || mp.opt.fusion);
++                              mp.opt.pseudobam || mp.opt.fusion || std::getenv("KALLISTO_DIAGNOSTIC_READS") || std::getenv("KALLISTO_DIAGNOSTIC_HITS"));
+       }
+ 
+       // release the reader lock
+@@ -1155,6 +1155,19 @@ void ReadProcessor::processBuffer() {
+       mp.outputNovel(ss);
+     }
+ 
++    if (std::getenv("KALLISTO_DIAGNOSTIC_HITS")) {
++      static std::mutex hits_mutex;
++      std::lock_guard<std::mutex> hits_lock(hits_mutex);
++      static std::ofstream hits(std::getenv("KALLISTO_DIAGNOSTIC_HITS"));
++      hits << std::string(names[i].first,names[i].second) << "\tbefore\t";
++      for (auto t : u) hits << t << ",";
++      hits << "\n";
++      for (auto &h : v1) {
++        hits << std::string(names[i].first,names[i].second) << "\thit\t" << h.first.getData()->id << "\t" << h.first.dist << "\t" << h.second << "\t" << h.first.strand << "\t";
++        for (auto t : h.first.getData()->ec[h.first.dist].getIndices()) hits << t << ",";
++        hits << "\n";
++      }
++    }
+     /* --  possibly modify the pseudoalignment  -- */
+     if (!novel || !mp.opt.long_read) {
+       // If we have paired end reads where one end maps or single end reads, check if some
+@@ -1222,6 +1235,13 @@ void ReadProcessor::processBuffer() {
+         doStrandSpecificity(u, mp.opt.strand, v1, v2, comprehensive);
+       }
+ 
++      if (std::getenv("KALLISTO_DIAGNOSTIC_READS") && std::getenv("KALLISTO_DIAGNOSTIC_TID") && u.cardinality() == 1 &&
++          u.maximum() == std::atoi(std::getenv("KALLISTO_DIAGNOSTIC_TID"))) {
++        static std::mutex trace_mutex;
++        std::lock_guard<std::mutex> trace_lock(trace_mutex);
++        static std::ofstream trace(std::getenv("KALLISTO_DIAGNOSTIC_READS"));
++        trace << std::string(names[i].first, names[i].second) << "\t" << std::string(s1,l1) << "\t" << u.maximum() << "\n";
++      }
+       // find the ec
+       if (!u.isEmpty()) {
+         std::lock_guard<std::mutex> lock(mp.transfer_locks[local_id]);
+diff --git a/src/main.cpp b/src/main.cpp
+index 0a54130..e1032a6 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -2836,6 +2836,23 @@ int main(int argc, char *argv[]) {
+         MinCollector collection(index, opt);
+         MasterProcessor MP(index, opt, collection, model);
+         num_processed = ProcessReads(MP, opt);
++        if (std::getenv("KALLISTO_DIAGNOSTIC_ECS")) {
++          std::ofstream diagnostic(opt.output + "/diagnostic.ec_counts.tsv");
++          diagnostic << "#ec_id\tcount\ttranscripts\n";
++          for (const auto &entry : index.ecmapinv) {
++            auto count = collection.counts[entry.second];
++            if (!count) continue;
++            diagnostic << entry.second << "\t" << count << "\t";
++            bool first = true;
++            for (auto transcript : entry.first) {
++              if (!first) diagnostic << ",";
++              diagnostic << transcript;
++              first = false;
++            }
++            diagnostic << "\n";
++          }
++        }
++
+ 
+         // save modified index for future use
+         if (opt.write_index) {
+@@ -2861,6 +2878,11 @@ int main(int argc, char *argv[]) {
+         }
+ 
+         auto fl_means = get_frag_len_means(index.target_lens_, collection.mean_fl_trunc);
++        if (std::getenv("KALLISTO_DIAGNOSTIC_ECS")) {
++          std::ofstream hist(opt.output + "/diagnostic.fragment_lengths.tsv");
++          for (size_t f = 0; f < fld.size(); ++f) hist << f << "\t" << fld[f] << "\n";
++        }
++
+ 
+         EMAlgorithm em(collection.counts, index, collection, fl_means, opt);
+         if (opt.priors != "") {

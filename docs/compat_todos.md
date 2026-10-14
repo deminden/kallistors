@@ -40,6 +40,15 @@ Notes:
 ## Phase D: Quant parity (basic EM)
 - [x] Implement EM on EC counts
 - [x] Validate against kallisto quant on toy data (within tolerance)
+- [x] Use observed paired-end fragment histograms in effective-length calculation; regression tests
+  cover conditional means and command-level paired quantification.
+- [x] Complete the next valid k-mer's fallback probe before resuming jumps in both scanners;
+  the two TTN reads now receive their upstream singleton EC. Full nonzero EC counts match across
+  all three October 14 datasets in paired and single-end modes. See
+  [the fix report](quantification_fixes_2026-10-14.md) for validation and fixtures.
+- [ ] Decide whether to mirror upstream's bounded fragment-observation sampling. Kallistors uses
+  all qualifying observations; this can leave small paired-end abundance differences even with
+  identical EC counts and the same empirical effective-length calculation.
 
 Acceptance test:
 - TPMs/est_counts within tolerance for synthetic data.

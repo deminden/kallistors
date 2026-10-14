@@ -1,0 +1,7 @@
+name: kallistors-r
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - r-base=4.6.1
+  - fastp=1.4.0

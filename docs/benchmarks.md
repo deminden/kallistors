@@ -1,10 +1,41 @@
 # Benchmarks
 
-This page records benchmark results for a local real dataset. The inputs and raw artifacts are not
+This page indexes benchmark results and correctness evidence. The inputs and raw artifacts are not
 part of the repository. Results are machine- and cache-sensitive; compare only runs measured with
 the same inputs, binaries, and timing method.
 
-## Environment
+The local paired/single-end comparison using GENCODE v50 and three ENA human RNA-seq runs is recorded
+in [local_read_comparison_2026-10-14.md](local_read_comparison_2026-10-14.md). Its download,
+trimming, repeated index-build, and multicore quantification workflows are implemented by
+`scripts/prepare_local_benchmark.sh`, `scripts/benchmark_local_index.py`, and
+`scripts/benchmark_local_reads.py`.
+
+The [quantification mismatch audit](quantification_mismatch_audit_2026-10-14.md) identifies
+paired-end effective-length differences and a minimal single-end TTN scanner reproducer.
+The [fix report](quantification_fixes_2026-10-14.md) records both corrections, full EC validation,
+and the repeated eight-thread comparison after the fixes. The original October 14 timing tables
+are historical measurements from before these corrections.
+
+## Current release evidence — 0.4.2
+
+GENCODE v50 ALL transcripts, shared upstream-built index, fastp-trimmed SRR13638690, Apple Silicon
+macOS, eight threads, one warmup and the median of three measured runs:
+
+| Mode | kallisto v0.52.0 | kallistors with 0.4.2 fixes | EC count map |
+| --- | ---: | ---: | --- |
+| paired | 46.694 s | 78.123 s | Exact |
+
+The large paired workload remains slower in kallistors. Complete EC count maps match for all three
+October datasets in both read modes. Remaining paired abundance differences arise from fragment
+observation sampling; the largest paired TPM mass difference fell from 3.94% to 0.080%.
+The large single-end post-fix timing was stopped after warmups, so there is no new single-end
+median. See the [fix report](quantification_fixes_2026-10-14.md) for provenance and limitations.
+
+## Historical May 19, 2026 benchmark
+
+The sections below describe a different host, reference, release snapshot, and timing protocol.
+
+### Environment
 
 - Date: 2026-05-19
 - OS: Linux x86_64

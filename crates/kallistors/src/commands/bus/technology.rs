@@ -389,7 +389,7 @@ fn parse_slice_list(value: &str) -> Result<Vec<SliceSpec>> {
         bail!("technology slice lists must contain triples of file,start,stop");
     }
     let mut specs = Vec::with_capacity(nums.len() / 3);
-    for triple in nums.chunks_exact(3) {
+    for triple in nums.as_chunks::<3>().0 {
         let file = triple[0];
         let start = triple[1];
         let stop = triple[2];

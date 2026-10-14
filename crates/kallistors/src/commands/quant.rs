@@ -211,11 +211,16 @@ pub fn run(args: QuantArgs) -> Result<()> {
     };
     let result = {
         let _em_timing = kallistors::timing::scoped(kallistors::timing::Stage::Em);
-        kallistors::quant::em_quantify(
+        kallistors::quant::em_quantify_with_fragment_histogram(
             &ec_input,
             &index.transcript_lengths,
             transcript_seqs.as_deref(),
             bias.as_ref(),
+            if single {
+                None
+            } else {
+                fragment_length_hist.as_deref()
+            },
             quant_options,
         )?
     };

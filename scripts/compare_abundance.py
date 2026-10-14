@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
+import statistics
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
 
@@ -24,13 +26,87 @@ def load_abundance(path: Path) -> Dict[str, Dict[str, float]]:
             name = row[idx.get(name_key, 0)]
             est_counts = float(row[idx.get("est_counts", 3)])
             tpm = float(row[idx.get("tpm", 4)])
-            data[name] = {"est_counts": est_counts, "tpm": tpm}
+            data[name] = {
+                "est_counts": est_counts,
+                "tpm": tpm,
+                "eff_length": float(row[idx["eff_length"]]) if "eff_length" in idx else 0.0,
+            }
     return data
 
 
 def rel_error(a: float, b: float) -> float:
     denom = max(1.0, a, b)
     return abs(a - b) / denom
+
+
+def audit_summary(
+    kallisto: Dict[str, Dict[str, float]],
+    kallistors: Dict[str, Dict[str, float]],
+    significant_digits: int,
+) -> dict:
+    """Separate output rounding from differences in expressed transcripts and effective lengths."""
+    shared = sorted(kallisto.keys() & kallistors.keys())
+    if not shared:
+        raise ValueError("abundance files have no shared transcript IDs")
+
+    def rounded(value):
+        return float(format(value, f".{significant_digits}g"))
+
+    def quantiles(values):
+        ordered = sorted(values)
+        if not ordered:
+            return {"median": None, "p90": None, "p99": None, "max": None}
+        return {
+            "median": statistics.median(ordered),
+            "p90": ordered[int(0.9 * (len(ordered) - 1))],
+            "p99": ordered[int(0.99 * (len(ordered) - 1))],
+            "max": ordered[-1],
+        }
+
+    result = {
+        "shared_transcripts": len(shared),
+        "missing_from_kallistors": sorted(kallisto.keys() - kallistors.keys()),
+        "missing_from_kallisto": sorted(kallistors.keys() - kallisto.keys()),
+        "comparison_significant_digits": significant_digits,
+        "metrics": {},
+    }
+    for metric in ("est_counts", "tpm", "eff_length"):
+        errors = [abs(kallisto[t][metric] - kallistors[t][metric]) for t in shared]
+        worst = sorted(
+            shared,
+            key=lambda t: abs(kallisto[t][metric] - kallistors[t][metric]),
+            reverse=True,
+        )[:10]
+        result["metrics"][metric] = {
+            "absolute_errors": quantiles(errors),
+            "sum_absolute_error": sum(errors),
+            "unequal_after_rounding": sum(
+                rounded(kallisto[t][metric]) != rounded(kallistors[t][metric])
+                for t in shared
+            ),
+            "largest_differences": [
+                {
+                    "transcript": t,
+                    "kallisto": kallisto[t][metric],
+                    "kallistors": kallistors[t][metric],
+                }
+                for t in worst
+            ],
+        }
+    positive = [t for t in shared if kallisto[t]["tpm"] > 0.0]
+    result["positive_kallisto_tpm_transcripts"] = len(positive)
+    result["positive_tpm_relative_errors"] = quantiles(
+        [
+            abs(kallisto[t]["tpm"] - kallistors[t]["tpm"]) / kallisto[t]["tpm"]
+            for t in positive
+        ]
+    )
+    reference_tpm_sum = sum(kallisto[t]["tpm"] for t in shared)
+    result["tpm_mass_shift_percent"] = (
+        50.0 * result["metrics"]["tpm"]["sum_absolute_error"] / reference_tpm_sum
+        if reference_tpm_sum else None
+    )
+    return result
 
 
 def build_rows(
@@ -62,12 +138,25 @@ def main() -> None:
     parser.add_argument("--kallistors", required=True, help="Path to kallistors abundance.tsv")
     parser.add_argument("--top", type=int, default=50, help="Rows per ranking (default: 50)")
     parser.add_argument(
+        "--summary-json",
+        type=Path,
+        help="Write a quantification audit summary instead of rankings",
+    )
+    parser.add_argument(
+        "--significant-digits",
+        type=int,
+        default=6,
+        help="Precision used to separate text rounding from other differences (default: kallisto's 6)",
+    )
+    parser.add_argument(
         "--sort-by",
         choices=("tpm", "est_counts", "max"),
         default="max",
         help="Ranking metric (default: max)",
     )
     args = parser.parse_args()
+    if args.significant_digits < 1:
+        parser.error("--significant-digits must be positive")
 
     k_path = Path(args.kallisto)
     o_path = Path(args.kallistors)
@@ -80,6 +169,13 @@ def main() -> None:
     kallistors = load_abundance(o_path)
     if not kallisto or not kallistors:
         print("Skipping: empty abundance file(s).")
+        return
+
+    if args.summary_json:
+        summary = audit_summary(kallisto, kallistors, args.significant_digits)
+        args.summary_json.parent.mkdir(parents=True, exist_ok=True)
+        args.summary_json.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        print(f"Wrote audit summary: {args.summary_json}")
         return
 
     metrics = ["est_counts", "tpm"] if args.sort_by == "max" else [args.sort_by]
