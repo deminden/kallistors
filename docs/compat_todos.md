@@ -141,6 +141,11 @@ Notes:
   artifacts and multicore table.
 - Remaining performance work is still mostly in pseudoalignment, FASTQ decompression, and EM;
   future search-loop work should keep both deterministic-prefix and full-file run-info parity exact.
+- The October 14 Apple Silicon follow-up found a separate major cost: both scanners counted the
+  entire on-list for every read. The unreleased fix calculates the dummy ID only when a D-list
+  hit needs it. Full EC maps remain exact in all six GENCODE v50 cases, and a focused eight-thread
+  paired check takes 33.955 seconds versus 48.940 seconds upstream. See the
+  [profiling and validation report](paired_performance_fix_2026-10-14.md).
 
 ## Phase G: Mirror remaining upstream search-loop optimizations
 - [ ] Replace per-k-mer minimizer recomputation with a rolling `minHashIterator`-style state for the common quant path

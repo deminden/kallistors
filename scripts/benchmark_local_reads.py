@@ -67,6 +67,9 @@ def main() -> None:
     parser.add_argument("--index", type=Path, default=Path("data/srr-small/gencode.v50.kallisto.idx"))
     parser.add_argument("--thread-counts", default="1,2,4,8")
     parser.add_argument(
+        "--modes", default="paired,single", help="comma-separated modes: paired,single (default: both)"
+    )
+    parser.add_argument(
         "--samples",
         default="all",
         help="comma-separated sample keys, or 'all' (default): "
@@ -121,6 +124,9 @@ def main() -> None:
             parser.error(f"unknown sample key(s): {', '.join(unknown)}")
         if not selected_samples:
             parser.error("--samples must name at least one sample or be 'all'")
+    selected_modes = [mode.strip() for mode in args.modes.split(",") if mode.strip()]
+    if not selected_modes or set(selected_modes) - {"paired", "single"}:
+        parser.error("--modes must name paired, single, or paired,single")
     thread_counts_by_sample = {
         "ERR2260014_compact": [
             int(value)
@@ -134,8 +140,8 @@ def main() -> None:
     }
     if args.warmups != 1:
         parser.error("this benchmark records exactly one warmup per tool and configuration")
-    if args.runs != 3:
-        parser.error("this benchmark uses three measured runs and reports their median")
+    if args.runs < 1:
+        parser.error("--runs must be positive (default: three measured runs)")
     if not index.is_file():
         parser.error(f"missing shared kallisto index: {index}")
     for tool, binary in binaries.items():
@@ -159,7 +165,7 @@ def main() -> None:
 
     for sample in selected_samples:
         read_pair = samples[sample]
-        for mode in ("paired", "single"):
+        for mode in selected_modes:
             for threads in thread_counts_by_sample[sample]:
                 print(f"{sample} {mode} threads={threads}: warmup", flush=True)
                 for tool, binary in binaries.items():

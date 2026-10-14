@@ -56,7 +56,8 @@ pub(crate) fn ec_for_read_bifrost(
     let mut has_online_intersection = false;
     let mut saw_special_hit = false;
     let mut saw_non_special_hit = false;
-    let dlist_dummy = index.onlist.as_deref().map(onlist_cardinality);
+    // Delay the reference-wide count until a synthetic D-list hit needs its ID.
+    let dlist_onlist = index.onlist.as_deref();
     let mut any_dlist_kmer = false;
     let mut dlist_early_return = false;
     let mut append_dummy_hit = false;
@@ -880,7 +881,7 @@ pub(crate) fn ec_for_read_bifrost(
                     if next_in_dlist {
                         dlist_early_return = true;
                         jump_reason = "next_missing_dlist_early_return";
-                        append_dummy_hit = dlist_dummy.is_some();
+                        append_dummy_hit = dlist_onlist.is_some();
                     }
                     if next_pos >= last_pos {
                         synthetic_hit = Some(Hit {
@@ -953,7 +954,7 @@ pub(crate) fn ec_for_read_bifrost(
 
     // Mirror kallisto's post-loop D-list dummy append in partial mode.
     if !dlist_early_return && any_dlist_kmer && (has_hit || options.do_union) {
-        append_dummy_hit = dlist_dummy.is_some();
+        append_dummy_hit = dlist_onlist.is_some();
     }
 
     if options.discard_special_only && saw_special_hit && !saw_non_special_hit {
@@ -1122,7 +1123,8 @@ pub(crate) fn ec_for_read_bifrost(
     }
 
     // Apply synthetic D-list dummy hits (kallisto um_dummy behavior).
-    if append_dummy_hit && let Some(dummy) = dlist_dummy {
+    if append_dummy_hit && let Some(onlist) = dlist_onlist {
+        let dummy = onlist_cardinality(onlist);
         let ec = [dummy];
         if options.do_union {
             merge_sorted_unique_vec(&mut current, &ec);

@@ -12,10 +12,15 @@ A Rust implementation of kallisto-style pseudoalignment and RNA-seq quantificati
   See the [release notes](docs/releases/0.4.2.md) and [changelog](CHANGELOG.md).
 
 Speed depends on the dataset, thread count, and machine. On Apple Silicon with the full GENCODE v50
-reference, the latest large paired comparison at eight threads took **46.69 s for kallisto versus
+reference, the published v0.4.2 large paired comparison at eight threads took **46.69 s for kallisto versus
 78.12 s for kallistors** (one warmup and the median of three measured runs). Earlier runs showed
 wins for index building and some single-end workloads. See [benchmarks](docs/benchmarks.md) for
 the methods, historical results, and limits of each comparison.
+
+The current development version removes a reference-wide on-list count from every read. A focused
+eight-thread paired check took **33.96 s versus kallisto's 48.94 s**, with one measured run after
+warmups. Full EC parity is preserved across all six documented cases; profiling and timing are in the
+[unreleased paired performance report](docs/paired_performance_fix_2026-10-14.md).
 
 ## Compatibility notes (v0.4.2)
 

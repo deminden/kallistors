@@ -95,6 +95,20 @@ The official kallisto TSV uses six significant digits. Compare with high-precisi
 output when distinguishing floating-point differences from substantive abundance mismatches.
 Exact `run_info.json` counters alone do not establish full EC or abundance parity.
 
+Compare complete EC count tables from `kallistors pseudoalign` and the diagnostic upstream build:
+
+```bash
+python3 scripts/compare_ec_counts.py \
+  --reference /path/to/upstream/diagnostic.ec_counts.tsv \
+  --candidate /path/to/kallistors.ec.tsv \
+  --report target/validation/ec-comparison.json
+```
+
+Both runs must use the same index: transcript IDs are index-specific. The script ignores EC
+numbering, compares counted transcript sets, and exits nonzero on a mismatch. The
+[paired performance report](paired_performance_fix_2026-10-14.md) includes the complete reproduction
+commands and the profiling procedure's interpretation.
+
 ## GENCODE v50 comparison and regression workflow
 
 The [local comparison guide](local_read_comparison_2026-10-14.md) documents the three public ENA

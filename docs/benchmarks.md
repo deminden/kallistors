@@ -18,6 +18,12 @@ are historical measurements from before these corrections.
 
 ## Current release evidence — 0.4.2
 
+An [unreleased performance fix](paired_performance_fix_2026-10-14.md) removes a per-read on-list
+cardinality scan in both scanners and preserves exact full EC parity in all six cases. A focused
+eight-thread paired check took 48.940 seconds upstream versus 33.955 seconds for the fixed build,
+from one measured run after a warmup per tool. This is documented separately from the published
+v0.4.2 measurements below.
+
 GENCODE v50 ALL transcripts, shared upstream-built index, fastp-trimmed SRR13638690, Apple Silicon
 macOS, eight threads, one warmup and the median of three measured runs:
 

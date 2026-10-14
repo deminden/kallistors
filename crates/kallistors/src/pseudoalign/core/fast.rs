@@ -467,7 +467,9 @@ pub(crate) fn ec_for_read_bifrost_fast(
     let mut best_match: Option<MatchInfo> = None;
     let mut first_hit: Option<Hit> = None;
     let mut hits: Vec<Hit> = Vec::new();
-    let dlist_dummy = index.onlist.as_deref().map(onlist_cardinality);
+    // Ordinary reads only need to know whether an on-list exists. Counting every
+    // transcript here would rescan the whole reference for every read.
+    let dlist_onlist = index.onlist.as_deref();
     let mut any_dlist_kmer = false;
     let mut dlist_early_return = false;
     let mut append_dummy_hit = false;
@@ -517,7 +519,7 @@ pub(crate) fn ec_for_read_bifrost_fast(
             continue;
         };
         let fallback_probe = std::mem::take(&mut fallback_probe_pending);
-        if dlist_dummy.is_some() && kmer_in_dlist {
+        if dlist_onlist.is_some() && kmer_in_dlist {
             append_dummy_hit = true;
         }
         if let Some(state) = dbg.as_deref_mut() {
@@ -956,7 +958,7 @@ pub(crate) fn ec_for_read_bifrost_fast(
                         .is_some_and(|(dlist, (fwd, rev))| dlist.contains(&fwd.min(rev)));
                     if next_in_dlist {
                         dlist_early_return = true;
-                        append_dummy_hit = dlist_dummy.is_some();
+                        append_dummy_hit = dlist_onlist.is_some();
                     }
                     if let Some(state) = dbg.as_deref_mut() {
                         state.jump_decisions.push(JumpDecisionTrace {
@@ -1087,7 +1089,7 @@ pub(crate) fn ec_for_read_bifrost_fast(
     }
 
     if !dlist_early_return && any_dlist_kmer && has_hit {
-        append_dummy_hit = dlist_dummy.is_some();
+        append_dummy_hit = dlist_onlist.is_some();
     }
     if !has_hit || hits.is_empty() {
         return None;
@@ -1141,7 +1143,8 @@ pub(crate) fn ec_for_read_bifrost_fast(
         last_block_idx = Some(hit.block_idx);
     }
 
-    if append_dummy_hit && let Some(dummy) = dlist_dummy {
+    if append_dummy_hit && let Some(onlist) = dlist_onlist {
+        let dummy = onlist_cardinality(onlist);
         let ec = [dummy];
         if current.is_empty() {
             current.extend_from_slice(&ec);

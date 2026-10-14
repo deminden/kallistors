@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Remove the per-read scan of the entire transcript on-list in both scanners. Dummy transcript
+  cardinality is calculated only when a synthetic D-list hit needs it.
+- Add a D-list/on-list regression for both scanners and `scripts/compare_ec_counts.py` for exact
+  full EC count comparison independent of EC numbering. All six documented real-read maps
+  remain exact against upstream.
+- Add paired-only benchmark selection with `--modes` and configurable measured repetitions with
+  `--runs`; the defaults remain both read modes and three measured runs after one warmup.
+- Document profiling, the main bottleneck, and validation in the
+  [paired performance report](docs/paired_performance_fix_2026-10-14.md).
+
 ## 0.4.2 — 2026-10-14
 
 ### Fixed
