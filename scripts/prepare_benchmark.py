@@ -77,10 +77,13 @@ def main():
         parser.error('--threads must be positive')
     binary = shutil.which(args.fasterp)
     if not binary and args.fasterp == 'fasterp':
-        tools = Path(__file__).resolve().parents[1] / 'target/tools/fasterp/bin'
-        binary = shutil.which('fasterp', path=str(tools))
+        tools = Path(__file__).resolve().parents[1] / 'target/tools'
+        for name in ('fasterp-fixed', 'fasterp'):
+            binary = shutil.which('fasterp', path=str(tools / name / 'bin'))
+            if binary:
+                break
     if not binary:
-        parser.error('fasterp is missing; install with: cargo install --locked fasterp --version ' + FASTERP_VERSION)
+        parser.error('fasterp is missing; see docs/benchmarks.md#retrieve-and-trim-reads for the pinned build')
     binary = str(Path(binary).resolve())
     version = subprocess.check_output([binary, '--version'], text=True).strip()
     if version != 'fasterp ' + FASTERP_VERSION:

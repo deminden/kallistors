@@ -14,44 +14,36 @@ A Rust implementation of kallisto-style pseudoalignment and RNA-seq quantificati
 
 ## Performance and benchmarking
 
-Quantification uses the requested thread count for mapping and EM. Compact index storage,
-packed matching, bounded input queues and buffered output reduce work and memory use.
-Graph storage is released before EM, and ordinary transcript names are allocated at output;
-every transcript row is retained. Worker caches retain exact keys and all matching modes. Conservative minimizer fingerprints
-reject impossible buckets while preserving candidate order and relaxed matches. After paired
-fragment sampling finishes, counting avoids collecting unused placement records. Independent
-EM components run in parallel without changing transcript arithmetic or convergence rules;
-only bitwise unchanged components skip repeated updates. See
-[quantification details](docs/development.md#quantification).
-On Apple Silicon at eight threads, 4.41 million fasterp-trimmed SRR13638690 read pairs against
-GENCODE v50 ALL took a median **8.80 s**, with **1.15 GiB peak RSS** (one warmup, three measured
-whole-process runs, default TSV/HDF5 output). See the
-[measurement scope and validation](docs/benchmarks.md#eight-thread-quantification-measurement).
+Complete paired quantification on Apple Silicon, eight threads, one warmup and three measured
+runs per tool/library, versus original kallisto v0.52.0 (fasterp-trimmed reads):
 
-Index construction deduplicates byte-proven repeated windows. Large parallel collections losslessly
-pack each completed transcript group before sorting its words. Compact exact lookups, contiguous transcript/EC position
-storage and timely scratch release reduce peak memory. One requested worker pool handles graph
-construction, ECs, minimizers and output. Paths are prepared in parallel and claimed in serial
-order; a single counted start table and compact path/link records preserve deterministic joins.
-Exact prefix ranges bound join searches; location batches span short unitigs. Query scratch is reused
-within bounded worker chunks. FASTA parsing checks ASCII once per input buffer and retains Unicode
-validation and input-order ambiguity replacement. All transcript metadata, exact
-continuations, tied minimizers, wide-value fallbacks and the v13 representation are preserved.
-See [construction details](docs/development.md#index-construction).
-An eight-thread index build of the complete, uncompressed GENCODE v50 ALL reference took a
-median **11.37 s**, with **5.20 GiB peak RSS** and **4.48 GiB peak footprint** on Apple Silicon
-(two opposite-order confirmation sets, each with one warmup and three measured builds).
-The [benchmark guide](docs/benchmarks.md#eight-thread-index-build-measurement) gives the scope,
-phase timings and validation details. Source builds use `target-cpu=native`; release binaries use a
-portable CPU target.
+| Library | Pairs | Current / original time | Speedup | Current / original peak RSS |
+| --- | ---: | ---: | ---: | ---: |
+| SRR13638690 · muscle | 4,410,990 | 8.07 / 45.16 s | 5.60× | 1.22 / 2.85 GiB |
+| SRR1039508 · airway | 22,297,617 | 53.29 / 178.94 s | 3.36× | 1.34 / 3.13 GiB |
+| SRR307903 · fibroblast | 32,878,740 | 71.65 / 212.45 s | 2.97× | 1.33 / 3.09 GiB |
+| SRR10919051 · TT-seq | 10,261,737 | 47.92 / 98.34 s | 2.05× | 9.17 / 14.97 GiB |
 
-The [benchmark guide](docs/benchmarks.md) documents public datasets, read trimming,
-GENCODE cDNA and Pachter Lab mature-plus-nascent references, repeated comparisons with original
-kallisto, phase timing, memory measurement and complete EC validation. Performance depends on the
-input, reference, thread count, build and hardware; compare complete quantification runs.
+The first three libraries use GENCODE v50 ALL; TT-seq uses the official Pachter Lab
+mature-plus-nascent reference. Complete counted EC maps match original exactly for every case.
+Totals include loading, every pair, fragment estimation, EM and default TSV/HDF5 output.
 
-Current release details are in the [0.5.1 notes](docs/releases/0.5.1.md) and
-[changelog](CHANGELOG.md).
+On the small library, current also takes **38.80 vs 93.97 s** at one thread
+(**2.42× faster**). An eight-thread build of full GENCODE v50 ALL takes
+**11.12 vs 123.81 s** (**11.14× faster**), with
+**5.76 vs 7.84 GiB** peak RSS. Original loads the current index with exact EC parity.
+
+Packed index storage, direct Rust `zlib-rs` decoding, cached exact matching, bounded input
+queues, parallel EM and buffered output improve quantification. Construction uses byte-proven
+repeat exclusions, compact graph scratch, batched exact lookups and one requested worker pool.
+See [implementation details](docs/development.md#quantification).
+
+These are source-build measurements (`target-cpu=native`); release CI uses a generic CPU target.
+Performance depends on the dataset, reference, build and hardware. The
+[benchmark guide](docs/benchmarks.md#eight-thread-quantification-measurement) reports memory,
+phase timings, the published v0.5.0 comparison, sampling/output caveats, individual observations
+and reproducible retrieval/trimming commands. Current release details are in the
+[0.5.1 notes](docs/releases/0.5.1.md) and [changelog](CHANGELOG.md).
 
 ## Compatibility notes
 
@@ -61,7 +53,7 @@ for differences from original kallisto.
 | Area | Status |
 | --- | --- |
 | Existing `kallisto` index loading | Supported |
-| Pure Rust index building | Supported for normal nucleotide transcript FASTA, v13-compatible output; amino-acid BUS indexes are supported with `index --aa` |
+| Rust index building | Supported for normal nucleotide transcript FASTA, v13-compatible output; amino-acid BUS indexes are supported with `index --aa` |
 | Paired-end quant | Uses an empirical fragment histogram for effective lengths |
 | Single-end quant | Uses the supplied Gaussian fragment model |
 | Single-cell BUS output | Fixed presets and custom `-x` triples; batch/interleaved FASTQ, BAM input tags, SmartSeq3 tags, supported amino-acid and long-read BUS modes, pseudobam, and projected/sorted genome BAM with BAI or CSI index |
@@ -74,12 +66,12 @@ Current validation and output compatibility:
 
 - Complete EC comparisons use counted transcript sets, independent of EC numbering.
 - Regression coverage includes paired/single-end matching, TTN/AGAP12P fallback probes,
-  abundant-node associations, empirical fragment models, and serial/threaded EM.
+  abundant-node associations, ambiguous jump probes, empirical fragment models, and serial/threaded EM.
   Full-index regression tests are explicitly enabled when the downloaded reference is present.
 - Paired fragment-length estimation follows original's 10,000-observation goal and 8 MiB
   sequence-buffer quotas, including possible concurrent overshoot. Every read contributes
   to EC counting. See [fragment sampling](docs/fragment_length_sampling.md).
-- Pure Rust indexes are checked against standard `MAX_KMER_SIZE=32` upstream builds.
+- Rust-built indexes are checked against standard `MAX_KMER_SIZE=32` upstream builds.
   Format compatibility does not require byte-identical index files.
 - Native HDF5 readback checks target IDs, estimated counts, effective lengths, target lengths
   and run metadata against TSV. Bootstrap output is supported, but its RNG/sample values
@@ -261,7 +253,7 @@ Notes:
 - Instrumented upstream kallisto build notes are in
   [docs/kallisto_debug_build.md](docs/kallisto_debug_build.md).
 - Reproducible downloads, MD5/gzip checks, fasterp trimming, and repeated comparisons are documented
-  in [the benchmark guide](docs/benchmarks.md). Install fasterp separately with Cargo.
+  in [the benchmark guide](docs/benchmarks.md), including the pinned fasterp build.
   Quantification benchmarks require complete EC parity before timing and export JSON/TSV reports.
 
 ### As a Crate

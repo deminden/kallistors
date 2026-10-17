@@ -1,23 +1,5 @@
 [
   {
-    "run_accession": "ERR2260014",
-    "scientific_name": "Homo sapiens",
-    "library_layout": "PAIRED",
-    "library_strategy": "RNA-Seq",
-    "data_directory": "srr-small",
-    "fastq_ftp": "ftp.sra.ebi.ac.uk/vol1/fastq/ERR226/004/ERR2260014/ERR2260014_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/ERR226/004/ERR2260014/ERR2260014_2.fastq.gz",
-    "fastq_md5": "695aee1b6358b4514b488d1008f9c290;b92a4181c93bbde2228891735e0e26b0"
-  },
-  {
-    "run_accession": "DRR023395",
-    "scientific_name": "Homo sapiens",
-    "library_layout": "PAIRED",
-    "library_strategy": "RNA-Seq",
-    "data_directory": "drr023395",
-    "fastq_ftp": "ftp.sra.ebi.ac.uk/vol1/fastq/DRR023/DRR023395/DRR023395_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/DRR023/DRR023395/DRR023395_2.fastq.gz",
-    "fastq_md5": "56fab394ca1e9ddcb077c7064c430d1f;4ee867f3bcd04c2754a8ca65a7b83d91"
-  },
-  {
     "run_accession": "SRR13638690",
     "scientific_name": "Homo sapiens",
     "library_layout": "PAIRED",
@@ -59,5 +41,26 @@
     "fastq_bytes": "2373907470;2386825782",
     "fastq_md5": "a3128a10cb6e05b5f002ff52943bebee;fd9d4e4203e4fe6ee81a8d8de70e7c61",
     "metadata_url": "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRR307903&result=read_run&fields=run_accession,study_accession,experiment_accession,sample_accession,scientific_name,instrument_model,library_layout,library_strategy,library_selection,read_count,base_count,fastq_ftp,fastq_bytes,fastq_md5&format=json"
+  },
+  {
+    "run_accession": "SRR10919051",
+    "study_accession": "PRJNA602480",
+    "experiment_accession": "SRX7586273",
+    "sample_accession": "SAMN13895735",
+    "scientific_name": "Homo sapiens",
+    "instrument_model": "Illumina NovaSeq 6000",
+    "library_layout": "PAIRED",
+    "library_strategy": "RNA-Seq",
+    "library_selection": "cDNA",
+    "read_count": "10566118",
+    "base_count": "3169835400",
+    "fastq_ftp": "ftp.sra.ebi.ac.uk/vol1/fastq/SRR109/051/SRR10919051/SRR10919051_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/SRR109/051/SRR10919051/SRR10919051_2.fastq.gz",
+    "fastq_bytes": "646325391;683368220",
+    "fastq_md5": "3ddafff9df512570cddd16a9d0c92947;acfde1c76a7774a76aef8cd1978dd56d",
+    "data_directory": "srr10919051",
+    "metadata_url": "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRR10919051&result=read_run&fields=run_accession,study_accession,experiment_accession,sample_accession,scientific_name,instrument_model,library_layout,library_strategy,library_selection,read_count,base_count,fastq_ftp,fastq_bytes,fastq_md5&format=json",
+    "assay": "TT-seq; 1-hour 4-thiouridine-labelled nascent RNA",
+    "sample_description": "HEK293 wild-type control 2",
+    "sample_metadata_url": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM4277828"
   }
 ]

@@ -1,0 +1,4395 @@
+{
+  "schema_version": 2,
+  "hardware_family": "Apple Silicon",
+  "platform": "macOS arm64",
+  "power": "AC throughout",
+  "dataset": {
+    "run": "SRR13638690",
+    "trimmer": {
+      "name": "fasterp",
+      "version": "0.2.1",
+      "binary_sha256": "5ccb657394c2472250414310e84518cd7174dd31639c75d1901331b9bfc011c7"
+    },
+    "pairs": 4410990,
+    "targets": 670670,
+    "reference": "GENCODE v50 ALL",
+    "k": 31,
+    "g": 23,
+    "distinct_kmers": 207228052,
+    "trimming_command": [
+      "fasterp",
+      "-i",
+      "SRR13638690_1.fastq.gz",
+      "-I",
+      "SRR13638690_2.fastq.gz",
+      "-o",
+      "SRR13638690_1.trimmed.fastq.gz",
+      "-O",
+      "SRR13638690_2.trimmed.fastq.gz",
+      "--cut-front",
+      "--cut-tail",
+      "--cut-mean-quality",
+      "20",
+      "--cut-window-size",
+      "4",
+      "--length-required",
+      "50",
+      "--qualified-quality-phred",
+      "15",
+      "--unqualified-percent-limit",
+      "40",
+      "--n-base-limit",
+      "5",
+      "--compression-level",
+      "4",
+      "--threads",
+      "8",
+      "--json",
+      "fasterp.json",
+      "--html",
+      "fasterp.html"
+    ],
+    "pairs_before": 4451399
+  },
+  "scope": {
+    "quantification_threads": [
+      1,
+      8
+    ],
+    "index_threads": [
+      8
+    ],
+    "warmups_per_tool_configuration": 1,
+    "measured_runs_per_tool_configuration": 3,
+    "quantification": "Complete paired quantification including index loading, every pair, fragment estimation, EM, full default TSV/HDF5 output and shutdown; retrieval/trimming excluded.",
+    "index": "Complete construction from verified uncompressed full FASTA; decompression excluded.",
+    "rust_timing": "Optional timing enabled for all Rust tools. Released download lacks phase boundaries; those stage times are not inferred.",
+    "phase_statistics": "Independent stage medians may not sum to the whole-process median.",
+    "cpu_contention": "All observations retained; sampled external CPU activity flagged per run.",
+    "reported_index_stages": "Current stages do not overlap. v0.5.0 write includes MPHF work also in minimizer_mphf; its raw reported stages must not be added.",
+    "schedule": "Every current measurement uses the fixed source binary. Large cDNA control medians retain the unchanged three-tool session observations, with fresh original rechecks. TT-seq has a fresh rotated three-tool series. The small current/original one-thread and four-tool eight-thread controls were refreshed after detecting timing drift; earlier legacy one-thread controls are not used for published comparisons. Small original rechecks are also the first refreshed original observations.",
+    "source_consistency": "All current timings, EC checks, native output checks and index compatibility checks use the corrected 0.5.1 source binary identified by its hash.",
+    "quantification_execution_order": [
+      {
+        "tool": "original",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "tool": "original",
+        "threads": 1,
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "tool": "current",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "tool": "current",
+        "threads": 1,
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "tool": "current",
+        "threads": 1,
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "tool": "current",
+        "threads": 1,
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "tool": "current",
+        "threads": 1,
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "tool": "original",
+        "threads": 1,
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "tool": "original",
+        "threads": 1,
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "tool": "original",
+        "threads": 1,
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "tool": "published",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "tool": "previous_native",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "tool": "previous_native",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "tool": "previous_native",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "tool": "previous_native",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3
+      }
+    ],
+    "index_execution_order": [
+      {
+        "tool": "original",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "tool": "previous_native",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "tool": "published",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "tool": "previous_native",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "tool": "previous_native",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "tool": "previous_native",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "tool": "current",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3
+      }
+    ]
+  },
+  "builds": {
+    "binaries": {
+      "current": {
+        "name": "kallistors",
+        "bytes": 4281776,
+        "sha256": "69fbdccd2302a74fc5bf7a48bf34bed6898866c021e6159c1d7bc7e47618edc9",
+        "version": "0.5.1 source build"
+      },
+      "previous_native": {
+        "name": "kallistors",
+        "bytes": 2687840,
+        "sha256": "76ba5d6ff4453dda4827dd8a8f8660db7a60744c72c0883100c9339a6a2da34b",
+        "version": "0.5.0 release tag with phase messages only"
+      },
+      "published": {
+        "name": "kallistors",
+        "bytes": 2720240,
+        "sha256": "d026039129b57d641c7ab04dc4937ed783590afea458295513f2a562d702e53a",
+        "version": "0.5.0 Apple Silicon release download"
+      },
+      "original": {
+        "name": "kallisto",
+        "bytes": 5728088,
+        "sha256": "d63cb85e29b18ef913ac2067882b95a9925b266510d1cbb4a721b71745f7f733",
+        "version": "0.52.0 official Apple Silicon release"
+      }
+    },
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 23.1.1",
+    "source_rustflags": [
+      "-C",
+      "target-cpu=native"
+    ],
+    "published_declared_rustflags": [
+      "-C",
+      "target-cpu=native"
+    ],
+    "published_effective_cpu": "CI runner, not assumed identical to the measurement host",
+    "published_compiler": null,
+    "published_settings_evidence": "v0.5.0 .cargo/config.toml and .github/workflows/release-binaries.yml; workflow does not override the repository flags",
+    "previous_source_tag": "v0.5.0",
+    "previous_source_commit": "f34e60a1faf510d924870abe40e2d55248f242e9",
+    "previous_native_phase_marker_patch_sha256": "9eb8a86ada73b45488354c6b082415b686db86d185b202c4eab73b1a66747a6c",
+    "published_archive_sha256": "611c463a635a75494a6547338cd7f8bb43f0e302bfaa218581053a671e48f945",
+    "published_release": "https://github.com/deminden/kallistors/releases/tag/v0.5.0",
+    "current_production_source_sha256": "07da78be41cf3cf9366dc8c970a973b0e50ff355662550eb63feb4ec89d2a5db",
+    "source_digest_definition": "SHA-256 of sorted production-source relative filename, NUL, exact file bytes, NUL; crates/kallistors/src, both Cargo.toml files, Cargo.lock and .cargo/config.toml."
+  },
+  "inputs": {
+    "quantification_index": {
+      "bytes": 1336081121,
+      "sha256": "bb72c8cb89b5b297dcdfd5d2f8954af5cb608dad8fb486389db6f93076da3233"
+    },
+    "reads_1": {
+      "bytes": 409227247,
+      "sha256": "34d451f0b57bce0c9477dc606b0d5e29ba05de2c6839b79b8870b27524b81ea3"
+    },
+    "reads_2": {
+      "bytes": 454290671,
+      "sha256": "73525b47e1491eab76cd834c9ab148e2dc54169ae6a315305f380bf3f9102eb7"
+    },
+    "index_fasta": {
+      "bytes": 1575713375,
+      "sha256": "179bbe798a0e455d05b9456ab5f7ef51bffdcab6118d4697ea3219181c5e7c93"
+    }
+  },
+  "medians": {
+    "quantification": {
+      "1": {
+        "original": {
+          "wall_seconds": 93.96732499999999,
+          "peak_rss_bytes": 2631057408,
+          "peak_memory_footprint_bytes": 2541275464,
+          "process_user_seconds": 93.38,
+          "process_system_seconds": 0.51,
+          "times": [
+            93.96732499999999,
+            91.789474916,
+            95.47391066600001
+          ],
+          "n": 3,
+          "cpu_flagged": 3,
+          "stages": {
+            "startup_index": 14.360664833000001,
+            "input_setup": 0.010609000000002311,
+            "read_processing": 49.657712875000016,
+            "model_setup": 0.029163791999991417,
+            "em": 28.568626999999992,
+            "output_shutdown": 1.0038649580000083,
+            "model_and_em": 28.597790791999984
+          },
+          "speedup_current_over_this": 2.421984190439946,
+          "rss_reduction_current_vs_this": 0.4791359200931582,
+          "time_reduction_current_vs_this": 0.5871153891312755,
+          "min_seconds": 91.789474916,
+          "max_seconds": 95.47391066600001,
+          "sample_sd_seconds": 1.8523812671465871
+        },
+        "current": {
+          "wall_seconds": 38.79766241699997,
+          "peak_rss_bytes": 1370423296,
+          "peak_memory_footprint_bytes": 1327400472,
+          "process_user_seconds": 38.52,
+          "process_system_seconds": 0.24,
+          "times": [
+            39.23853212500002,
+            38.79766241699997,
+            38.64313812500001
+          ],
+          "n": 3,
+          "cpu_flagged": 2,
+          "stages": {
+            "startup_index": 3.9310438330000466,
+            "input_setup": 0.0002455000000054497,
+            "read_processing": 25.313075209000033,
+            "model_setup": 0.0040932500000110394,
+            "em": 8.99479954200001,
+            "output_shutdown": 0.5793187499999704,
+            "model_and_em": 8.99889279200002
+          },
+          "speedup_current_over_this": 1.0,
+          "rss_reduction_current_vs_this": 0.0,
+          "time_reduction_current_vs_this": 0.0,
+          "min_seconds": 38.64313812500001,
+          "max_seconds": 39.23853212500002,
+          "sample_sd_seconds": 0.30896004905870794
+        }
+      },
+      "8": {
+        "original": {
+          "wall_seconds": 45.158149458,
+          "peak_rss_bytes": 3057287168,
+          "peak_memory_footprint_bytes": 2536245840,
+          "process_user_seconds": 128.99,
+          "process_system_seconds": 0.55,
+          "times": [
+            45.158149458,
+            45.037802666000005,
+            45.25137320799996
+          ],
+          "n": 3,
+          "cpu_flagged": 1,
+          "stages": {
+            "startup_index": 5.062956582999988,
+            "input_setup": 0.01122154199998704,
+            "read_processing": 9.560928542,
+            "model_setup": 0.02943387499999517,
+            "em": 29.406678,
+            "output_shutdown": 1.0411706659999709,
+            "model_and_em": 29.436111874999995
+          },
+          "speedup_current_over_this": 5.599192364344424,
+          "rss_reduction_current_vs_this": 0.5722607474732317,
+          "time_reduction_current_vs_this": 0.8214028140258254,
+          "min_seconds": 45.037802666000005,
+          "max_seconds": 45.25137320799996,
+          "sample_sd_seconds": 0.10707193401237364
+        },
+        "previous_native": {
+          "wall_seconds": 16.998911374999977,
+          "peak_rss_bytes": 3303899136,
+          "peak_memory_footprint_bytes": 2917616472,
+          "process_user_seconds": 110.29,
+          "process_system_seconds": 1.24,
+          "times": [
+            17.095442750000018,
+            16.993725874999996,
+            16.998911374999977
+          ],
+          "n": 3,
+          "cpu_flagged": 2,
+          "stages": {
+            "startup_index": 3.0231787090000353,
+            "input_setup": 0.00021945899999309404,
+            "read_processing": 9.567198082999994,
+            "model_setup": 0.00012020900004472423,
+            "em": 3.7693857500000263,
+            "output_shutdown": 0.6303169579999803,
+            "model_and_em": 3.7695145420000244
+          },
+          "speedup_current_over_this": 2.107707599081118,
+          "rss_reduction_current_vs_this": 0.6041883622442401,
+          "time_reduction_current_vs_this": 0.5255508874020463,
+          "min_seconds": 16.993725874999996,
+          "max_seconds": 17.095442750000018,
+          "sample_sd_seconds": 0.05728804184327131
+        },
+        "published": {
+          "wall_seconds": 17.34060925,
+          "peak_rss_bytes": 3289546752,
+          "peak_memory_footprint_bytes": 2925857576,
+          "process_user_seconds": 112.43,
+          "process_system_seconds": 1.24,
+          "times": [
+            16.886786958000016,
+            17.494620833,
+            17.34060925
+          ],
+          "n": 3,
+          "cpu_flagged": 2,
+          "speedup_current_over_this": 2.1500749714286553,
+          "rss_reduction_current_vs_this": 0.6024614250565301,
+          "time_reduction_current_vs_this": 0.5348999391702456,
+          "min_seconds": 16.886786958000016,
+          "max_seconds": 17.494620833,
+          "sample_sd_seconds": 0.31600006856849977
+        },
+        "current": {
+          "wall_seconds": 8.065118417,
+          "peak_rss_bytes": 1307721728,
+          "peak_memory_footprint_bytes": 1252034168,
+          "process_user_seconds": 57.68,
+          "process_system_seconds": 0.79,
+          "times": [
+            8.065118417,
+            8.240982791000008,
+            8.053026458999994
+          ],
+          "n": 3,
+          "cpu_flagged": 0,
+          "stages": {
+            "startup_index": 1.2550974580000016,
+            "input_setup": 0.00021537499999624288,
+            "read_processing": 4.487434874999991,
+            "model_setup": 0.004407000000000494,
+            "em": 1.764861707999998,
+            "output_shutdown": 0.5293337089999994,
+            "model_and_em": 1.769472540999999
+          },
+          "speedup_current_over_this": 1.0,
+          "rss_reduction_current_vs_this": 0.0,
+          "time_reduction_current_vs_this": 0.0,
+          "min_seconds": 8.053026458999994,
+          "max_seconds": 8.240982791000008,
+          "sample_sd_seconds": 0.10519987027050565
+        }
+      }
+    },
+    "index": {
+      "8": {
+        "original": {
+          "wall_seconds": 123.8133213340002,
+          "peak_rss_bytes": 8423047168,
+          "peak_memory_footprint_bytes": 7679269248,
+          "process_user_seconds": 550.6,
+          "process_system_seconds": 62.56,
+          "times": [
+            124.78587283299976,
+            123.8133213340002,
+            122.14981604199966
+          ],
+          "n": 3,
+          "cpu_flagged": 3,
+          "index_bytes": 1336071183,
+          "speedup_current_over_this": 11.139132385516254,
+          "rss_reduction_current_vs_this": 0.26511859514259817,
+          "time_reduction_current_vs_this": 0.9102264013577702,
+          "min_seconds": 122.14981604199966,
+          "max_seconds": 124.78587283299976,
+          "sample_sd_seconds": 1.3330354884059314
+        },
+        "previous_native": {
+          "wall_seconds": 110.39999445800004,
+          "peak_rss_bytes": 14126006272,
+          "peak_memory_footprint_bytes": 15254744248,
+          "process_user_seconds": 280.19,
+          "process_system_seconds": 4.27,
+          "times": [
+            110.39999445800004,
+            111.9520252909997,
+            107.27317029100004
+          ],
+          "n": 3,
+          "cpu_flagged": 3,
+          "index_bytes": 1376743621,
+          "reported_build_stages_seconds": {
+            "fasta_parse": 1.676195,
+            "graph_build": 84.76501,
+            "ec_build": 8.455087,
+            "minimizer_mphf": 9.1504,
+            "write": 7.229593,
+            "total": 110.103131
+          },
+          "speedup_current_over_this": 9.932373515047773,
+          "rss_reduction_current_vs_this": 0.5618053243916894,
+          "time_reduction_current_vs_this": 0.8993191306705314,
+          "min_seconds": 107.27317029100004,
+          "max_seconds": 111.9520252909997,
+          "sample_sd_seconds": 2.383188102414447
+        },
+        "published": {
+          "wall_seconds": 111.15975479200006,
+          "peak_rss_bytes": 13873283072,
+          "peak_memory_footprint_bytes": 15254727864,
+          "process_user_seconds": 281.88,
+          "process_system_seconds": 4.03,
+          "times": [
+            111.15975479200006,
+            111.1821655419999,
+            108.7745315420002
+          ],
+          "n": 3,
+          "cpu_flagged": 3,
+          "index_bytes": 1376743621,
+          "reported_build_stages_seconds": {
+            "fasta_parse": 1.645697,
+            "graph_build": 85.274401,
+            "ec_build": 8.509831,
+            "minimizer_mphf": 9.225105,
+            "write": 7.245037,
+            "total": 110.88643
+          },
+          "speedup_current_over_this": 10.000726991479121,
+          "rss_reduction_current_vs_this": 0.5538229340614438,
+          "time_reduction_current_vs_this": 0.900007269386313,
+          "min_seconds": 108.7745315420002,
+          "max_seconds": 111.1821655419999,
+          "sample_sd_seconds": 1.3836240862321143
+        },
+        "current": {
+          "wall_seconds": 11.115167415999963,
+          "peak_rss_bytes": 6189940736,
+          "peak_memory_footprint_bytes": 4913075624,
+          "process_user_seconds": 64.98,
+          "process_system_seconds": 3.28,
+          "times": [
+            11.256853082999953,
+            11.115167415999963,
+            11.077276833000042
+          ],
+          "n": 3,
+          "cpu_flagged": 0,
+          "index_bytes": 1376743621,
+          "reported_build_stages_seconds": {
+            "fasta_parse": 0.457729,
+            "graph_build": 8.372407,
+            "ec_build": 0.868209,
+            "minimizer_mphf": 0.868886,
+            "write": 0.46486,
+            "total": 11.065952
+          },
+          "speedup_current_over_this": 1.0,
+          "rss_reduction_current_vs_this": 0.0,
+          "time_reduction_current_vs_this": 0.0,
+          "min_seconds": 11.077276833000042,
+          "max_seconds": 11.256853082999953,
+          "sample_sd_seconds": 0.09465565142252619
+        }
+      }
+    }
+  },
+  "quantification_runs": [
+    {
+      "tool": "original",
+      "threads": 8,
+      "phase": "warmup",
+      "replicate": 0,
+      "wall_seconds": 45.77352191700001,
+      "peak_rss_bytes": 3058401280,
+      "peak_memory_footprint_bytes": 2539211368,
+      "process_user_seconds": 130.74,
+      "process_system_seconds": 0.89,
+      "stages_seconds": {
+        "startup_index": 5.201960292000024,
+        "input_setup": 0.011226707999981045,
+        "read_processing": 9.907356458999999,
+        "model_setup": 0.02988554099999874,
+        "em": 29.550880750000005,
+        "output_shutdown": 1.0722121670000035,
+        "model_and_em": 29.580766291000003
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    },
+    {
+      "tool": "original",
+      "threads": 1,
+      "phase": "warmup",
+      "replicate": 0,
+      "wall_seconds": 98.75176908399999,
+      "peak_rss_bytes": 2641149952,
+      "peak_memory_footprint_bytes": 2496448816,
+      "process_user_seconds": 97.51,
+      "process_system_seconds": 1.11,
+      "stages_seconds": {
+        "startup_index": 15.818602000000055,
+        "input_setup": 0.011223125000014988,
+        "read_processing": 53.047955583999965,
+        "model_setup": 0.030258708000019396,
+        "em": 28.808037457999944,
+        "output_shutdown": 1.0356922089999898,
+        "model_and_em": 28.838296165999964
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "current",
+      "threads": 8,
+      "phase": "warmup",
+      "replicate": 0,
+      "wall_seconds": 8.117583083,
+      "peak_rss_bytes": 1316208640,
+      "peak_memory_footprint_bytes": 1258440264,
+      "process_user_seconds": 57.77,
+      "process_system_seconds": 0.87,
+      "stages_seconds": {
+        "startup_index": 1.33924775,
+        "input_setup": 0.005380041000000002,
+        "read_processing": 4.463617292,
+        "model_setup": 0.004122000000000625,
+        "em": 1.7781038329999994,
+        "output_shutdown": 0.5271121669999994,
+        "model_and_em": 1.782225833
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    },
+    {
+      "tool": "current",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 1,
+      "wall_seconds": 8.065118417,
+      "peak_rss_bytes": 1307721728,
+      "peak_memory_footprint_bytes": 1252034168,
+      "process_user_seconds": 57.93,
+      "process_system_seconds": 0.76,
+      "stages_seconds": {
+        "startup_index": 1.2550974580000016,
+        "input_setup": 0.0002052919999986358,
+        "read_processing": 4.512420375000001,
+        "model_setup": 0.004162082999998873,
+        "em": 1.762686500000001,
+        "output_shutdown": 0.5305467089999993,
+        "model_and_em": 1.7668485829999998
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    },
+    {
+      "tool": "current",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 2,
+      "wall_seconds": 8.240982791000008,
+      "peak_rss_bytes": 1294991360,
+      "peak_memory_footprint_bytes": 1237714552,
+      "process_user_seconds": 57.07,
+      "process_system_seconds": 0.93,
+      "stages_seconds": {
+        "startup_index": 1.2476922080000037,
+        "input_setup": 0.00021537499999624288,
+        "read_processing": 4.4455609580000015,
+        "model_setup": 0.004407000000000494,
+        "em": 2.015720208999994,
+        "output_shutdown": 0.5273870410000114,
+        "model_and_em": 2.0201272089999947
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    },
+    {
+      "tool": "current",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 3,
+      "wall_seconds": 8.053026458999994,
+      "peak_rss_bytes": 1317978112,
+      "peak_memory_footprint_bytes": 1259898416,
+      "process_user_seconds": 57.68,
+      "process_system_seconds": 0.79,
+      "stages_seconds": {
+        "startup_index": 1.2665477919999972,
+        "input_setup": 0.00023754200000780656,
+        "read_processing": 4.487434874999991,
+        "model_setup": 0.00461083300000098,
+        "em": 1.764861707999998,
+        "output_shutdown": 0.5293337089999994,
+        "model_and_em": 1.769472540999999
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    },
+    {
+      "tool": "current",
+      "threads": 1,
+      "phase": "warmup",
+      "replicate": 0,
+      "wall_seconds": 39.399742125,
+      "peak_rss_bytes": 1370406912,
+      "peak_memory_footprint_bytes": 1327384088,
+      "process_user_seconds": 39.12,
+      "process_system_seconds": 0.24,
+      "stages_seconds": {
+        "startup_index": 4.059244958000008,
+        "input_setup": 0.0002470419999980322,
+        "read_processing": 25.758160833000005,
+        "model_setup": 0.004248499999988553,
+        "em": 8.999288250000006,
+        "output_shutdown": 0.5785525419999971,
+        "model_and_em": 9.003536749999995
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "current",
+      "threads": 1,
+      "phase": "measured",
+      "replicate": 1,
+      "wall_seconds": 39.23853212500002,
+      "peak_rss_bytes": 1370423296,
+      "peak_memory_footprint_bytes": 1327400472,
+      "process_user_seconds": 38.97,
+      "process_system_seconds": 0.23,
+      "stages_seconds": {
+        "startup_index": 4.03234912500001,
+        "input_setup": 0.00024145799999075734,
+        "read_processing": 25.628744749999996,
+        "model_setup": 0.0040932500000110394,
+        "em": 8.99479954200001,
+        "output_shutdown": 0.5783040000000028,
+        "model_and_em": 8.99889279200002
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "current",
+      "threads": 1,
+      "phase": "measured",
+      "replicate": 2,
+      "wall_seconds": 38.79766241699997,
+      "peak_rss_bytes": 1370423296,
+      "peak_memory_footprint_bytes": 1327416880,
+      "process_user_seconds": 38.52,
+      "process_system_seconds": 0.24,
+      "stages_seconds": {
+        "startup_index": 3.921848916999977,
+        "input_setup": 0.0002493329999992966,
+        "read_processing": 25.313075209000033,
+        "model_setup": 0.0040377499999522115,
+        "em": 8.979132458000038,
+        "output_shutdown": 0.5793187499999704,
+        "model_and_em": 8.98317020799999
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    },
+    {
+      "tool": "current",
+      "threads": 1,
+      "phase": "measured",
+      "replicate": 3,
+      "wall_seconds": 38.64313812500001,
+      "peak_rss_bytes": 1370406912,
+      "peak_memory_footprint_bytes": 1327384088,
+      "process_user_seconds": 38.36,
+      "process_system_seconds": 0.24,
+      "stages_seconds": {
+        "startup_index": 3.9310438330000466,
+        "input_setup": 0.0002455000000054497,
+        "read_processing": 25.108775082999955,
+        "model_setup": 0.00422645899999452,
+        "em": 9.011496833000024,
+        "output_shutdown": 0.5873504169999819,
+        "model_and_em": 9.015723292000018
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "original",
+      "threads": 1,
+      "phase": "measured",
+      "replicate": 1,
+      "wall_seconds": 93.96732499999999,
+      "peak_rss_bytes": 2685960192,
+      "peak_memory_footprint_bytes": 2541275464,
+      "process_user_seconds": 93.38,
+      "process_system_seconds": 0.51,
+      "stages_seconds": {
+        "startup_index": 14.697072332999994,
+        "input_setup": 0.010884041999986493,
+        "read_processing": 49.657712875000016,
+        "model_setup": 0.029163791999991417,
+        "em": 28.568626999999992,
+        "output_shutdown": 1.0038649580000083,
+        "model_and_em": 28.597790791999984
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "original",
+      "threads": 1,
+      "phase": "measured",
+      "replicate": 2,
+      "wall_seconds": 91.789474916,
+      "peak_rss_bytes": 2621734912,
+      "peak_memory_footprint_bytes": 2556053760,
+      "process_user_seconds": 91.24,
+      "process_system_seconds": 0.48,
+      "stages_seconds": {
+        "startup_index": 13.930091208,
+        "input_setup": 0.010457999999999856,
+        "read_processing": 48.839919875,
+        "model_setup": 0.028975082999998847,
+        "em": 27.982675042000004,
+        "output_shutdown": 0.9973557080000006,
+        "model_and_em": 28.011650125000003
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "original",
+      "threads": 1,
+      "phase": "measured",
+      "replicate": 3,
+      "wall_seconds": 95.47391066600001,
+      "peak_rss_bytes": 2631057408,
+      "peak_memory_footprint_bytes": 2486339864,
+      "process_user_seconds": 94.85,
+      "process_system_seconds": 0.52,
+      "stages_seconds": {
+        "startup_index": 14.360664833000001,
+        "input_setup": 0.010609000000002311,
+        "read_processing": 51.063421375000004,
+        "model_setup": 0.029290000000003147,
+        "em": 29.000830082999983,
+        "output_shutdown": 1.0090953750000153,
+        "model_and_em": 29.030120082999986
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "original",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 1,
+      "wall_seconds": 45.158149458,
+      "peak_rss_bytes": 3053830144,
+      "peak_memory_footprint_bytes": 2816903784,
+      "process_user_seconds": 131.4,
+      "process_system_seconds": 0.58,
+      "stages_seconds": {
+        "startup_index": 5.140532,
+        "input_setup": 0.011715165999998334,
+        "read_processing": 9.929647959,
+        "model_setup": 0.030905791000002125,
+        "em": 28.992668000000005,
+        "output_shutdown": 1.0526805419999903,
+        "model_and_em": 29.023573791000008
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    },
+    {
+      "tool": "original",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 2,
+      "wall_seconds": 45.037802666000005,
+      "peak_rss_bytes": 3057385472,
+      "peak_memory_footprint_bytes": 2536245840,
+      "process_user_seconds": 128.59,
+      "process_system_seconds": 0.55,
+      "stages_seconds": {
+        "startup_index": 5.041754416000003,
+        "input_setup": 0.01122154199998704,
+        "read_processing": 9.509123750000015,
+        "model_setup": 0.02943387499999517,
+        "em": 29.406678,
+        "output_shutdown": 1.0395910830000048,
+        "model_and_em": 29.436111874999995
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "original",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 3,
+      "wall_seconds": 45.25137320799996,
+      "peak_rss_bytes": 3057287168,
+      "peak_memory_footprint_bytes": 2523892328,
+      "process_user_seconds": 128.99,
+      "process_system_seconds": 0.54,
+      "stages_seconds": {
+        "startup_index": 5.062956582999988,
+        "input_setup": 0.011033416999993051,
+        "read_processing": 9.560928542,
+        "model_setup": 0.029170750000020007,
+        "em": 29.54611324999999,
+        "output_shutdown": 1.0411706659999709,
+        "model_and_em": 29.57528400000001
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    },
+    {
+      "tool": "published",
+      "threads": 8,
+      "phase": "warmup",
+      "replicate": 0,
+      "wall_seconds": 16.79741441599998,
+      "peak_rss_bytes": 3292446720,
+      "peak_memory_footprint_bytes": 2928134976,
+      "process_user_seconds": 108.25,
+      "process_system_seconds": 1.23,
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    },
+    {
+      "tool": "published",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 1,
+      "wall_seconds": 16.886786958000016,
+      "peak_rss_bytes": 3290120192,
+      "peak_memory_footprint_bytes": 2922810200,
+      "process_user_seconds": 109.11,
+      "process_system_seconds": 1.24,
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    },
+    {
+      "tool": "published",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 2,
+      "wall_seconds": 17.494620833,
+      "peak_rss_bytes": 3289546752,
+      "peak_memory_footprint_bytes": 2925857576,
+      "process_user_seconds": 112.94,
+      "process_system_seconds": 1.27,
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "published",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 3,
+      "wall_seconds": 17.34060925,
+      "peak_rss_bytes": 3211821056,
+      "peak_memory_footprint_bytes": 2930019160,
+      "process_user_seconds": 112.43,
+      "process_system_seconds": 1.24,
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "previous_native",
+      "threads": 8,
+      "phase": "warmup",
+      "replicate": 0,
+      "wall_seconds": 16.89444450000002,
+      "peak_rss_bytes": 3212623872,
+      "peak_memory_footprint_bytes": 2930838312,
+      "process_user_seconds": 109.13,
+      "process_system_seconds": 1.26,
+      "stages_seconds": {
+        "startup_index": 3.0163394169999833,
+        "input_setup": 0.00021579100001645202,
+        "read_processing": 9.524461125000016,
+        "model_setup": 0.00013858400001254267,
+        "em": 3.7186994159999927,
+        "output_shutdown": 0.6345901669999989,
+        "model_and_em": 3.718838000000005
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    },
+    {
+      "tool": "previous_native",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 1,
+      "wall_seconds": 17.095442750000018,
+      "peak_rss_bytes": 3216932864,
+      "peak_memory_footprint_bytes": 2920811352,
+      "process_user_seconds": 110.51,
+      "process_system_seconds": 1.27,
+      "stages_seconds": {
+        "startup_index": 3.0231787090000353,
+        "input_setup": 0.00021595799995566267,
+        "read_processing": 9.567198082999994,
+        "model_setup": 0.00012020900004472423,
+        "em": 3.8753709160000085,
+        "output_shutdown": 0.6293588749999799,
+        "model_and_em": 3.875491125000053
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "previous_native",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 2,
+      "wall_seconds": 16.993725874999996,
+      "peak_rss_bytes": 3303899136,
+      "peak_memory_footprint_bytes": 2917616472,
+      "process_user_seconds": 109.74,
+      "process_system_seconds": 1.24,
+      "stages_seconds": {
+        "startup_index": 3.009029584000018,
+        "input_setup": 0.00022937500000352884,
+        "read_processing": 9.655948040999988,
+        "model_setup": 0.00011987499999577267,
+        "em": 3.691577499999994,
+        "output_shutdown": 0.6368214999999964,
+        "model_and_em": 3.6916973749999897
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "previous_native",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 3,
+      "wall_seconds": 16.998911374999977,
+      "peak_rss_bytes": 3304521728,
+      "peak_memory_footprint_bytes": 2915961688,
+      "process_user_seconds": 110.29,
+      "process_system_seconds": 1.23,
+      "stages_seconds": {
+        "startup_index": 3.0413961250000057,
+        "input_setup": 0.00021945899999309404,
+        "read_processing": 9.557464290999974,
+        "model_setup": 0.00012879199999815683,
+        "em": 3.7693857500000263,
+        "output_shutdown": 0.6303169579999803,
+        "model_and_em": 3.7695145420000244
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    }
+  ],
+  "index_runs": [
+    {
+      "tool": "original",
+      "threads": 8,
+      "phase": "warmup",
+      "replicate": 0,
+      "wall_seconds": 124.86780658299995,
+      "peak_rss_bytes": 7979220992,
+      "peak_memory_footprint_bytes": 8317835840,
+      "process_user_seconds": 547.56,
+      "process_system_seconds": 60.94,
+      "index_bytes": 1336082439,
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "previous_native",
+      "threads": 8,
+      "phase": "warmup",
+      "replicate": 0,
+      "wall_seconds": 113.42221879199997,
+      "peak_rss_bytes": 15251701760,
+      "peak_memory_footprint_bytes": 15254760656,
+      "process_user_seconds": 282.36,
+      "process_system_seconds": 5.73,
+      "index_bytes": 1376743621,
+      "reported_build_stages_seconds": {
+        "fasta_parse": 1.699505,
+        "graph_build": 87.478463,
+        "ec_build": 8.714565,
+        "minimizer_mphf": 9.185286,
+        "write": 7.292528,
+        "total": 113.122952
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "published",
+      "threads": 8,
+      "phase": "warmup",
+      "replicate": 0,
+      "wall_seconds": 111.51999616600006,
+      "peak_rss_bytes": 13798293504,
+      "peak_memory_footprint_bytes": 15233461456,
+      "process_user_seconds": 284.93,
+      "process_system_seconds": 4.4,
+      "index_bytes": 1376743621,
+      "reported_build_stages_seconds": {
+        "fasta_parse": 1.769609,
+        "graph_build": 85.424726,
+        "ec_build": 8.831541,
+        "minimizer_mphf": 9.15209,
+        "write": 7.236649,
+        "total": 111.223208
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "original",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 1,
+      "wall_seconds": 124.78587283299976,
+      "peak_rss_bytes": 8375418880,
+      "peak_memory_footprint_bytes": 7655889256,
+      "process_user_seconds": 550.58,
+      "process_system_seconds": 63.52,
+      "index_bytes": 1336071239,
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "previous_native",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 1,
+      "wall_seconds": 110.39999445800004,
+      "peak_rss_bytes": 13764100096,
+      "peak_memory_footprint_bytes": 15254826168,
+      "process_user_seconds": 280.19,
+      "process_system_seconds": 4.27,
+      "index_bytes": 1376743621,
+      "reported_build_stages_seconds": {
+        "fasta_parse": 1.680289,
+        "graph_build": 84.76501,
+        "ec_build": 8.499623,
+        "minimizer_mphf": 9.1504,
+        "write": 7.229593,
+        "total": 110.103131
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "published",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 1,
+      "wall_seconds": 111.15975479200006,
+      "peak_rss_bytes": 13873283072,
+      "peak_memory_footprint_bytes": 15254727864,
+      "process_user_seconds": 281.88,
+      "process_system_seconds": 4.08,
+      "index_bytes": 1376743621,
+      "reported_build_stages_seconds": {
+        "fasta_parse": 1.645697,
+        "graph_build": 85.451485,
+        "ec_build": 8.509831,
+        "minimizer_mphf": 9.249976,
+        "write": 7.245037,
+        "total": 110.88643
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "published",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 2,
+      "wall_seconds": 111.1821655419999,
+      "peak_rss_bytes": 13844873216,
+      "peak_memory_footprint_bytes": 15254777064,
+      "process_user_seconds": 284.51,
+      "process_system_seconds": 4.03,
+      "index_bytes": 1376743621,
+      "reported_build_stages_seconds": {
+        "fasta_parse": 1.670647,
+        "graph_build": 85.274401,
+        "ec_build": 8.613859,
+        "minimizer_mphf": 9.214151,
+        "write": 7.37057,
+        "total": 110.905423
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "previous_native",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 2,
+      "wall_seconds": 111.9520252909997,
+      "peak_rss_bytes": 14126006272,
+      "peak_memory_footprint_bytes": 15233428688,
+      "process_user_seconds": 280.81,
+      "process_system_seconds": 5.99,
+      "index_bytes": 1376743621,
+      "reported_build_stages_seconds": {
+        "fasta_parse": 1.676195,
+        "graph_build": 86.197917,
+        "ec_build": 8.455087,
+        "minimizer_mphf": 9.195863,
+        "write": 7.311365,
+        "total": 111.616213
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "original",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 2,
+      "wall_seconds": 123.8133213340002,
+      "peak_rss_bytes": 8423047168,
+      "peak_memory_footprint_bytes": 7679269248,
+      "process_user_seconds": 551.31,
+      "process_system_seconds": 62.56,
+      "index_bytes": 1336071183,
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "previous_native",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 3,
+      "wall_seconds": 107.27317029100004,
+      "peak_rss_bytes": 15253618688,
+      "peak_memory_footprint_bytes": 15254744248,
+      "process_user_seconds": 273.17,
+      "process_system_seconds": 2.73,
+      "index_bytes": 1376743621,
+      "reported_build_stages_seconds": {
+        "fasta_parse": 1.653603,
+        "graph_build": 82.387067,
+        "ec_build": 7.934068,
+        "minimizer_mphf": 8.994149,
+        "write": 7.220549,
+        "total": 107.004993
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "original",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 3,
+      "wall_seconds": 122.14981604199966,
+      "peak_rss_bytes": 8617377792,
+      "peak_memory_footprint_bytes": 7853103632,
+      "process_user_seconds": 550.6,
+      "process_system_seconds": 58.91,
+      "index_bytes": 1336070999,
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "published",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 3,
+      "wall_seconds": 108.7745315420002,
+      "peak_rss_bytes": 15053176832,
+      "peak_memory_footprint_bytes": 15254727864,
+      "process_user_seconds": 275.46,
+      "process_system_seconds": 3.3,
+      "index_bytes": 1376743621,
+      "reported_build_stages_seconds": {
+        "fasta_parse": 1.628461,
+        "graph_build": 83.47039,
+        "ec_build": 8.137722,
+        "minimizer_mphf": 9.225105,
+        "write": 7.234991,
+        "total": 108.514589
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "current",
+      "threads": 8,
+      "phase": "warmup",
+      "replicate": 0,
+      "wall_seconds": 11.063640209000027,
+      "peak_rss_bytes": 5575704576,
+      "peak_memory_footprint_bytes": 4803466208,
+      "process_user_seconds": 64.86,
+      "process_system_seconds": 3.32,
+      "index_bytes": 1376743621,
+      "reported_build_stages_seconds": {
+        "fasta_parse": 0.520626,
+        "graph_build": 8.248217,
+        "ec_build": 0.872159,
+        "minimizer_mphf": 0.860382,
+        "write": 0.475532,
+        "total": 11.015538
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true
+    },
+    {
+      "tool": "current",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 1,
+      "wall_seconds": 11.256853082999953,
+      "peak_rss_bytes": 6189940736,
+      "peak_memory_footprint_bytes": 4911404408,
+      "process_user_seconds": 64.79,
+      "process_system_seconds": 3.34,
+      "index_bytes": 1376743621,
+      "reported_build_stages_seconds": {
+        "fasta_parse": 0.449853,
+        "graph_build": 8.522279,
+        "ec_build": 0.863355,
+        "minimizer_mphf": 0.862708,
+        "write": 0.470381,
+        "total": 11.201919
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    },
+    {
+      "tool": "current",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 2,
+      "wall_seconds": 11.115167415999963,
+      "peak_rss_bytes": 6232915968,
+      "peak_memory_footprint_bytes": 4913075624,
+      "process_user_seconds": 65.25,
+      "process_system_seconds": 3.28,
+      "index_bytes": 1376743621,
+      "reported_build_stages_seconds": {
+        "fasta_parse": 0.457729,
+        "graph_build": 8.372407,
+        "ec_build": 0.868209,
+        "minimizer_mphf": 0.868886,
+        "write": 0.46486,
+        "total": 11.065952
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    },
+    {
+      "tool": "current",
+      "threads": 8,
+      "phase": "measured",
+      "replicate": 3,
+      "wall_seconds": 11.077276833000042,
+      "peak_rss_bytes": 6049611776,
+      "peak_memory_footprint_bytes": 4921103736,
+      "process_user_seconds": 64.98,
+      "process_system_seconds": 3.27,
+      "index_bytes": 1376743621,
+      "reported_build_stages_seconds": {
+        "fasta_parse": 0.458055,
+        "graph_build": 8.320287,
+        "ec_build": 0.873418,
+        "minimizer_mphf": 0.875951,
+        "write": 0.462885,
+        "total": 11.025057
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true
+    }
+  ],
+  "quantification_ec_checks": {
+    "t1-current": {
+      "exact": true,
+      "reference_nonzero_ecs": 190693,
+      "candidate_nonzero_ecs": 190693,
+      "reference_total_counts": 4246399,
+      "candidate_total_counts": 4246399,
+      "different_classes": 0,
+      "count_l1_difference": 0,
+      "first_differences": []
+    },
+    "t8-current": {
+      "exact": true,
+      "reference_nonzero_ecs": 190693,
+      "candidate_nonzero_ecs": 190693,
+      "reference_total_counts": 4246399,
+      "candidate_total_counts": 4246399,
+      "different_classes": 0,
+      "count_l1_difference": 0,
+      "first_differences": []
+    },
+    "t8-previous_native": {
+      "exact": true,
+      "reference_nonzero_ecs": 190693,
+      "candidate_nonzero_ecs": 190693,
+      "reference_total_counts": 4246399,
+      "candidate_total_counts": 4246399,
+      "different_classes": 0,
+      "count_l1_difference": 0,
+      "first_differences": []
+    },
+    "t8-published": {
+      "exact": true,
+      "reference_nonzero_ecs": 190693,
+      "candidate_nonzero_ecs": 190693,
+      "reference_total_counts": 4246399,
+      "candidate_total_counts": 4246399,
+      "different_classes": 0,
+      "count_l1_difference": 0,
+      "first_differences": []
+    }
+  },
+  "fragment_model_note": "v0.5.0 uses all observations; current/original sample. EC parity does not imply equal default models or abundances.",
+  "validation": {
+    "output-validation": {
+      "t8-current": {
+        "native_hdf5": "2.0.0",
+        "targets": 670670,
+        "tsv_values_exact": true,
+        "comparison_significant_digits": 17,
+        "fragment_model": {
+          "fragment_observations": 11828.0,
+          "mean": 144.3249070003382,
+          "sd": 49.9802111519873
+        },
+        "est_count_sum": 4246399.000000001,
+        "fld_observation_sum": 11828.0,
+        "native_hdf5_readable": true,
+        "dataset_probes": {
+          "est_counts": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/lengths": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/eff_lengths": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/ids": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/fld": {
+            "readable": true,
+            "shape": [
+              1000
+            ]
+          }
+        }
+      },
+      "t1-current": {
+        "native_hdf5": "2.0.0",
+        "targets": 670670,
+        "tsv_values_exact": true,
+        "comparison_significant_digits": 17,
+        "fragment_model": {
+          "fragment_observations": 10000.0,
+          "mean": 144.2327,
+          "sd": 50.14382265753181
+        },
+        "est_count_sum": 4246399.0,
+        "fld_observation_sum": 10000.0,
+        "native_hdf5_readable": true,
+        "dataset_probes": {
+          "est_counts": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/lengths": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/eff_lengths": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/ids": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/fld": {
+            "readable": true,
+            "shape": [
+              1000
+            ]
+          }
+        }
+      },
+      "t1-original": {
+        "native_hdf5": "2.0.0",
+        "targets": 670670,
+        "tsv_values_exact": false,
+        "comparison_significant_digits": 6,
+        "fragment_model": {
+          "fragment_observations": 10000.0,
+          "mean": 144.2327,
+          "sd": 50.14382265753181
+        },
+        "est_count_sum": 4246399.0,
+        "fld_observation_sum": 10000.0,
+        "native_hdf5_readable": true,
+        "dataset_probes": {
+          "est_counts": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/lengths": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/eff_lengths": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/ids": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/fld": {
+            "readable": true,
+            "shape": [
+              1000
+            ]
+          }
+        }
+      },
+      "t8-original": {
+        "native_hdf5": "2.0.0",
+        "targets": 670670,
+        "tsv_values_exact": false,
+        "comparison_significant_digits": 6,
+        "fragment_model": {
+          "fragment_observations": 11828.0,
+          "mean": 144.3249070003382,
+          "sd": 49.9802111519873
+        },
+        "est_count_sum": 4246399.000000001,
+        "fld_observation_sum": 11828.0,
+        "native_hdf5_readable": true,
+        "dataset_probes": {
+          "est_counts": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/lengths": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/eff_lengths": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/ids": {
+            "readable": true,
+            "shape": [
+              670670
+            ]
+          },
+          "aux/fld": {
+            "readable": true,
+            "shape": [
+              1000
+            ]
+          }
+        }
+      },
+      "t8-published": {
+        "native_hdf5": "2.0.0",
+        "targets": 670670,
+        "tsv_values_exact": null,
+        "comparison_significant_digits": 17,
+        "fragment_model": null,
+        "est_count_sum": 4246399.0,
+        "fld_observation_sum": 46489.0,
+        "native_hdf5_readable": false,
+        "native_hdf5_error": "'Unable to synchronously open object (stored chunk dimension encoding length does not match value calculated from chunk dimensions)'",
+        "dataset_probes": {
+          "est_counts": {
+            "readable": false,
+            "error": "'Unable to synchronously open object (stored chunk dimension encoding length does not match value calculated from chunk dimensions)'"
+          },
+          "aux/lengths": {
+            "readable": false,
+            "error": "'Unable to synchronously open object (stored chunk dimension encoding length does not match value calculated from chunk dimensions)'"
+          },
+          "aux/eff_lengths": {
+            "readable": false,
+            "error": "'Unable to synchronously open object (stored chunk dimension encoding length does not match value calculated from chunk dimensions)'"
+          },
+          "aux/ids": {
+            "readable": false,
+            "error": "'Unable to synchronously open object (stored chunk dimension encoding length does not match value calculated from chunk dimensions)'"
+          },
+          "aux/fld": {
+            "readable": true,
+            "shape": [
+              1000
+            ]
+          }
+        },
+        "tsv_structurally_valid": true
+      },
+      "t8-previous_native": {
+        "native_hdf5": "2.0.0",
+        "targets": 670670,
+        "tsv_values_exact": null,
+        "comparison_significant_digits": 17,
+        "fragment_model": null,
+        "est_count_sum": 4246399.0,
+        "fld_observation_sum": 46489.0,
+        "native_hdf5_readable": false,
+        "native_hdf5_error": "'Unable to synchronously open object (stored chunk dimension encoding length does not match value calculated from chunk dimensions)'",
+        "dataset_probes": {
+          "est_counts": {
+            "readable": false,
+            "error": "'Unable to synchronously open object (stored chunk dimension encoding length does not match value calculated from chunk dimensions)'"
+          },
+          "aux/lengths": {
+            "readable": false,
+            "error": "'Unable to synchronously open object (stored chunk dimension encoding length does not match value calculated from chunk dimensions)'"
+          },
+          "aux/eff_lengths": {
+            "readable": false,
+            "error": "'Unable to synchronously open object (stored chunk dimension encoding length does not match value calculated from chunk dimensions)'"
+          },
+          "aux/ids": {
+            "readable": false,
+            "error": "'Unable to synchronously open object (stored chunk dimension encoding length does not match value calculated from chunk dimensions)'"
+          },
+          "aux/fld": {
+            "readable": true,
+            "shape": [
+              1000
+            ]
+          }
+        },
+        "tsv_structurally_valid": true
+      }
+    },
+    "abundance-audit": {
+      "t1-original": {
+        "comparator_values_from": "native HDF5",
+        "transcript_ids_exact": true,
+        "transcript_lengths_exact": true,
+        "fld_exact": true,
+        "fld_current_observations": 10000.0,
+        "fld_comparator_observations": 10000.0,
+        "effective_lengths_exact": true,
+        "counts_exact": false,
+        "count_L1": 7.645477630861692e-09,
+        "count_L1_fraction": 1.800461433525604e-15,
+        "max_count_abs": 2.6193447411060333e-09,
+        "max_eff_length_abs": 0.0
+      },
+      "t8-original": {
+        "comparator_values_from": "native HDF5",
+        "transcript_ids_exact": true,
+        "transcript_lengths_exact": true,
+        "fld_exact": true,
+        "fld_current_observations": 11828.0,
+        "fld_comparator_observations": 11828.0,
+        "effective_lengths_exact": true,
+        "counts_exact": false,
+        "count_L1": 3.6629559628037296e-09,
+        "count_L1_fraction": 8.626028695852012e-16,
+        "max_count_abs": 8.731149137020111e-10,
+        "max_eff_length_abs": 0.0
+      },
+      "t8-previous_native": {
+        "comparator_values_from": "17-digit TSV; v0.5.0 HDF5 vector encoding is unreadable",
+        "transcript_ids_exact": true,
+        "transcript_lengths_exact": true,
+        "fld_exact": false,
+        "fld_current_observations": 11828.0,
+        "fld_comparator_observations": 46489.0,
+        "effective_lengths_exact": false,
+        "counts_exact": false,
+        "count_L1": 739.2538018977621,
+        "count_L1_fraction": 0.00017408957610854799,
+        "max_count_abs": 8.92613313939728,
+        "max_eff_length_abs": 7.0
+      },
+      "t8-published": {
+        "comparator_values_from": "17-digit TSV; v0.5.0 HDF5 vector encoding is unreadable",
+        "transcript_ids_exact": true,
+        "transcript_lengths_exact": true,
+        "fld_exact": false,
+        "fld_current_observations": 11828.0,
+        "fld_comparator_observations": 46489.0,
+        "effective_lengths_exact": false,
+        "counts_exact": false,
+        "count_L1": 739.2538018953362,
+        "count_L1_fraction": 0.00017408957610797672,
+        "max_count_abs": 8.926133139392732,
+        "max_eff_length_abs": 7.0
+      }
+    },
+    "built_indexes": {
+      "previous_native": {
+        "index_bytes": 1376743621,
+        "index_sha256": "ca6427c35fe6ea971122caf69cd7e364b6a9fc90fb7a81af6429d47e4c5e5738",
+        "ec": {
+          "exact": true,
+          "reference_nonzero_ecs": 190693,
+          "candidate_nonzero_ecs": 190693,
+          "reference_total_counts": 4246399,
+          "candidate_total_counts": 4246399,
+          "different_classes": 0,
+          "count_l1_difference": 0,
+          "first_differences": []
+        },
+        "reused_identical_index_hash": false
+      },
+      "original": {
+        "index_bytes": 1336070999,
+        "index_sha256": "c5c50b5594f918fd16a6a92edf23a4c7db82af82725eae74f7d6b4c972d17dbf",
+        "ec": {
+          "exact": true,
+          "reference_nonzero_ecs": 190693,
+          "candidate_nonzero_ecs": 190693,
+          "reference_total_counts": 4246399,
+          "candidate_total_counts": 4246399,
+          "different_classes": 0,
+          "count_l1_difference": 0,
+          "first_differences": []
+        },
+        "reused_identical_index_hash": false
+      },
+      "published": {
+        "index_bytes": 1376743621,
+        "index_sha256": "ca6427c35fe6ea971122caf69cd7e364b6a9fc90fb7a81af6429d47e4c5e5738",
+        "ec": {
+          "exact": true,
+          "reference_nonzero_ecs": 190693,
+          "candidate_nonzero_ecs": 190693,
+          "reference_total_counts": 4246399,
+          "candidate_total_counts": 4246399,
+          "different_classes": 0,
+          "count_l1_difference": 0,
+          "first_differences": []
+        },
+        "reused_identical_index_hash": true
+      },
+      "current": {
+        "index_bytes": 1376743621,
+        "index_sha256": "ca6427c35fe6ea971122caf69cd7e364b6a9fc90fb7a81af6429d47e4c5e5738",
+        "ec": {
+          "exact": true,
+          "reference_nonzero_ecs": 190693,
+          "candidate_nonzero_ecs": 190693,
+          "reference_total_counts": 4246399,
+          "candidate_total_counts": 4246399,
+          "different_classes": 0,
+          "count_l1_difference": 0,
+          "first_differences": []
+        },
+        "reused_identical_index_hash": true
+      },
+      "original_on_current_index": {
+        "exact": true,
+        "reference_nonzero_ecs": 190693,
+        "candidate_nonzero_ecs": 190693,
+        "reference_total_counts": 4246399,
+        "candidate_total_counts": 4246399,
+        "different_classes": 0,
+        "count_l1_difference": 0,
+        "first_differences": []
+      }
+    }
+  },
+  "physical_memory_bytes": 34359738368,
+  "larger_nascent_quantification": {
+    "measurement_date": "2026-10-17",
+    "threads": 8,
+    "warmups_per_tool_case": 1,
+    "measured_runs_per_tool_case": 3,
+    "scope": "Complete default paired quantification; all reads, startup, EM, TSV/HDF5 output and shutdown; retrieval/trimming excluded.",
+    "fasterp_build": {
+      "version": "0.2.1",
+      "crate_url": "https://static.crates.io/crates/fasterp/fasterp-0.2.1.crate",
+      "crate_sha256": "71ded328b10ccbff9cf55e57ec0a359e28b6fc4d71977a46dc48a73d869077e4",
+      "patch_sha256": "d36d817a5e66d583f2106e0b9589030d0763bed1d97efc41da2cd34afaec21b9"
+    },
+    "orders": {
+      "warmup": [
+        "original",
+        "published",
+        "current"
+      ],
+      "measured_1": [
+        "current",
+        "original",
+        "published"
+      ],
+      "measured_2": [
+        "published",
+        "current",
+        "original"
+      ],
+      "measured_3": [
+        "original",
+        "published",
+        "current"
+      ]
+    },
+    "binaries": {
+      "current": {
+        "name": "kallistors",
+        "bytes": 4281776,
+        "sha256": "69fbdccd2302a74fc5bf7a48bf34bed6898866c021e6159c1d7bc7e47618edc9"
+      },
+      "original": {
+        "name": "kallisto",
+        "bytes": 5728088,
+        "sha256": "d63cb85e29b18ef913ac2067882b95a9925b266510d1cbb4a721b71745f7f733"
+      },
+      "published": {
+        "name": "kallistors",
+        "bytes": 2720240,
+        "sha256": "d026039129b57d641c7ab04dc4937ed783590afea458295513f2a562d702e53a"
+      }
+    },
+    "cases": [
+      {
+        "id": "SRR1039508-cdna-full--paired--t8",
+        "run": {
+          "run_accession": "SRR1039508",
+          "study_accession": "PRJNA229998",
+          "experiment_accession": "SRX384345",
+          "sample_accession": "SAMN02422669",
+          "scientific_name": "Homo sapiens",
+          "instrument_model": "Illumina HiSeq 2000",
+          "library_layout": "PAIRED",
+          "library_strategy": "RNA-Seq",
+          "library_selection": "cDNA",
+          "read_count": "22935521",
+          "base_count": "2889875646",
+          "fastq_ftp": "ftp.sra.ebi.ac.uk/vol1/fastq/SRR103/008/SRR1039508/SRR1039508_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/SRR103/008/SRR1039508/SRR1039508_2.fastq.gz",
+          "fastq_bytes": "1243786980;1230997455",
+          "fastq_md5": "d57df747bc142e9850074d512ab9d6db;3331c6a9e0183ff9d398a3292dd45f66",
+          "metadata_url": "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRR1039508&result=read_run&fields=run_accession,study_accession,experiment_accession,sample_accession,scientific_name,instrument_model,library_layout,library_strategy,library_selection,read_count,base_count,fastq_ftp,fastq_bytes,fastq_md5&format=json"
+        },
+        "pairs_before": 22935521,
+        "pairs_after": 22297617,
+        "trimmer": {
+          "name": "fasterp",
+          "version": "0.2.1",
+          "binary_sha256": "5243f125022ead6058de7eee2774aa78e5a9c3fcd012c853b04b6267881d9b9b"
+        },
+        "trimming_command": [
+          "fasterp",
+          "-i",
+          "SRR1039508_1.fastq.gz",
+          "-I",
+          "SRR1039508_2.fastq.gz",
+          "-o",
+          "SRR1039508_1.trimmed.fastq.gz",
+          "-O",
+          "SRR1039508_2.trimmed.fastq.gz",
+          "--cut-front",
+          "--cut-tail",
+          "--cut-mean-quality",
+          "20",
+          "--cut-window-size",
+          "4",
+          "--length-required",
+          "50",
+          "--qualified-quality-phred",
+          "15",
+          "--unqualified-percent-limit",
+          "40",
+          "--n-base-limit",
+          "5",
+          "--compression-level",
+          "4",
+          "--threads",
+          "4",
+          "--json",
+          "fasterp.json",
+          "--html",
+          "fasterp.html"
+        ],
+        "trim_seconds": 12.903611541,
+        "inputs": [
+          {
+            "path": "gencode.v50.kallisto.idx",
+            "bytes": 1336081121,
+            "sha256": "bb72c8cb89b5b297dcdfd5d2f8954af5cb608dad8fb486389db6f93076da3233"
+          },
+          {
+            "path": "SRR1039508_1.trimmed.fastq.gz",
+            "bytes": 1246602897,
+            "sha256": "eff6639467298572d225675699a3a8dc28a2454c25c66f4c5b815b92436c92e4"
+          },
+          {
+            "path": "SRR1039508_2.trimmed.fastq.gz",
+            "bytes": 1235970417,
+            "sha256": "d6925111b436e378c59d43cbec0c59a502699b9fab72d6daa5c5c55b8826b467"
+          }
+        ],
+        "reference": {
+          "schema_version": 1,
+          "reference": "gencode50",
+          "label": "GENCODE v50 ALL transcripts",
+          "mature_targets": 670670,
+          "nascent_targets": 0,
+          "total_targets": 670670,
+          "sources": [
+            {
+              "path": "gencode.v50.transcripts.fa.gz",
+              "bytes": 183554921,
+              "sha256": "5a320f524d73b5793518eb19b118829033713443d0f42af20a67bb31cc06cf56",
+              "url": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_50/gencode.v50.transcripts.fa.gz",
+              "md5": "4d5bd41b247480e12c0b370490f52ddd"
+            }
+          ],
+          "fasta": {
+            "path": "gencode.v50.transcripts.fa.gz",
+            "bytes": 183554921,
+            "sha256": "5a320f524d73b5793518eb19b118829033713443d0f42af20a67bb31cc06cf56"
+          }
+        },
+        "ec_checks": {
+          "current": {
+            "comparison": {
+              "exact": true,
+              "reference_nonzero_ecs": 742488,
+              "candidate_nonzero_ecs": 742488,
+              "reference_total_counts": 21137312,
+              "candidate_total_counts": 21137312,
+              "different_classes": 0,
+              "count_l1_difference": 0,
+              "first_differences": []
+            },
+            "files": {
+              "original": {
+                "path": "diagnostic.ec_counts.tsv",
+                "bytes": 134462399,
+                "sha256": "958761c8cbecbb634ba7dee47dcc567840292e16a4009dbf2b454beeb0898ff8"
+              },
+              "candidate": {
+                "path": "candidate.ec.tsv",
+                "bytes": 134462399,
+                "sha256": "37cb93c92daec49f58d0b189947063fb762c24e6d2f87f438fecbc0176404d48"
+              }
+            }
+          },
+          "published": {
+            "comparison": {
+              "exact": false,
+              "reference_nonzero_ecs": 742488,
+              "candidate_nonzero_ecs": 742487,
+              "reference_total_counts": 21137312,
+              "candidate_total_counts": 21137291,
+              "different_classes": 10,
+              "count_l1_difference": 21,
+              "first_differences": [
+                {
+                  "transcripts": [
+                    169849
+                  ],
+                  "reference": 17,
+                  "candidate": 16
+                },
+                {
+                  "transcripts": [
+                    191032,
+                    191033,
+                    191034,
+                    191035,
+                    191036
+                  ],
+                  "reference": 1,
+                  "candidate": 0
+                },
+                {
+                  "transcripts": [
+                    208681
+                  ],
+                  "reference": 24,
+                  "candidate": 21
+                },
+                {
+                  "transcripts": [
+                    393611,
+                    644783
+                  ],
+                  "reference": 222,
+                  "candidate": 221
+                },
+                {
+                  "transcripts": [
+                    417681
+                  ],
+                  "reference": 4,
+                  "candidate": 3
+                },
+                {
+                  "transcripts": [
+                    418448,
+                    418449
+                  ],
+                  "reference": 13,
+                  "candidate": 11
+                },
+                {
+                  "transcripts": [
+                    424787,
+                    424808
+                  ],
+                  "reference": 2,
+                  "candidate": 1
+                },
+                {
+                  "transcripts": [
+                    457754,
+                    457756
+                  ],
+                  "reference": 3,
+                  "candidate": 2
+                },
+                {
+                  "transcripts": [
+                    480478,
+                    480479,
+                    480480,
+                    480481,
+                    480482,
+                    480483,
+                    480484,
+                    480485,
+                    480487
+                  ],
+                  "reference": 6,
+                  "candidate": 4
+                },
+                {
+                  "transcripts": [
+                    565255,
+                    565256,
+                    565259,
+                    565265,
+                    565266,
+                    565267
+                  ],
+                  "reference": 196,
+                  "candidate": 188
+                }
+              ]
+            },
+            "files": {
+              "original": {
+                "path": "diagnostic.ec_counts.tsv",
+                "bytes": 134462399,
+                "sha256": "958761c8cbecbb634ba7dee47dcc567840292e16a4009dbf2b454beeb0898ff8"
+              },
+              "candidate": {
+                "path": "published.ec.tsv",
+                "bytes": 134462355,
+                "sha256": "e7821efd4249a15736618b9dd19db256e925514db6b2f32673cc840f0fa89f74"
+              }
+            }
+          }
+        },
+        "target_partition": null,
+        "abundance_audit": {
+          "original": {
+            "transcript_ids_exact": true,
+            "transcript_lengths_exact": true,
+            "fld_exact": true,
+            "fld_current_observations": 17383.0,
+            "fld_comparator_observations": 17383.0,
+            "effective_lengths_exact": true,
+            "count_L1": 9.761443938123401e-09,
+            "count_L1_fraction": 4.618110352973643e-16,
+            "max_count_abs": 1.7462298274040222e-10,
+            "max_eff_length_abs": 0.0
+          },
+          "published": {
+            "transcript_ids_exact": true,
+            "transcript_lengths_exact": true,
+            "fld_exact": false,
+            "fld_current_observations": 17383.0,
+            "fld_comparator_observations": 369777.0,
+            "effective_lengths_exact": false,
+            "count_L1": 95568.1125847928,
+            "count_L1_fraction": 0.004521303727369454,
+            "max_count_abs": 950.2654673288648,
+            "max_eff_length_abs": 2.27473604826546
+          }
+        },
+        "output_validation": {
+          "original": {
+            "native_hdf5": "2.0.0",
+            "targets": 670670,
+            "tsv_values_exact": false,
+            "comparison_significant_digits": 6,
+            "fragment_model": {
+              "fragment_observations": 17383.0,
+              "mean": 144.64344474486566,
+              "sd": 55.49013877083958
+            },
+            "native_hdf5_readable": true,
+            "fld_observations": 17383.0
+          },
+          "published": {
+            "native_hdf5_readable": false,
+            "native_hdf5_error": "'Unable to synchronously open object (stored chunk dimension encoding length does not match value calculated from chunk dimensions)'",
+            "targets": 670670,
+            "tsv_structurally_valid": true,
+            "fld_observations": 369777.0
+          },
+          "current": {
+            "native_hdf5": "2.0.0",
+            "targets": 670670,
+            "tsv_values_exact": true,
+            "comparison_significant_digits": 17,
+            "fragment_model": {
+              "fragment_observations": 17383.0,
+              "mean": 144.64344474486566,
+              "sd": 55.49013877083958
+            },
+            "native_hdf5_readable": true,
+            "fld_observations": 17383.0
+          }
+        }
+      },
+      {
+        "id": "SRR307903-cdna-full--paired--t8",
+        "run": {
+          "run_accession": "SRR307903",
+          "study_accession": "PRJNA30709",
+          "experiment_accession": "SRX082568",
+          "sample_accession": "SAMN00634073",
+          "scientific_name": "Homo sapiens",
+          "instrument_model": "Illumina Genome Analyzer II",
+          "library_layout": "PAIRED",
+          "library_strategy": "RNA-Seq",
+          "library_selection": "cDNA",
+          "read_count": "36010036",
+          "base_count": "5473525472",
+          "fastq_ftp": "ftp.sra.ebi.ac.uk/vol1/fastq/SRR307/SRR307903/SRR307903_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/SRR307/SRR307903/SRR307903_2.fastq.gz",
+          "fastq_bytes": "2373907470;2386825782",
+          "fastq_md5": "a3128a10cb6e05b5f002ff52943bebee;fd9d4e4203e4fe6ee81a8d8de70e7c61",
+          "metadata_url": "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRR307903&result=read_run&fields=run_accession,study_accession,experiment_accession,sample_accession,scientific_name,instrument_model,library_layout,library_strategy,library_selection,read_count,base_count,fastq_ftp,fastq_bytes,fastq_md5&format=json"
+        },
+        "pairs_before": 36010036,
+        "pairs_after": 32878740,
+        "trimmer": {
+          "name": "fasterp",
+          "version": "0.2.1",
+          "binary_sha256": "5243f125022ead6058de7eee2774aa78e5a9c3fcd012c853b04b6267881d9b9b"
+        },
+        "trimming_command": [
+          "fasterp",
+          "-i",
+          "SRR307903_1.fastq.gz",
+          "-I",
+          "SRR307903_2.fastq.gz",
+          "-o",
+          "SRR307903_1.trimmed.fastq.gz",
+          "-O",
+          "SRR307903_2.trimmed.fastq.gz",
+          "--cut-front",
+          "--cut-tail",
+          "--cut-mean-quality",
+          "20",
+          "--cut-window-size",
+          "4",
+          "--length-required",
+          "50",
+          "--qualified-quality-phred",
+          "15",
+          "--unqualified-percent-limit",
+          "40",
+          "--n-base-limit",
+          "5",
+          "--compression-level",
+          "4",
+          "--threads",
+          "4",
+          "--json",
+          "fasterp.json",
+          "--html",
+          "fasterp.html"
+        ],
+        "trim_seconds": 23.068408208999998,
+        "inputs": [
+          {
+            "path": "gencode.v50.kallisto.idx",
+            "bytes": 1336081121,
+            "sha256": "bb72c8cb89b5b297dcdfd5d2f8954af5cb608dad8fb486389db6f93076da3233"
+          },
+          {
+            "path": "SRR307903_1.trimmed.fastq.gz",
+            "bytes": 2221359509,
+            "sha256": "0a2eaac58af956977f0bb7134f2c64498ea832f3966a48c923625d79535928fa"
+          },
+          {
+            "path": "SRR307903_2.trimmed.fastq.gz",
+            "bytes": 2254713779,
+            "sha256": "58a05463c66544e4d7f89ba0f5a53367b6ebbfc266632b96a2e032a594d749c3"
+          }
+        ],
+        "reference": {
+          "schema_version": 1,
+          "reference": "gencode50",
+          "label": "GENCODE v50 ALL transcripts",
+          "mature_targets": 670670,
+          "nascent_targets": 0,
+          "total_targets": 670670,
+          "sources": [
+            {
+              "path": "gencode.v50.transcripts.fa.gz",
+              "bytes": 183554921,
+              "sha256": "5a320f524d73b5793518eb19b118829033713443d0f42af20a67bb31cc06cf56",
+              "url": "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_50/gencode.v50.transcripts.fa.gz",
+              "md5": "4d5bd41b247480e12c0b370490f52ddd"
+            }
+          ],
+          "fasta": {
+            "path": "gencode.v50.transcripts.fa.gz",
+            "bytes": 183554921,
+            "sha256": "5a320f524d73b5793518eb19b118829033713443d0f42af20a67bb31cc06cf56"
+          }
+        },
+        "ec_checks": {
+          "current": {
+            "comparison": {
+              "exact": true,
+              "reference_nonzero_ecs": 744744,
+              "candidate_nonzero_ecs": 744744,
+              "reference_total_counts": 29637796,
+              "candidate_total_counts": 29637796,
+              "different_classes": 0,
+              "count_l1_difference": 0,
+              "first_differences": []
+            },
+            "files": {
+              "original": {
+                "path": "diagnostic.ec_counts.tsv",
+                "bytes": 118903790,
+                "sha256": "b2c72dc02df0221d7d867057a892189290224d1baa825e460aac900d7867ee33"
+              },
+              "candidate": {
+                "path": "candidate.ec.tsv",
+                "bytes": 118903790,
+                "sha256": "6c37ef172f5c39258303f40b1fc8d2770f87c34ed81fd1897409235ecdec22de"
+              }
+            }
+          },
+          "published": {
+            "comparison": {
+              "exact": false,
+              "reference_nonzero_ecs": 744744,
+              "candidate_nonzero_ecs": 744741,
+              "reference_total_counts": 29637796,
+              "candidate_total_counts": 29637765,
+              "different_classes": 18,
+              "count_l1_difference": 31,
+              "first_differences": [
+                {
+                  "transcripts": [
+                    60510,
+                    60511,
+                    60512,
+                    60513,
+                    60514,
+                    60515,
+                    60516,
+                    60518,
+                    60519,
+                    60525,
+                    60526,
+                    60527,
+                    60528
+                  ],
+                  "reference": 85,
+                  "candidate": 82
+                },
+                {
+                  "transcripts": [
+                    121183,
+                    121184,
+                    121185,
+                    121186,
+                    121187,
+                    121188,
+                    121189
+                  ],
+                  "reference": 8,
+                  "candidate": 4
+                },
+                {
+                  "transcripts": [
+                    121183,
+                    121184,
+                    121185,
+                    121186,
+                    121187,
+                    121188,
+                    121189,
+                    121254
+                  ],
+                  "reference": 8,
+                  "candidate": 7
+                },
+                {
+                  "transcripts": [
+                    169849
+                  ],
+                  "reference": 5,
+                  "candidate": 4
+                },
+                {
+                  "transcripts": [
+                    262218,
+                    262219,
+                    262221,
+                    262222,
+                    262223,
+                    262224,
+                    262225,
+                    262226,
+                    262227,
+                    457754,
+                    457756,
+                    480478,
+                    480479,
+                    480480,
+                    480481,
+                    480482,
+                    480483,
+                    480484,
+                    480485,
+                    480487,
+                    501976
+                  ],
+                  "reference": 1,
+                  "candidate": 0
+                },
+                {
+                  "transcripts": [
+                    298036
+                  ],
+                  "reference": 24,
+                  "candidate": 23
+                },
+                {
+                  "transcripts": [
+                    393611,
+                    644783
+                  ],
+                  "reference": 153,
+                  "candidate": 151
+                },
+                {
+                  "transcripts": [
+                    417681
+                  ],
+                  "reference": 5,
+                  "candidate": 4
+                },
+                {
+                  "transcripts": [
+                    418448
+                  ],
+                  "reference": 56,
+                  "candidate": 55
+                },
+                {
+                  "transcripts": [
+                    418448,
+                    418449
+                  ],
+                  "reference": 4,
+                  "candidate": 0
+                },
+                {
+                  "transcripts": [
+                    424787,
+                    424808
+                  ],
+                  "reference": 5,
+                  "candidate": 3
+                },
+                {
+                  "transcripts": [
+                    457754
+                  ],
+                  "reference": 1,
+                  "candidate": 0
+                },
+                {
+                  "transcripts": [
+                    457754,
+                    457756
+                  ],
+                  "reference": 4,
+                  "candidate": 3
+                },
+                {
+                  "transcripts": [
+                    480478,
+                    480479,
+                    480480,
+                    480481,
+                    480482,
+                    480483,
+                    480484,
+                    480485,
+                    480487
+                  ],
+                  "reference": 5,
+                  "candidate": 4
+                },
+                {
+                  "transcripts": [
+                    480479,
+                    480481,
+                    480482,
+                    480483,
+                    480487
+                  ],
+                  "reference": 2,
+                  "candidate": 1
+                },
+                {
+                  "transcripts": [
+                    516962,
+                    516963,
+                    516966
+                  ],
+                  "reference": 7,
+                  "candidate": 6
+                },
+                {
+                  "transcripts": [
+                    523834,
+                    523835
+                  ],
+                  "reference": 26,
+                  "candidate": 24
+                },
+                {
+                  "transcripts": [
+                    565255,
+                    565256,
+                    565259,
+                    565265,
+                    565266,
+                    565267
+                  ],
+                  "reference": 249,
+                  "candidate": 246
+                }
+              ]
+            },
+            "files": {
+              "original": {
+                "path": "diagnostic.ec_counts.tsv",
+                "bytes": 118903790,
+                "sha256": "b2c72dc02df0221d7d867057a892189290224d1baa825e460aac900d7867ee33"
+              },
+              "candidate": {
+                "path": "published.ec.tsv",
+                "bytes": 118903595,
+                "sha256": "0490fc33313faa09ad707af1eb5d9e8e6236494e69c347afd65cc37045c92388"
+              }
+            }
+          }
+        },
+        "target_partition": null,
+        "abundance_audit": {
+          "original": {
+            "transcript_ids_exact": true,
+            "transcript_lengths_exact": true,
+            "fld_exact": true,
+            "fld_current_observations": 16111.0,
+            "fld_comparator_observations": 16111.0,
+            "effective_lengths_exact": true,
+            "count_L1": 1.3845616445080288e-08,
+            "count_L1_fraction": 4.671607984979818e-16,
+            "max_count_abs": 1.076841726899147e-09,
+            "max_eff_length_abs": 0.0
+          },
+          "published": {
+            "transcript_ids_exact": true,
+            "transcript_lengths_exact": true,
+            "fld_exact": false,
+            "fld_current_observations": 16111.0,
+            "fld_comparator_observations": 532615.0,
+            "effective_lengths_exact": false,
+            "count_L1": 18923.497494823518,
+            "count_L1_fraction": 0.0006384927302994513,
+            "max_count_abs": 288.8976950253382,
+            "max_eff_length_abs": 3.5828513591671474
+          }
+        },
+        "output_validation": {
+          "original": {
+            "native_hdf5": "2.0.0",
+            "targets": 670670,
+            "tsv_values_exact": false,
+            "comparison_significant_digits": 6,
+            "fragment_model": {
+              "fragment_observations": 16111.0,
+              "mean": 190.25814660790763,
+              "sd": 22.43004749197086
+            },
+            "native_hdf5_readable": true,
+            "fld_observations": 16111.0
+          },
+          "published": {
+            "native_hdf5_readable": false,
+            "native_hdf5_error": "'Unable to synchronously open object (stored chunk dimension encoding length does not match value calculated from chunk dimensions)'",
+            "targets": 670670,
+            "tsv_structurally_valid": true,
+            "fld_observations": 532615.0
+          },
+          "current": {
+            "native_hdf5": "2.0.0",
+            "targets": 670670,
+            "tsv_values_exact": true,
+            "comparison_significant_digits": 17,
+            "fragment_model": {
+              "fragment_observations": 16111.0,
+              "mean": 190.25814660790763,
+              "sd": 22.43004749197086
+            },
+            "native_hdf5_readable": true,
+            "fld_observations": 16111.0
+          }
+        }
+      },
+      {
+        "id": "SRR10919051-official-nac-full--paired--t8",
+        "run": {
+          "run_accession": "SRR10919051",
+          "study_accession": "PRJNA602480",
+          "experiment_accession": "SRX7586273",
+          "sample_accession": "SAMN13895735",
+          "scientific_name": "Homo sapiens",
+          "instrument_model": "Illumina NovaSeq 6000",
+          "library_layout": "PAIRED",
+          "library_strategy": "RNA-Seq",
+          "library_selection": "cDNA",
+          "read_count": "10566118",
+          "base_count": "3169835400",
+          "fastq_ftp": "ftp.sra.ebi.ac.uk/vol1/fastq/SRR109/051/SRR10919051/SRR10919051_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/SRR109/051/SRR10919051/SRR10919051_2.fastq.gz",
+          "fastq_bytes": "646325391;683368220",
+          "fastq_md5": "3ddafff9df512570cddd16a9d0c92947;acfde1c76a7774a76aef8cd1978dd56d",
+          "data_directory": "srr10919051",
+          "metadata_url": "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRR10919051&result=read_run&fields=run_accession,study_accession,experiment_accession,sample_accession,scientific_name,instrument_model,library_layout,library_strategy,library_selection,read_count,base_count,fastq_ftp,fastq_bytes,fastq_md5&format=json",
+          "assay": "TT-seq; 1-hour 4-thiouridine-labelled nascent RNA",
+          "sample_description": "HEK293 wild-type control 2",
+          "sample_metadata_url": "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM4277828"
+        },
+        "pairs_before": 10566118,
+        "pairs_after": 10261737,
+        "trimmer": {
+          "name": "fasterp",
+          "version": "0.2.1",
+          "binary_sha256": "5243f125022ead6058de7eee2774aa78e5a9c3fcd012c853b04b6267881d9b9b"
+        },
+        "trimming_command": [
+          "fasterp",
+          "-i",
+          "SRR10919051_1.fastq.gz",
+          "-I",
+          "SRR10919051_2.fastq.gz",
+          "-o",
+          "SRR10919051_1.trimmed.fastq.gz",
+          "-O",
+          "SRR10919051_2.trimmed.fastq.gz",
+          "--cut-front",
+          "--cut-tail",
+          "--cut-mean-quality",
+          "20",
+          "--cut-window-size",
+          "4",
+          "--length-required",
+          "50",
+          "--qualified-quality-phred",
+          "15",
+          "--unqualified-percent-limit",
+          "40",
+          "--n-base-limit",
+          "5",
+          "--compression-level",
+          "4",
+          "--threads",
+          "4",
+          "--json",
+          "fasterp.json",
+          "--html",
+          "fasterp.html"
+        ],
+        "trim_seconds": 9.834956415999997,
+        "inputs": [
+          {
+            "path": "human_nac.mature-plus-nascent.idx",
+            "bytes": 6583280114,
+            "sha256": "9595162c7b84428bbfcbbdba0f92b08552ccb61f7fe02573b292dffb2fa019c8"
+          },
+          {
+            "path": "SRR10919051_1.trimmed.fastq.gz",
+            "bytes": 610213222,
+            "sha256": "c65dcfb80d4deb857495253081964bcf9e54db396e57d870953bde7b01e3265a"
+          },
+          {
+            "path": "SRR10919051_2.trimmed.fastq.gz",
+            "bytes": 615565584,
+            "sha256": "5e378fc6552f3f7857d2e78dafeb9cea299687b88d5c0376493693fb9418ad3e"
+          }
+        ],
+        "reference": {
+          "label": "Official human NAC (Ensembl 108)",
+          "repository": "https://github.com/pachterlab/kallisto-transcriptome-indices",
+          "release": "v1",
+          "annotation": "Ensembl 108, GRCh38 primary assembly",
+          "definition": "official mature cDNAs followed by official nascent transcripts; no sequence or ID changes",
+          "filter": "publisher-selected gene biotypes; see repository README",
+          "sources": [
+            {
+              "file": "human_nac.mature.fa.gz",
+              "url": "https://github.com/pachterlab/kallisto-transcriptome-indices/releases/download/v1/human_nac.mature.fa.gz",
+              "bytes": 58045671,
+              "sha256": "271969e349a5d80657dd94a313e4efc8aea02fdb55193f5e71e9460f73d82338",
+              "retrieve_verify_seconds": 3.7949080000000004
+            },
+            {
+              "file": "human_nac.nascent.fa.gz",
+              "url": "https://github.com/pachterlab/kallisto-transcriptome-indices/releases/download/v1/human_nac.nascent.fa.gz",
+              "bytes": 558305249,
+              "sha256": "8cdd770313fc8592e4fc17ec207824361a30bb943e1a7844e01d58a39c26450f",
+              "retrieve_verify_seconds": 114.85835850000001
+            }
+          ],
+          "fasta_components": [
+            {
+              "file": "human_nac.mature.fa.gz",
+              "targets": 227665,
+              "bases": 420030580
+            },
+            {
+              "file": "human_nac.nascent.fa.gz",
+              "targets": 39546,
+              "bases": 1974069118
+            }
+          ],
+          "mature_targets": 227665,
+          "nascent_targets": 39546,
+          "fasta_file": "human_nac.mature-plus-nascent.fa",
+          "fasta_sha256": "1f432eb5469b28983e49d652665a0bb7682485a739d24e00fec1d9754d242b21",
+          "fasta_bytes": 2428445569,
+          "index_file": "human_nac.mature-plus-nascent.idx",
+          "index_bytes": 6583280114,
+          "index_sha256": "9595162c7b84428bbfcbbdba0f92b08552ccb61f7fe02573b292dffb2fa019c8",
+          "builder_sha256": "d63cb85e29b18ef913ac2067882b95a9925b266510d1cbb4a721b71745f7f733",
+          "total_targets": 267211
+        },
+        "ec_checks": {
+          "current": {
+            "comparison": {
+              "exact": true,
+              "reference_nonzero_ecs": 212719,
+              "candidate_nonzero_ecs": 212719,
+              "reference_total_counts": 8890219,
+              "candidate_total_counts": 8890219,
+              "different_classes": 0,
+              "count_l1_difference": 0,
+              "first_differences": []
+            },
+            "files": {
+              "original": {
+                "path": "diagnostic.ec_counts.tsv",
+                "bytes": 19796361,
+                "sha256": "87ed82622370f546380e8e6da737d7d6ffb709c5bb010e727159e91f375b9154"
+              },
+              "candidate": {
+                "path": "candidate.ec.tsv",
+                "bytes": 19796361,
+                "sha256": "132efc65c0fa98b33e3cb3c917dda9e1d011f6b4c506ca31ebc5dd07e0ca2a79"
+              }
+            }
+          },
+          "published": {
+            "comparison": {
+              "exact": false,
+              "reference_nonzero_ecs": 212719,
+              "candidate_nonzero_ecs": 212719,
+              "reference_total_counts": 8890219,
+              "candidate_total_counts": 8890218,
+              "different_classes": 5,
+              "count_l1_difference": 5,
+              "first_differences": [
+                {
+                  "transcripts": [
+                    18719,
+                    18720,
+                    18721,
+                    18722,
+                    18732
+                  ],
+                  "reference": 179,
+                  "candidate": 180
+                },
+                {
+                  "transcripts": [
+                    18719,
+                    18720,
+                    18721,
+                    18722,
+                    18732,
+                    231083
+                  ],
+                  "reference": 64,
+                  "candidate": 63
+                },
+                {
+                  "transcripts": [
+                    229869
+                  ],
+                  "reference": 1495,
+                  "candidate": 1496
+                },
+                {
+                  "transcripts": [
+                    240524,
+                    240673
+                  ],
+                  "reference": 359,
+                  "candidate": 358
+                },
+                {
+                  "transcripts": [
+                    251846,
+                    251888
+                  ],
+                  "reference": 2347866,
+                  "candidate": 2347865
+                }
+              ]
+            },
+            "files": {
+              "original": {
+                "path": "diagnostic.ec_counts.tsv",
+                "bytes": 19796361,
+                "sha256": "87ed82622370f546380e8e6da737d7d6ffb709c5bb010e727159e91f375b9154"
+              },
+              "candidate": {
+                "path": "published.ec.tsv",
+                "bytes": 19796361,
+                "sha256": "487b3fb4ac3c0da41342cf6d479d01c1dcd261c8329d45147dcdd9d85ea7412e"
+              }
+            }
+          }
+        },
+        "target_partition": {
+          "mature_only": {
+            "nonzero_ecs": 59442,
+            "counts": 251972
+          },
+          "nascent_only": {
+            "nonzero_ecs": 37381,
+            "counts": 6676534
+          },
+          "mixed": {
+            "nonzero_ecs": 115896,
+            "counts": 1961713
+          }
+        },
+        "abundance_audit": {
+          "original": {
+            "transcript_ids_exact": true,
+            "transcript_lengths_exact": true,
+            "fld_exact": true,
+            "fld_current_observations": 59241.0,
+            "fld_comparator_observations": 59241.0,
+            "effective_lengths_exact": true,
+            "count_L1": 5.180872136905188e-10,
+            "count_L1_fraction": 5.82760912515787e-17,
+            "max_count_abs": 1.1641532182693481e-10,
+            "max_eff_length_abs": 0.0
+          },
+          "published": {
+            "transcript_ids_exact": true,
+            "transcript_lengths_exact": true,
+            "fld_exact": false,
+            "fld_current_observations": 59241.0,
+            "fld_comparator_observations": 2245230.0,
+            "effective_lengths_exact": false,
+            "count_L1": 1633.6245388631403,
+            "count_L1_fraction": 0.0001837552846131715,
+            "max_count_abs": 233.74436229975254,
+            "max_eff_length_abs": 4.948595337716677
+          }
+        },
+        "output_validation": {
+          "original": {
+            "native_hdf5": "2.0.0",
+            "targets": 267211,
+            "tsv_values_exact": false,
+            "comparison_significant_digits": 6,
+            "fragment_model": {
+              "fragment_observations": 59241.0,
+              "mean": 135.60900389932647,
+              "sd": 40.00180874806068
+            },
+            "native_hdf5_readable": true,
+            "fld_observations": 59241.0
+          },
+          "published": {
+            "native_hdf5_readable": false,
+            "native_hdf5_error": "'Unable to synchronously open object (stored chunk dimension encoding length does not match value calculated from chunk dimensions)'",
+            "targets": 267211,
+            "tsv_structurally_valid": true,
+            "fld_observations": 2245230.0
+          },
+          "current": {
+            "native_hdf5": "2.0.0",
+            "targets": 267211,
+            "tsv_values_exact": true,
+            "comparison_significant_digits": 17,
+            "fragment_model": {
+              "fragment_observations": 59241.0,
+              "mean": 135.60900389932647,
+              "sd": 40.00180874806068
+            },
+            "native_hdf5_readable": true,
+            "fld_observations": 59241.0
+          }
+        }
+      }
+    ],
+    "medians": {
+      "SRR1039508-cdna-full--paired--t8": {
+        "current": {
+          "wall_seconds": 53.28754345800007,
+          "peak_rss_bytes": 1436532736,
+          "peak_memory_footprint_bytes": 1332725440,
+          "process_user_seconds": 190.32,
+          "process_system_seconds": 1.49,
+          "times": [
+            53.28754345800007,
+            53.408146792000025,
+            53.23800974999995
+          ],
+          "min_seconds": 53.23800974999995,
+          "max_seconds": 53.408146792000025,
+          "sample_sd_seconds": 0.08750749059431262,
+          "stages": {
+            "startup_index": 1.255427667000049,
+            "input_setup": 0.00022745900014342624,
+            "read_processing": 16.455534458999864,
+            "model_setup": 0.004149542000050133,
+            "em": 35.025011749999976,
+            "output_shutdown": 0.5436024170001019,
+            "model_and_em": 35.028937915999904
+          },
+          "cpu_flagged": 2,
+          "speedup_current_over_this": 1.0,
+          "rss_reduction_current_vs_this": 0.0
+        },
+        "original": {
+          "wall_seconds": 178.94223458300007,
+          "peak_rss_bytes": 3359358976,
+          "peak_memory_footprint_bytes": 2852309848,
+          "process_user_seconds": 404.73,
+          "process_system_seconds": 1.23,
+          "times": [
+            177.36145016700004,
+            180.21216745899994,
+            178.94223458300007
+          ],
+          "min_seconds": 177.36145016700004,
+          "max_seconds": 180.21216745899994,
+          "sample_sd_seconds": 1.4281805417103897,
+          "stages": {
+            "startup_index": 5.160605957999962,
+            "input_setup": 0.011236500000052274,
+            "read_processing": 31.024840624999968,
+            "model_setup": 0.10842587499996625,
+            "em": 141.82358091699996,
+            "output_shutdown": 1.1071694170000228,
+            "model_and_em": 141.9335216249999
+          },
+          "cpu_flagged": 2,
+          "speedup_current_over_this": 3.3580499863732305,
+          "rss_reduction_current_vs_this": 0.5723789132799126
+        },
+        "published": {
+          "wall_seconds": 44.77020312499985,
+          "peak_rss_bytes": 4081451008,
+          "peak_memory_footprint_bytes": 3762409000,
+          "process_user_seconds": 325.34,
+          "process_system_seconds": 2.25,
+          "times": [
+            44.837109415999976,
+            44.76887650000003,
+            44.77020312499985
+          ],
+          "min_seconds": 44.76887650000003,
+          "max_seconds": 44.837109415999976,
+          "sample_sd_seconds": 0.03901696753793687,
+          "cpu_flagged": 2,
+          "speedup_current_over_this": 0.840162638765411,
+          "rss_reduction_current_vs_this": 0.6480338161148399
+        }
+      },
+      "SRR307903-cdna-full--paired--t8": {
+        "current": {
+          "wall_seconds": 71.65257795899993,
+          "peak_rss_bytes": 1423540224,
+          "peak_memory_footprint_bytes": 1311196840,
+          "process_user_seconds": 337.41,
+          "process_system_seconds": 1.95,
+          "times": [
+            71.55149495900014,
+            71.90215937499988,
+            71.65257795899993
+          ],
+          "min_seconds": 71.55149495900014,
+          "max_seconds": 71.90215937499988,
+          "sample_sd_seconds": 0.1804966245067307,
+          "stages": {
+            "startup_index": 1.2507997920001799,
+            "input_setup": 0.00022141700014799426,
+            "read_processing": 33.578320374999976,
+            "model_setup": 0.004539625000006708,
+            "em": 36.234957541000085,
+            "output_shutdown": 0.5421047919999182,
+            "model_and_em": 36.23963566599991
+          },
+          "cpu_flagged": 3,
+          "speedup_current_over_this": 1.0,
+          "rss_reduction_current_vs_this": 0.0
+        },
+        "original": {
+          "wall_seconds": 212.45109041700016,
+          "peak_rss_bytes": 3319185408,
+          "peak_memory_footprint_bytes": 2814151488,
+          "process_user_seconds": 644.35,
+          "process_system_seconds": 1.68,
+          "times": [
+            212.45109041700016,
+            212.21781958300016,
+            213.09806195800002
+          ],
+          "min_seconds": 212.21781958300016,
+          "max_seconds": 213.09806195800002,
+          "sample_sd_seconds": 0.4560362002451421,
+          "stages": {
+            "startup_index": 5.189681041999847,
+            "input_setup": 0.01128691699977935,
+            "read_processing": 60.76464883400013,
+            "model_setup": 0.09934612500001094,
+            "em": 145.04771849999997,
+            "output_shutdown": 1.1063763329998437,
+            "model_and_em": 145.14706462499998
+          },
+          "cpu_flagged": 3,
+          "speedup_current_over_this": 2.9650167023797254,
+          "rss_reduction_current_vs_this": 0.571117593922611
+        },
+        "published": {
+          "wall_seconds": 85.37206341700039,
+          "peak_rss_bytes": 3974578176,
+          "peak_memory_footprint_bytes": 3593145848,
+          "process_user_seconds": 650.66,
+          "process_system_seconds": 3.42,
+          "times": [
+            85.47232833299995,
+            85.37206341700039,
+            85.2595785829999
+          ],
+          "min_seconds": 85.2595785829999,
+          "max_seconds": 85.47232833299995,
+          "sample_sd_seconds": 0.10643334955548872,
+          "cpu_flagged": 2,
+          "speedup_current_over_this": 1.1914723217055894,
+          "rss_reduction_current_vs_this": 0.6418386653970296
+        }
+      },
+      "SRR10919051-official-nac-full--paired--t8": {
+        "current": {
+          "wall_seconds": 47.920705041999895,
+          "peak_rss_bytes": 9850896384,
+          "peak_memory_footprint_bytes": 9292783344,
+          "process_user_seconds": 270.34,
+          "process_system_seconds": 1.71,
+          "times": [
+            48.10456545899996,
+            47.920705041999895,
+            47.8486613340001
+          ],
+          "min_seconds": 47.8486613340001,
+          "max_seconds": 48.10456545899996,
+          "sample_sd_seconds": 0.13196077068188355,
+          "stages": {
+            "startup_index": 15.670756249999954,
+            "input_setup": 0.00024133300001949465,
+            "read_processing": 27.201627291000023,
+            "model_setup": 0.02887525000005553,
+            "em": 4.952012749999994,
+            "output_shutdown": 0.10315970900001048,
+            "model_and_em": 4.980859624999994
+          },
+          "cpu_flagged": 1,
+          "speedup_current_over_this": 1.0,
+          "rss_reduction_current_vs_this": 0.0
+        },
+        "original": {
+          "wall_seconds": 98.34399433300007,
+          "peak_rss_bytes": 16076931072,
+          "peak_memory_footprint_bytes": 17187763232,
+          "process_user_seconds": 521.68,
+          "process_system_seconds": 8.16,
+          "times": [
+            98.60161820799999,
+            98.34399433300007,
+            98.13491050000005
+          ],
+          "min_seconds": 98.13491050000005,
+          "max_seconds": 98.60161820799999,
+          "sample_sd_seconds": 0.23377417696661812,
+          "stages": {
+            "startup_index": 45.59775341599999,
+            "input_setup": 0.07782974999997805,
+            "read_processing": 36.969517250000024,
+            "model_setup": 0.018436958000052073,
+            "em": 13.54260920799993,
+            "output_shutdown": 2.40284766700006,
+            "model_and_em": 13.561046165999983
+          },
+          "cpu_flagged": 2,
+          "speedup_current_over_this": 2.052223443849728,
+          "rss_reduction_current_vs_this": 0.3872651229340296
+        },
+        "published": {
+          "wall_seconds": 91.81710666699996,
+          "peak_rss_bytes": 16063053824,
+          "peak_memory_footprint_bytes": 20939669176,
+          "process_user_seconds": 585.26,
+          "process_system_seconds": 7.37,
+          "times": [
+            91.77874687499997,
+            91.81710666699996,
+            91.8233755
+          ],
+          "min_seconds": 91.77874687499997,
+          "max_seconds": 91.8233755,
+          "sample_sd_seconds": 0.024160870841295052,
+          "cpu_flagged": 2,
+          "speedup_current_over_this": 1.9160216150101976,
+          "rss_reduction_current_vs_this": 0.3867357669385595
+        }
+      }
+    },
+    "runs": [
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "original",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0,
+        "wall_seconds": 178.49461604199996,
+        "peak_rss_bytes": 3294429184,
+        "peak_memory_footprint_bytes": 2957200168,
+        "process_user_seconds": 407.5,
+        "process_system_seconds": 1.23,
+        "stages_seconds": {
+          "startup_index": 5.170108667000008,
+          "input_setup": 0.011321124999994936,
+          "read_processing": 31.306869167000002,
+          "model_setup": 0.10722491600000694,
+          "em": 140.71352670899995,
+          "output_shutdown": 1.185565457999985,
+          "model_and_em": 140.82075162499996
+        },
+        "other_cpu_activity_flagged": false,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "published",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0,
+        "wall_seconds": 44.69189341599997,
+        "peak_rss_bytes": 4039557120,
+        "peak_memory_footprint_bytes": 3786673680,
+        "process_user_seconds": 324.6,
+        "process_system_seconds": 2.26,
+        "other_cpu_activity_flagged": false,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1,
+        "wall_seconds": 177.36145016700004,
+        "peak_rss_bytes": 3304390656,
+        "peak_memory_footprint_bytes": 2843069248,
+        "process_user_seconds": 404.73,
+        "process_system_seconds": 1.23,
+        "stages_seconds": {
+          "startup_index": 5.160605957999962,
+          "input_setup": 0.011236500000052274,
+          "read_processing": 31.024840624999968,
+          "model_setup": 0.10791879200002086,
+          "em": 139.93689962500002,
+          "output_shutdown": 1.119948667000017,
+          "model_and_em": 140.04481841700004
+        },
+        "other_cpu_activity_flagged": false,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1,
+        "wall_seconds": 44.837109415999976,
+        "peak_rss_bytes": 4081451008,
+        "peak_memory_footprint_bytes": 3557068280,
+        "process_user_seconds": 325.34,
+        "process_system_seconds": 2.31,
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2,
+        "wall_seconds": 44.76887650000003,
+        "peak_rss_bytes": 4156964864,
+        "peak_memory_footprint_bytes": 3762409000,
+        "process_user_seconds": 326.06,
+        "process_system_seconds": 2.23,
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2,
+        "wall_seconds": 180.21216745899994,
+        "peak_rss_bytes": 3359358976,
+        "peak_memory_footprint_bytes": 2852309848,
+        "process_user_seconds": 410.73,
+        "process_system_seconds": 1.23,
+        "stages_seconds": {
+          "startup_index": 5.203778624999927,
+          "input_setup": 0.011599541999999019,
+          "read_processing": 31.456207083000095,
+          "model_setup": 0.10842587499996625,
+          "em": 142.32498691699993,
+          "output_shutdown": 1.1071694170000228,
+          "model_and_em": 142.4334127919999
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3,
+        "wall_seconds": 178.94223458300007,
+        "peak_rss_bytes": 3371728896,
+        "peak_memory_footprint_bytes": 2898922352,
+        "process_user_seconds": 404.43,
+        "process_system_seconds": 1.2,
+        "stages_seconds": {
+          "startup_index": 5.131229333000078,
+          "input_setup": 0.011069083999927898,
+          "read_processing": 30.763808708000056,
+          "model_setup": 0.1099407079999537,
+          "em": 141.82358091699996,
+          "output_shutdown": 1.1026058330000978,
+          "model_and_em": 141.9335216249999
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3,
+        "wall_seconds": 44.77020312499985,
+        "peak_rss_bytes": 4067950592,
+        "peak_memory_footprint_bytes": 3816541784,
+        "process_user_seconds": 325.04,
+        "process_system_seconds": 2.25,
+        "other_cpu_activity_flagged": false,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "original",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0,
+        "wall_seconds": 213.77725708399998,
+        "peak_rss_bytes": 3319087104,
+        "peak_memory_footprint_bytes": 2810956608,
+        "process_user_seconds": 649.95,
+        "process_system_seconds": 1.67,
+        "stages_seconds": {
+          "startup_index": 5.145887333999781,
+          "input_setup": 0.011312541000052079,
+          "read_processing": 61.41025020899997,
+          "model_setup": 0.09886195800004316,
+          "em": 146.0108667500001,
+          "output_shutdown": 1.1000782920000347,
+          "model_and_em": 146.10972870800015
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "published",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0,
+        "wall_seconds": 85.29003412499992,
+        "peak_rss_bytes": 3974316032,
+        "peak_memory_footprint_bytes": 3563392504,
+        "process_user_seconds": 648.64,
+        "process_system_seconds": 3.47,
+        "other_cpu_activity_flagged": false,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1,
+        "wall_seconds": 212.45109041700016,
+        "peak_rss_bytes": 3243737088,
+        "peak_memory_footprint_bytes": 2782841616,
+        "process_user_seconds": 651.9,
+        "process_system_seconds": 1.74,
+        "stages_seconds": {
+          "startup_index": 5.195750999999973,
+          "input_setup": 0.011586999999963155,
+          "read_processing": 61.91608083400001,
+          "model_setup": 0.09742658300001494,
+          "em": 144.09347020799987,
+          "output_shutdown": 1.136774792000324,
+          "model_and_em": 144.1908967909999
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1,
+        "wall_seconds": 85.47232833299995,
+        "peak_rss_bytes": 3974578176,
+        "peak_memory_footprint_bytes": 3618524688,
+        "process_user_seconds": 650.75,
+        "process_system_seconds": 3.39,
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2,
+        "wall_seconds": 85.37206341700039,
+        "peak_rss_bytes": 3974938624,
+        "peak_memory_footprint_bytes": 3593145848,
+        "process_user_seconds": 650.66,
+        "process_system_seconds": 3.42,
+        "other_cpu_activity_flagged": false,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2,
+        "wall_seconds": 212.21781958300016,
+        "peak_rss_bytes": 3321364480,
+        "peak_memory_footprint_bytes": 2815036200,
+        "process_user_seconds": 644.14,
+        "process_system_seconds": 1.68,
+        "stages_seconds": {
+          "startup_index": 5.189681041999847,
+          "input_setup": 0.01107429100011359,
+          "read_processing": 60.76464883400013,
+          "model_setup": 0.09934612500001094,
+          "em": 145.04771849999997,
+          "output_shutdown": 1.1053507910000917,
+          "model_and_em": 145.14706462499998
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3,
+        "wall_seconds": 213.09806195800002,
+        "peak_rss_bytes": 3319185408,
+        "peak_memory_footprint_bytes": 2814151488,
+        "process_user_seconds": 644.35,
+        "process_system_seconds": 1.64,
+        "stages_seconds": {
+          "startup_index": 5.0942931660001705,
+          "input_setup": 0.01128691699977935,
+          "read_processing": 60.64747699999998,
+          "model_setup": 0.09937129200034178,
+          "em": 146.1392572499999,
+          "output_shutdown": 1.1063763329998437,
+          "model_and_em": 146.23862854200024
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3,
+        "wall_seconds": 85.2595785829999,
+        "peak_rss_bytes": 3954163712,
+        "peak_memory_footprint_bytes": 3470462432,
+        "process_user_seconds": 648.48,
+        "process_system_seconds": 3.44,
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "original",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0,
+        "wall_seconds": 99.36650237500001,
+        "peak_rss_bytes": 15393505280,
+        "peak_memory_footprint_bytes": 17241535544,
+        "process_user_seconds": 523.27,
+        "process_system_seconds": 8.33,
+        "stages_seconds": {
+          "startup_index": 45.771094334,
+          "input_setup": 0.07024804100001347,
+          "read_processing": 36.93770808399998,
+          "model_setup": 0.019927333000026692,
+          "em": 14.077352374999975,
+          "output_shutdown": 2.4901722080000184,
+          "model_and_em": 14.097279708000002
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "published",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0,
+        "wall_seconds": 91.86457508300003,
+        "peak_rss_bytes": 15289171968,
+        "peak_memory_footprint_bytes": 20936539904,
+        "process_user_seconds": 584.09,
+        "process_system_seconds": 7.63,
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "current",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0,
+        "wall_seconds": 47.944154707999985,
+        "peak_rss_bytes": 9851011072,
+        "peak_memory_footprint_bytes": 9289277192,
+        "process_user_seconds": 270.26,
+        "process_system_seconds": 1.74,
+        "stages_seconds": {
+          "startup_index": 15.689751333000004,
+          "input_setup": 0.00022108299998535585,
+          "read_processing": 27.20524791700001,
+          "model_setup": 0.028852041999982703,
+          "em": 4.914665375000027,
+          "output_shutdown": 0.10541695799997797,
+          "model_and_em": 4.94351741700001
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1,
+        "wall_seconds": 48.10456545899996,
+        "peak_rss_bytes": 9850290176,
+        "peak_memory_footprint_bytes": 9292783344,
+        "process_user_seconds": 271.02,
+        "process_system_seconds": 1.85,
+        "stages_seconds": {
+          "startup_index": 15.678478791999964,
+          "input_setup": 0.00024133300001949465,
+          "read_processing": 27.33443895900001,
+          "model_setup": 0.02898774999999887,
+          "em": 4.959892832999969,
+          "output_shutdown": 0.10252579199999445,
+          "model_and_em": 4.988880582999968
+        },
+        "other_cpu_activity_flagged": false,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1,
+        "wall_seconds": 98.60161820799999,
+        "peak_rss_bytes": 16044818432,
+        "peak_memory_footprint_bytes": 17187763232,
+        "process_user_seconds": 520.33,
+        "process_system_seconds": 8.16,
+        "stages_seconds": {
+          "startup_index": 45.59775341599999,
+          "input_setup": 0.07626058400001057,
+          "read_processing": 36.969517250000024,
+          "model_setup": 0.021189624999976786,
+          "em": 13.533153833000028,
+          "output_shutdown": 2.403743499999962,
+          "model_and_em": 13.554343458000005
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1,
+        "wall_seconds": 91.77874687499997,
+        "peak_rss_bytes": 15780675584,
+        "peak_memory_footprint_bytes": 20939734712,
+        "process_user_seconds": 585.26,
+        "process_system_seconds": 7.47,
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2,
+        "wall_seconds": 91.81710666699996,
+        "peak_rss_bytes": 16067493888,
+        "peak_memory_footprint_bytes": 20939669176,
+        "process_user_seconds": 583.73,
+        "process_system_seconds": 7.37,
+        "other_cpu_activity_flagged": false,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2,
+        "wall_seconds": 47.920705041999895,
+        "peak_rss_bytes": 9851027456,
+        "peak_memory_footprint_bytes": 9293405936,
+        "process_user_seconds": 270.34,
+        "process_system_seconds": 1.69,
+        "stages_seconds": {
+          "startup_index": 15.634742416999984,
+          "input_setup": 0.00020124999991821824,
+          "read_processing": 27.201627291000023,
+          "model_setup": 0.028846874999999272,
+          "em": 4.952012749999994,
+          "output_shutdown": 0.10327445899997656,
+          "model_and_em": 4.980859624999994
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2,
+        "wall_seconds": 98.34399433300007,
+        "peak_rss_bytes": 16076931072,
+        "peak_memory_footprint_bytes": 17212355616,
+        "process_user_seconds": 521.68,
+        "process_system_seconds": 8.61,
+        "stages_seconds": {
+          "startup_index": 44.79368733299998,
+          "input_setup": 0.081115000000068,
+          "read_processing": 37.50529816699998,
+          "model_setup": 0.018436958000052073,
+          "em": 13.54260920799993,
+          "output_shutdown": 2.40284766700006,
+          "model_and_em": 13.561046165999983
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "original",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3,
+        "wall_seconds": 98.13491050000005,
+        "peak_rss_bytes": 16338042880,
+        "peak_memory_footprint_bytes": 17098896464,
+        "process_user_seconds": 525.1,
+        "process_system_seconds": 5.43,
+        "stages_seconds": {
+          "startup_index": 45.658428791999995,
+          "input_setup": 0.07782974999997805,
+          "read_processing": 36.43199895800001,
+          "model_setup": 0.01836037500004295,
+          "em": 13.54948724999997,
+          "output_shutdown": 2.3988053750000518,
+          "model_and_em": 13.567847625000013
+        },
+        "other_cpu_activity_flagged": false,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "published",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3,
+        "wall_seconds": 91.8233755,
+        "peak_rss_bytes": 16063053824,
+        "peak_memory_footprint_bytes": 20939505336,
+        "process_user_seconds": 586.42,
+        "process_system_seconds": 7.09,
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3,
+        "wall_seconds": 47.8486613340001,
+        "peak_rss_bytes": 9850896384,
+        "peak_memory_footprint_bytes": 9289129712,
+        "process_user_seconds": 269.97,
+        "process_system_seconds": 1.71,
+        "stages_seconds": {
+          "startup_index": 15.670756249999954,
+          "input_setup": 0.00025508400005946896,
+          "read_processing": 27.138102416000038,
+          "model_setup": 0.02887525000005553,
+          "em": 4.907512624999981,
+          "output_shutdown": 0.10315970900001048,
+          "model_and_em": 4.936387875000037
+        },
+        "other_cpu_activity_flagged": false,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "current",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0,
+        "wall_seconds": 53.10140979100015,
+        "peak_rss_bytes": 1438203904,
+        "peak_memory_footprint_bytes": 1335592640,
+        "process_user_seconds": 190.23,
+        "process_system_seconds": 1.62,
+        "stages_seconds": {
+          "startup_index": 1.2851911660000042,
+          "input_setup": 0.0010567500000888685,
+          "read_processing": 16.476539042000013,
+          "model_setup": 0.003933250000045518,
+          "em": 34.79086245799999,
+          "output_shutdown": 0.5438271250000071,
+          "model_and_em": 34.79479570800004
+        },
+        "other_cpu_activity_flagged": false,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1,
+        "wall_seconds": 53.28754345800007,
+        "peak_rss_bytes": 1438597120,
+        "peak_memory_footprint_bytes": 1332725440,
+        "process_user_seconds": 190.42,
+        "process_system_seconds": 1.48,
+        "stages_seconds": {
+          "startup_index": 1.2831850410000243,
+          "input_setup": 0.0002802500000598229,
+          "read_processing": 16.431537833999982,
+          "model_setup": 0.003926165999928344,
+          "em": 35.025011749999976,
+          "output_shutdown": 0.5436024170001019,
+          "model_and_em": 35.028937915999904
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2,
+        "wall_seconds": 53.408146792000025,
+        "peak_rss_bytes": 1436532736,
+        "peak_memory_footprint_bytes": 1334412992,
+        "process_user_seconds": 190.08,
+        "process_system_seconds": 1.49,
+        "stages_seconds": {
+          "startup_index": 1.246693624999807,
+          "input_setup": 0.00022745900014342624,
+          "read_processing": 16.46916295799997,
+          "model_setup": 0.004149542000050133,
+          "em": 35.147245999999996,
+          "output_shutdown": 0.540667208000059,
+          "model_and_em": 35.151395542000046
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3,
+        "wall_seconds": 53.23800974999995,
+        "peak_rss_bytes": 1426882560,
+        "peak_memory_footprint_bytes": 1326515904,
+        "process_user_seconds": 190.32,
+        "process_system_seconds": 1.51,
+        "stages_seconds": {
+          "startup_index": 1.255427667000049,
+          "input_setup": 0.0001973329999600537,
+          "read_processing": 16.455534458999864,
+          "model_setup": 0.004299416000094425,
+          "em": 34.978688917,
+          "output_shutdown": 0.5438619579999795,
+          "model_and_em": 34.982988333000094
+        },
+        "other_cpu_activity_flagged": false,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "current",
+        "threads": 8,
+        "phase": "warmup",
+        "replicate": 0,
+        "wall_seconds": 71.80765833300006,
+        "peak_rss_bytes": 1418084352,
+        "peak_memory_footprint_bytes": 1320633976,
+        "process_user_seconds": 338.29,
+        "process_system_seconds": 2.16,
+        "stages_seconds": {
+          "startup_index": 1.2494824580001023,
+          "input_setup": 0.0037563329999557027,
+          "read_processing": 33.59981929200012,
+          "model_setup": 0.003971957999965525,
+          "em": 36.407746291999956,
+          "output_shutdown": 0.5428819999999632,
+          "model_and_em": 36.41171824999992
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 1,
+        "wall_seconds": 71.55149495900014,
+        "peak_rss_bytes": 1413578752,
+        "peak_memory_footprint_bytes": 1304151672,
+        "process_user_seconds": 337.74,
+        "process_system_seconds": 1.93,
+        "stages_seconds": {
+          "startup_index": 1.2507997920001799,
+          "input_setup": 0.00021541699993576913,
+          "read_processing": 33.578320374999976,
+          "model_setup": 0.004274124999938067,
+          "em": 36.17702470800009,
+          "output_shutdown": 0.5408605420000185,
+          "model_and_em": 36.18129883300003
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 2,
+        "wall_seconds": 71.90215937499988,
+        "peak_rss_bytes": 1426276352,
+        "peak_memory_footprint_bytes": 1329251912,
+        "process_user_seconds": 336.64,
+        "process_system_seconds": 1.96,
+        "stages_seconds": {
+          "startup_index": 1.2475560829998358,
+          "input_setup": 0.00022141700014799426,
+          "read_processing": 33.50155866699993,
+          "model_setup": 0.004539625000006708,
+          "em": 36.60617879100005,
+          "output_shutdown": 0.5421047919999182,
+          "model_and_em": 36.610718416000054
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "current",
+        "threads": 8,
+        "phase": "measured",
+        "replicate": 3,
+        "wall_seconds": 71.65257795899993,
+        "peak_rss_bytes": 1423540224,
+        "peak_memory_footprint_bytes": 1311196840,
+        "process_user_seconds": 337.41,
+        "process_system_seconds": 1.95,
+        "stages_seconds": {
+          "startup_index": 1.2509070419998807,
+          "input_setup": 0.00030850000007376366,
+          "read_processing": 33.617964667000024,
+          "model_setup": 0.00467812499982756,
+          "em": 36.234957541000085,
+          "output_shutdown": 0.5437620840000363,
+          "model_and_em": 36.23963566599991
+        },
+        "other_cpu_activity_flagged": true,
+        "ac_power": true,
+        "timing_interrupted": false,
+        "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+        "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)"
+      }
+    ],
+    "schedule": "TT-seq has fresh rotated three-tool timing; cDNA controls were retained and current was remeasured, with fresh original control rechecks interleaved. See recorded execution order.",
+    "execution_order": [
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "original",
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "published",
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "original",
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "published",
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "published",
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "original",
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "original",
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "published",
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "original",
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "published",
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "original",
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "published",
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "published",
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "original",
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "original",
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "published",
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "original",
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "published",
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "current",
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "current",
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "original",
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "published",
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "published",
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "current",
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "original",
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "original",
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "published",
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "case": "SRR10919051-official-nac-full--paired--t8",
+        "tool": "current",
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "current",
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "current",
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "current",
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "case": "SRR1039508-cdna-full--paired--t8",
+        "tool": "current",
+        "phase": "measured",
+        "replicate": 3
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "current",
+        "phase": "warmup",
+        "replicate": 0
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "current",
+        "phase": "measured",
+        "replicate": 1
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "current",
+        "phase": "measured",
+        "replicate": 2
+      },
+      {
+        "case": "SRR307903-cdna-full--paired--t8",
+        "tool": "current",
+        "phase": "measured",
+        "replicate": 3
+      }
+    ]
+  },
+  "original_control_rechecks": [
+    {
+      "case": "SRR1039508-cdna-full--paired--t8",
+      "threads": 8,
+      "tool": "original",
+      "wall_seconds": 177.60350112499987,
+      "peak_rss_bytes": 3371728896,
+      "peak_memory_footprint_bytes": 2896235352,
+      "process_user_seconds": 402.59,
+      "process_system_seconds": 0.93,
+      "stages_seconds": {
+        "startup_index": 5.090435999999954,
+        "input_setup": 0.013659375000088403,
+        "read_processing": 30.677433874999906,
+        "model_setup": 0.10701116599989291,
+        "em": 140.61641654200002,
+        "output_shutdown": 1.098544167,
+        "model_and_em": 140.72342770799992
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true,
+      "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+      "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+      "timing_interrupted": false,
+      "reference_median_seconds": 178.94223458300007,
+      "fractional_time_difference_from_reference_median": -0.007481372193210545
+    },
+    {
+      "case": "SRR307903-cdna-full--paired--t8",
+      "threads": 8,
+      "tool": "original",
+      "wall_seconds": 210.692179959,
+      "peak_rss_bytes": 3257663488,
+      "peak_memory_footprint_bytes": 2918910712,
+      "process_user_seconds": 646.54,
+      "process_system_seconds": 1.28,
+      "stages_seconds": {
+        "startup_index": 5.103531834000023,
+        "input_setup": 0.011473665999801597,
+        "read_processing": 61.03944387500019,
+        "model_setup": 0.096971209000003,
+        "em": 143.33048529099983,
+        "output_shutdown": 1.1102740840001388,
+        "model_and_em": 143.42745649999983
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true,
+      "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+      "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+      "timing_interrupted": false,
+      "reference_median_seconds": 212.45109041700016,
+      "fractional_time_difference_from_reference_median": -0.008279131232265202
+    },
+    {
+      "kind": "quantification",
+      "threads": 8,
+      "tool": "original",
+      "wall_seconds": 45.158149458,
+      "peak_rss_bytes": 3053830144,
+      "peak_memory_footprint_bytes": 2816903784,
+      "process_user_seconds": 131.4,
+      "process_system_seconds": 0.58,
+      "stages_seconds": {
+        "startup_index": 5.140532,
+        "input_setup": 0.011715165999998334,
+        "read_processing": 9.929647959,
+        "model_setup": 0.030905791000002125,
+        "em": 28.992668000000005,
+        "output_shutdown": 1.0526805419999903,
+        "model_and_em": 29.023573791000008
+      },
+      "other_cpu_activity_flagged": false,
+      "ac_power": true,
+      "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+      "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+      "timing_interrupted": false,
+      "earlier_control_times_seconds": [
+        45.180066083000014,
+        46.85448470900002,
+        45.631955000000005
+      ],
+      "used_in_refreshed_median": true,
+      "reference_median_seconds": 45.631955000000005,
+      "fractional_time_difference_from_reference_median": -0.010383196205378642
+    },
+    {
+      "kind": "quantification",
+      "threads": 1,
+      "tool": "original",
+      "wall_seconds": 93.96732499999999,
+      "peak_rss_bytes": 2685960192,
+      "peak_memory_footprint_bytes": 2541275464,
+      "process_user_seconds": 93.38,
+      "process_system_seconds": 0.51,
+      "stages_seconds": {
+        "startup_index": 14.697072332999994,
+        "input_setup": 0.010884041999986493,
+        "read_processing": 49.657712875000016,
+        "model_setup": 0.029163791999991417,
+        "em": 28.568626999999992,
+        "output_shutdown": 1.0038649580000083,
+        "model_and_em": 28.597790791999984
+      },
+      "other_cpu_activity_flagged": true,
+      "ac_power": true,
+      "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+      "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+      "timing_interrupted": false,
+      "earlier_control_times_seconds": [
+        99.08968908399993,
+        100.05197254099994,
+        97.78564612500008
+      ],
+      "used_in_refreshed_median": true,
+      "reference_median_seconds": 99.08968908399993,
+      "fractional_time_difference_from_reference_median": -0.0516942189581161
+    },
+    {
+      "kind": "index",
+      "threads": 8,
+      "tool": "original",
+      "wall_seconds": 121.39237737500002,
+      "peak_rss_bytes": 8190836736,
+      "peak_memory_footprint_bytes": 7505156264,
+      "process_user_seconds": 548.84,
+      "process_system_seconds": 57.49,
+      "other_cpu_activity_flagged": true,
+      "ac_power": true,
+      "swap_before": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+      "swap_after": "vm.swapusage: total = 2048.00M  used = 756.56M  free = 1291.44M  (encrypted)",
+      "timing_interrupted": false,
+      "reference_median_seconds": 123.8133213340002,
+      "fractional_time_difference_from_reference_median": -0.019553178389176806
+    }
+  ],
+  "measurement_period_utc": {
+    "start_date": "2026-10-17",
+    "completion_date": "2026-10-17"
+  }
+}

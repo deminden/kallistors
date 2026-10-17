@@ -32,18 +32,35 @@ Pass it with `--diagnostic-kallisto`; it supplies EC evidence and is never the t
 | `diagnostics/prepare_quant_replay.py` | Fixed-EC, fixed-fragment-model inputs for EM investigation |
 
 `benchmark_common.py` supplies shared execution, memory measurement, hashes, downloads and
-result writing. The [ENA manifest](../scripts/benchmarks/human_datasets.json) defines all five
+result writing. The [ENA manifest](../scripts/benchmarks/human_datasets.json) defines four
 public datasets and their directories. The [suite manifest](../scripts/benchmarks/quantification.json)
 defines larger-library/reference combinations; the runner contains no accession-specific plans.
 
 ## Retrieve and trim reads
 
+Use fasterp 0.2.1 with the included [bounds fix](../scripts/benchmarks/fasterp-0.2.1-trim-bounds.patch).
+The released version can panic when front-quality trimming and overlap adapter clipping leave
+disjoint intervals (observed on SRR1039508). The patch keeps that read empty so the existing
+minimum-length filter rejects its pair. It changes no kallistors code or quantification settings.
+
+Build the pinned source outside this Rust workspace (requires Rust, a C/C++ toolchain and CMake):
+
 ```bash
-cargo install --locked fasterp --version 0.2.1
-python3 scripts/prepare_benchmark.py --samples SRR13638690
+FASTERP_SOURCE=$(mktemp -d)
+curl -fL https://static.crates.io/crates/fasterp/fasterp-0.2.1.crate \
+  -o "$FASTERP_SOURCE/fasterp.crate"
+python3 -c 'import hashlib,pathlib,sys; assert hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest() == "71ded328b10ccbff9cf55e57ec0a359e28b6fc4d71977a46dc48a73d869077e4"' \
+  "$FASTERP_SOURCE/fasterp.crate"
+tar -xzf "$FASTERP_SOURCE/fasterp.crate" -C "$FASTERP_SOURCE"
+patch -d "$FASTERP_SOURCE/fasterp-0.2.1" -p1 \
+  < scripts/benchmarks/fasterp-0.2.1-trim-bounds.patch
+cargo install --locked --path "$FASTERP_SOURCE/fasterp-0.2.1" \
+  --root "$PWD/target/tools/fasterp-fixed"
+python3 scripts/prepare_benchmark.py --samples all \
+  --fasterp target/tools/fasterp-fixed/bin/fasterp
 ```
 
-`--samples all` selects all five manifest entries, including the two larger libraries.
+`--samples all` selects the four current manifest entries: the small sample, two larger libraries and a TT-seq sample.
 `--samples SRR1039508,SRR307903` selects those two. The manifest pins mate URLs and MD5s;
 compressed sizes are checked when supplied. Downloads support resumption and gzip integrity is
 checked. `--data DIRECTORY` changes the data root; `--fasterp PATH` selects the trimmer.
@@ -53,6 +70,7 @@ checked. `--data DIRECTORY` changes the data root; `--fasterp PATH` selects the 
 | SRR13638690 | Temporal muscle, PRJNA699558 | 4,451,399 |
 | SRR1039508 | Untreated airway smooth muscle N61311, PRJNA229998 | 22,935,521 |
 | SRR307903 | ENCODE BJ fibroblast poly(A)+ RNA, PRJNA30709 | 36,010,036 |
+| SRR10919051 | HEK293 wild-type control 2, 1-hour 4sU TT-seq, PRJNA602480 | 10,566,118 |
 
 Preparation enables fasterp adapter detection, front/tail trimming with a four-base Q20 window,
 minimum length 50, qualified-base Q15, at most 40% unqualified bases and five Ns. Defaults are
@@ -61,6 +79,12 @@ version/hash, input checksums, output hashes and actual before/after pair counts
 must match those records. The benchmark verifies prepared-read hashes before measuring.
 
 A pair is two FASTQ records. Retrieval and trimming are outside quantification timing.
+
+The nascent sample is [GSM4277828](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSM4277828),
+a human HEK293 control labelled with 4-thiouridine for one hour. TT-seq enriches newly synthesized
+RNA and includes unspliced transcripts; it is not a pure-unspliced preparation. Its reference is
+only the official Pachter Lab mature-plus-nascent FASTA below. Mature-only/nascent-only/mixed
+EC partitions describe compatible target sets, not a validated biological splicing classification.
 
 ## Prepare references
 
@@ -105,9 +129,8 @@ This selects 288,650 transcripts with biotype `protein_coding`, the eighth pipe-
 GENCODE header field, from the checksum-verified ALL FASTA. IDs, sequences and input order are
 preserved. Transcripts with other biotypes are excluded even when their gene is protein
 coding. Both builders receive the same uncompressed FASTA. The preparation record includes
-source and output hashes and target/base counts. This smaller reference supports iterative
-index-build measurements: k=31 and g=23 produce 109,981,201 distinct k-mers and
-1,017,525 unitigs. It does not replace full-reference compatibility checks.
+source and output hashes and target/base counts. This optional smaller target does not replace
+full-reference compatibility checks.
 
 ### Intronic reference: Pachter Lab human NAC
 
@@ -118,7 +141,8 @@ target/tools/kallisto-0.52.0 index -t 8 -k 31 -m 23 \
   data/official-human-nac/human_nac.mature-plus-nascent.fa
 ```
 
-Intronic benchmarks use only Pachter Lab's published [mature](https://github.com/pachterlab/kallisto-transcriptome-indices/releases/download/v1/human_nac.mature.fa.gz)
+Intronic benchmarks use only Pachter Lab's published
+[mature](https://github.com/pachterlab/kallisto-transcriptome-indices/releases/download/v1/human_nac.mature.fa.gz)
 and [nascent](https://github.com/pachterlab/kallisto-transcriptome-indices/releases/download/v1/human_nac.nascent.fa.gz)
 FASTAs, concatenated in that order with IDs and sequences preserved. They use Ensembl 108
 with selected gene biotypes:
@@ -200,7 +224,7 @@ use the same schema across direct and suite quantification runs.
 
 ## Configured suites and reports
 
-Prepare the full libraries, subsets and references first, then select a manifest group:
+Prepare the full libraries and references first, then select a manifest group:
 
 ```bash
 python3 scripts/benchmark_reads.py \
@@ -215,8 +239,8 @@ python3 scripts/report_benchmarks.py \
   --tsv target/benchmarks/gencode50-results.tsv
 ```
 
-`--group gencode50` selects cDNA-only cases; `--group official-nac` selects all intronic
-cases using the Pachter Lab mature-plus-nascent reference. A suite case names its accession,
+`--group gencode50` selects cDNA-only cases; `--group official-nac` selects the nascent-RNA
+case using the Pachter Lab mature-plus-nascent reference. A suite case names its accession,
 index, reference metadata, modes and optional subset; read paths come from the ENA manifest.
 Custom suites use the same schema. Reporting rechecks EC evidence, validated output hashes, run completeness, warmups,
 counters and interruption status, then exports portable JSON and TSV without rerunning quant.
@@ -258,125 +282,186 @@ including paired/single and relevant strand options. Index bytes may differ betw
 
 ### Eight-thread quantification measurement
 
-On Apple Silicon, quantifying **4,410,990 paired fragments** from SRR13638690 against the complete
-GENCODE v50 ALL index (670,670 transcripts, k=31, g=23) took a median **8.80 s**, with **1.15 GiB peak RSS**, and
-**1.10 GiB peak footprint**. Reads use the documented ENA/fasterp preparation. One full
-warmup per binary preceded three measured runs at eight threads, alternating with the preceding
-committed Rust baseline on identical inputs and index. Source builds used `target-cpu=native`.
-All measurements were retained; the CPU monitor flagged activity in 0 candidate and
-0 control runs. Such sampling cannot exclude all background contention.
+Current release measurements cover four complete human libraries, including two larger bulk
+libraries and a genuine nascent-enriched TT-seq library. All use fasterp 0.2.1, identical trimmed
+mates/index bytes per comparison, eight requested threads, one warmup and three measured
+complete runs. All current measurements use the fixed binary. The larger cDNA comparisons retain their
+unchanged control observations, with fresh complete original checks interleaved with current
+runs. TT-seq rotates all three programs. The small-library controls were refreshed after a
+single-thread check showed timing drift; the single-thread comparison uses current/original
+only. CPU activity, power, swap and interruption observations are retained. Small original
+checks also serve as the first observations in the refreshed original medians.
 
-| Measurement | Preceding baseline | Current implementation |
-| --- | ---: | ---: |
-| Whole-process median | 9.272 s | 8.799 s |
-| Median peak RSS | 2.069 GiB | 1.146 GiB |
+The first three libraries use GENCODE v50 ALL (670,670 targets). TT-seq uses
+only the official Pachter Lab mature-plus-nascent reference (267,211 targets; 6.58 GB index).
+All indexes use k=31/g=23. Retrieval/trimming are outside timing.
 
-The fresh comparison reduced median peak RSS by **44.6%** with a
-**1.054×** total speedup. Ten accepted memory optimization rounds each required at least
-2% lower median peak RSS and no higher median total time against the immediately preceding
-accepted binary. Partial improvements were combined; failed candidates did not count.
+| Library | Trimmed pairs | Current s | v0.5.0 s | Original s | Current vs original |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SRR13638690 · muscle | 4,410,990 | 8.065 | 17.341 | 45.158 | 5.60× |
+| SRR1039508 · airway | 22,297,617 | 53.288 | 44.770 | 178.942 | 3.36× |
+| SRR307903 · fibroblast | 32,878,740 | 71.653 | 85.372 | 212.451 | 2.97× |
+| SRR10919051 · TT-seq | 10,261,737 | 47.921 | 91.817 | 98.344 | 2.05× |
 
-| Phase | Current median seconds |
-| --- | ---: |
-| Index loading/setup | 1.561 |
-| Read processing | 4.900 |
-| Model + EM | 1.803 |
-| Output/shutdown | 0.533 |
-| Complete process | 8.799 |
+Peak RSS is the whole-process high-water mark; GiB means 2^30 bytes. macOS peak footprint is
+recorded separately in the [current measurement evidence](benchmark-results.json).
 
-Totals include index loading, every read pair, fragment estimation, EM, full default TSV/HDF5
-output and cleanup. Deferred transcript-name loading is included in output/shutdown. Stage
-medians are independent and need not sum to the total median. Peak RSS is the operating system's
-whole-process high-water mark, not the live size of the final graph. macOS footprint is a separate
-measurement.
+| Library | Current GiB | v0.5.0 GiB | Original GiB | RSS reduction vs original |
+| --- | ---: | ---: | ---: | ---: |
+| SRR13638690 · muscle | 1.218 | 3.064 | 2.847 | 57.2% |
+| SRR1039508 · airway | 1.338 | 3.801 | 3.129 | 57.2% |
+| SRR307903 · fibroblast | 1.326 | 3.702 | 3.091 | 57.1% |
+| SRR10919051 · TT-seq | 9.174 | 14.960 | 14.973 | 38.7% |
 
-Complete paired EC comparison preserved **190,693 nonzero classes and 4,246,399 counts** against
-both the preceding Rust baseline and original kallisto's diagnostic export. A full-mate single-end
-comparison preserved **191,262 classes and 4,276,198 counts** against the Rust baseline. Native HDF5
-readback validated every one of the 670,670 full transcript IDs, lengths and output rows.
+#### Where time is spent
 
-Default fragment sampling retains upstream buffer/quota behavior. Histograms can differ with
-scheduling, so exact EC parity does not imply exact default abundances. With
-`--fragment-length-samples 0`, the matched all-observation model produced identical histograms,
-target IDs, target lengths and effective lengths. The maximum estimated-count difference was
-1.1e-09. Fixed-input serial/threaded regressions also check floating-point bits. These are
-measurements of this workload and build, not a universal memory or speed estimate.
+| Library / tool | Startup/setup s | Read processing s | Model + EM s | Output/shutdown s |
+| --- | ---: | ---: | ---: | ---: |
+| SRR13638690 · muscle / original | 5.074 | 9.561 | 29.436 | 1.041 |
+| SRR13638690 · muscle / current | 1.255 | 4.487 | 1.769 | 0.529 |
+| SRR1039508 · airway / original | 5.172 | 31.025 | 141.934 | 1.107 |
+| SRR1039508 · airway / current | 1.256 | 16.456 | 35.029 | 0.544 |
+| SRR307903 · fibroblast / original | 5.201 | 60.765 | 145.147 | 1.106 |
+| SRR307903 · fibroblast / current | 1.251 | 33.578 | 36.240 | 0.542 |
+| SRR10919051 · TT-seq / original | 45.676 | 36.970 | 13.561 | 2.403 |
+| SRR10919051 · TT-seq / current | 15.671 | 27.202 | 4.981 | 0.103 |
+
+On the larger cDNA libraries, original model/EM dominates total time; index setup remains
+about five seconds. Read processing also improves, so the observed gains extend beyond loading.
+For TT-seq against the larger NAC reference, loading/setup is
+45.68 → 15.67 s,
+read processing 36.97 → 27.20 s, and model/EM
+13.56 → 4.98 s (original → current). Loading contributes
+substantially to this case's gain; the read and model phases also improve. These are phase
+observations, not isolated measurements of individual optimizations.
+
+The read phase includes gzip input, parsing, matching and EC counting. Startup includes index
+loading and input setup; output includes deferred names, complete default TSV/HDF5 and shutdown.
+Model/EM timings use each program's default fragment sample. Progress-marker arrival is an
+external approximation; independent phase medians need not sum to the median total. The
+released v0.5.0 binary lacks phase boundaries, so its stages are not inferred. The recorded
+matched-native v0.5.0 control on the small library also supports a source-code comparison.
+These phase tables distinguish read work from index-loading and EM overhead; no universal
+speed factor or precise attribution to an individual optimization is claimed.
+
+#### Complete EC and output validation
+
+All current/original full-library EC maps are exact, independent of EC numbering:
+
+| Library | Nonzero ECs | Aligned pairs | Differing ECs | Count L1 |
+| --- | ---: | ---: | ---: | ---: |
+| SRR13638690 | 190,693 | 4,246,399 | 0 | 0 |
+| SRR1039508 | 742,488 | 21,137,312 | 0 | 0 |
+| SRR307903 | 744,744 | 29,637,796 | 0 | 0 |
+| SRR10919051 | 212,719 | 8,890,219 | 0 | 0 |
+
+The published v0.5.0 binary does **not** preserve the same complete EC map on every larger case
+(SRR1039508: 10 differing ECs, count L1 21; SRR307903: 18 differing ECs, count L1 31; SRR10919051: 5
+differing ECs, count L1 5). Its rows are delivered-binary time/RSS observations, not equivalent-work
+speedup claims. Current/original parity is mandatory and passes. Fixes in 0.5.1 include explicit
+abundant-node associations and paired fallback/strand behavior.
+
+Observed total-time regression: SRR1039508 · airway: current takes 19.0% longer than the published
+v0.5.0 download, with 64.8% lower peak RSS. Current model/EM takes 35.03 s. EC/model differences prevent assigning the total regression
+to one code change from these timings alone.
+
+For TT-seq, the shared counted map partitions by Pachter's mature-target boundary as follows:
+mature only: **251,972 pairs (2.83%)**; nascent only: **6,676,534 pairs (75.10%)**; mixed:
+**1,961,713 pairs (22.07%)**. These are target-compatibility partitions, not a measurement of
+biological splicing accuracy. A mixed EC contains both target types. The assay enriches newly synthesized
+RNA and is not exclusively unspliced.
+
+Exact EC parity does not imply equal abundances. Concurrent scheduling can change the
+near-10,000-observation fragment sample, effective lengths and EM stopping. v0.5.0 instead
+collects all qualifying observations. The retained eight-thread current/original outputs show:
+
+| Library | Fragment observations, current / original | Estimated-count L1 / original estimate mass | Maximum count difference |
+| --- | ---: | ---: | ---: |
+| SRR13638690 | 11,828 / 11,828 | 0.000000% | 8.73115e-10 |
+| SRR1039508 | 17,383 / 17,383 | 0.000000% | 1.74623e-10 |
+| SRR307903 | 16,111 / 16,111 | 0.000000% | 1.07684e-09 |
+| SRR10919051 | 59,241 / 59,241 | 0.000000% | 1.16415e-10 |
+
+Every current/original retained output passes native HDF5 readback across all transcript rows. The
+v0.5.0 download fails native large-vector readback on SRR1039508, SRR307903, SRR10919051
+(chunk-dimension encoding); its valid 17-digit TSV supplies abundance comparisons. The small
+full-reference comparison independently found the same v0.5.0 HDF5 encoding limitation; current
+bounded chunks pass.
+
+#### Single-thread control and build scope
+
+On the 4,410,990-pair library, the current median is **38.798 s**, versus
+**93.967 s** for freshly measured original controls (**2.42× faster**).
+Read processing is 25.313 versus 49.658 s;
+model/EM is 8.999 versus 28.598 s.
+Fragment histograms are identical and effective lengths are
+identical; maximum estimated-count difference
+is 2.62e-09. One-thread runs cover only this library. Index construction is measured
+at eight threads only.
+
+Current source and the small matched-native v0.5.0 control use Rust 1.99.0 with
+`target-cpu=native`. The control differs from its release tag only by phase messages. The
+checksum-verified [published v0.5.0 download](https://github.com/deminden/kallistors/releases/tag/v0.5.0)
+was built with native settings on its CI runner; its effective CPU/compiler settings are not
+assumed identical to this host. Original timing uses the unmodified official kallisto v0.52.0
+binary; the separately instrumented original supplies EC evidence only. Current release CI
+uses `target-cpu=generic`, so source-build factors are not promises for prebuilt binaries.
+
+All hardware descriptions are Apple Silicon. Power, interruption and sampled background CPU
+flags are recorded per execution; all observations remain in the evidence. Three-run medians
+across these libraries characterize these inputs/builds, not every tissue, assay or machine.
+Original control checks (small-library quantification checks also form the first refreshed original observations):
+
+| Fresh original control | Seconds | Earlier median s | Difference |
+| --- | ---: | ---: | ---: |
+| SRR1039508-cdna-full--paired--t8 / 8 threads | 177.604 | 178.942 | -0.75% |
+| SRR307903-cdna-full--paired--t8 / 8 threads | 210.692 | 212.451 | -0.83% |
+| quantification / 8 threads | 45.158 | 45.632 | -1.04% |
+| quantification / 1 thread | 93.967 | 99.090 | -5.17% |
+| index / 8 threads | 121.392 | 123.813 | -1.96% |
+
+See [fragment sampling](fragment_length_sampling.md) and [compatibility](compatibility.md).
 
 ### Eight-thread index build measurement
 
-On Apple Silicon, building the complete GENCODE v50 ALL transcript FASTA with eight threads:
-670,670 transcripts and 207,228,052 distinct k-mers; k=31 and g=23. The input was exactly
-decompressed before timing, with no transcript filtering.
+Full uncompressed GENCODE v50 ALL: **670,670 transcripts and 207,228,052 distinct k-mers**,
+k=31/g=23, eight requested threads, one warmup and three complete measured builds per binary.
+The shared verified FASTA is 1,575,713,375 bytes. The same build/source controls described above
+apply; all current measurements use the corrected release source.
 
-| Measurement | Preceding Rust baseline | Current kallistors |
-| --- | ---: | ---: |
-| Median whole-process elapsed time | 11.643 s | 11.373 s |
-| Median peak RSS | 5.64 GiB | 5.20 GiB |
-| Median peak footprint | 4.60 GiB | 4.48 GiB |
+| Builder | Median seconds | Peak RSS GiB | Peak footprint GiB |
+| --- | ---: | ---: | ---: |
+| Current kallistors | 11.115 | 5.765 | 4.576 |
+| Published v0.5.0 download | 111.160 | 12.921 | 14.207 |
+| v0.5.0, matched native build | 110.400 | 13.156 | 14.207 |
+| Original kallisto v0.52.0 | 123.813 | 7.845 | 7.152 |
 
-Across six measured builds per executable, elapsed time changed by -2.32%,
-RSS by -7.88% and footprint by -2.63%.
-RSS and footprint are distinct macOS measurements; RSS varied substantially even for unchanged
-executables, so both measures and individual runs are reported.
+Current is **10.00× faster with 55.4% lower RSS** than the download,
+**9.93× with 56.2% lower RSS** than matched-native v0.5.0, and
+**11.14× with 26.5% lower RSS** than original. Decompression is excluded;
+writing, allocation cleanup and shutdown are included.
 
-Two independent confirmation sets each used one warmup and three alternating measured builds per
-executable. The second set reversed the starting order. External CPU activity was flagged in
-4 of six baseline runs and 0 of six current runs; every observation was retained.
-Source builds used `target-cpu=native`. Every build was uninterrupted and produced identical
-complete index bytes. Comparisons use the preceding Rust builder, without multiplying separate
-optimization-round estimates.
+| Current internal stage | Median seconds |
+| --- | ---: |
+| FASTA parsing | 0.458 |
+| Graph construction | 8.372 |
+| EC construction | 0.868 |
+| Minimizers and MPHF | 0.869 |
+| Serialization and writing | 0.465 |
 
-| Set / pair | Baseline seconds | Current seconds | Baseline RSS, GiB | Current RSS, GiB | Baseline footprint, GiB | Current footprint, GiB |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Forward / 1 | 11.646 | 11.338 | 5.18 | 5.20 | 4.60 | 4.48 |
-| Forward / 2 | 11.580 | 11.327 | 5.81 | 5.22 | 4.62 | 4.53 |
-| Forward / 3 | 11.808 | 11.485 | 5.82 | 5.20 | 4.59 | 4.46 |
-| Reverse / 1 | 11.823 | 11.173 | 5.48 | 5.14 | 4.60 | 4.47 |
-| Reverse / 2 | 11.584 | 11.407 | 5.81 | 5.37 | 4.60 | 4.48 |
-| Reverse / 3 | 11.640 | 11.752 | 5.10 | 5.19 | 4.66 | 4.48 |
+Current stages are exclusive; independent stage medians need not sum to the median total.
+v0.5.0's reported write timer overlaps its MPHF timer; those raw phases are not added.
+Original's normal progress log has no equivalent complete construction-stage breakdown.
+RSS and macOS footprint are separate whole-process high-water measurements.
 
-| Internal stage, median seconds | Baseline | Current |
-| --- | ---: | ---: |
-| FASTA parsing | 0.473 | 0.463 |
-| Graph construction | 8.738 | 8.514 |
-| EC construction | 0.919 | 0.917 |
-| Minimizers and MPHF | 0.912 | 0.903 |
-| Serialization and writing | 0.485 | 0.482 |
+Every final index reproduces the complete upstream EC map on all 4,410,990 pairs:
+190,693 nonzero classes and 4,246,399 aligned pairs, with zero differences. Original kallisto
+also loads the current-built index with exact parity. Current, published v0.5.0 and
+matched-native v0.5.0 produce byte-identical Rust indexes. Hashes and sizes are recorded.
 
-Independent stage medians need not sum to the median whole-process time. These values describe
-this full-reference workload and machine family, rather than a universal speed or memory estimate.
-
-Construction excludes only byte-proven repeat windows, preserving seams and complete metadata.
-Shared ends and sparse internal anchors select candidate repeats; full equality proves each skip.
-Bounded deduplication and radix sorting limit collection work; completed parallel groups are
-losslessly packed before their word sort and restored to transcript order. Canonical-edge symmetry, exact
-small-bucket guards, active query batches and AArch64 cache hints reduce graph lookup work.
-The requested worker pool is reused across stages; edge finalization, accepted
-branch sequences, ECs, minimizers, collision marking and grouped serialization run in parallel.
-Serial ordered claims/joins retain deterministic graph order; long residual paths keep bounded
-fallback handling. Compact path/link/location scratch, sequence ownership reuse and early lookup
-release limit temporary allocations. Exact packed rank bounds, direct counted start-table filling,
-contiguous grouped EC positions and narrow MPHF scratch avoid overlapping full-size buffers.
-Join searches use exact prefix ranges; location lookup batches span short unitigs. Bounded worker
-query buffers are reused. Native bitmap fast paths match CRoaring bytes at their representation
-boundaries, with its serializer retained for the general cases. Wholly unused scratch pages are
-reclaimed on macOS/Linux. All tied minimizers and the v13 representation are preserved.
-The internal total includes final cleanup; process startup and pool teardown remain in whole-process
-time. See [construction details](development.md#index-construction) for exactness guarantees.
-
-Compatibility validation used 99,029 fasterp-trimmed pairs retained from the first 100,000
-SRR13638690 pairs. All 24 complete EC maps matched within their mode/strand case:
-paired/single × unstranded/FR/RF × both index builders × both quantifiers. Normal quantification
-counters and native HDF5 readback passed for both indexes in paired and single-end modes.
-Complete index-byte regression checks passed for the full GENCODE v50 ALL reference
-(670,670 transcripts and 207,228,052 distinct k-mers). Serial/threaded
-construction also matched across 27 nucleotide k/g cases and one amino-acid case. On all 4.41 million
-fasterp-trimmed pairs, complete paired and single-end EC maps also matched the preceding Rust
-baseline and the original quantifier exactly. Single-end EC checks used a 200 bp fragment length.
-Matched all-observation
-quantification retained identical histograms, target identities, lengths and effective lengths;
-the maximum estimated-count difference was below 1e-9. Native HDF5 readback checked every row.
-
+All observations and control rechecks are retained with CPU/power context in the
+[measurement evidence](benchmark-results.json). These factors describe this reference and build.
+See [construction details](development.md#index-construction) for the current implementation.
 
 ## Correctness and interpretation
 
