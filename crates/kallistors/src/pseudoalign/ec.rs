@@ -66,6 +66,34 @@ pub(crate) fn merge_sorted_unique_vec(base: &mut Vec<u32>, extra: &[u32]) {
 
 pub(crate) fn intersect_sorted(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
     out.clear();
+    if a == b {
+        out.extend_from_slice(a);
+        return;
+    }
+    if let [value] = a {
+        if b.binary_search(value).is_ok() {
+            out.push(*value);
+        }
+        return;
+    }
+    if let [value] = b {
+        if a.binary_search(value).is_ok() {
+            out.push(*value);
+        }
+        return;
+    }
+    let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    if !small.is_empty() && large.len() / small.len() >= 16 {
+        let mut cursor = 0;
+        for &value in small {
+            cursor += large[cursor..].partition_point(|&candidate| candidate < value);
+            if large.get(cursor) == Some(&value) {
+                out.push(value);
+                cursor += 1;
+            }
+        }
+        return;
+    }
     let mut i = 0;
     let mut j = 0;
     while i < a.len() && j < b.len() {
@@ -79,6 +107,70 @@ pub(crate) fn intersect_sorted(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
             j += 1;
         }
     }
+}
+
+// Both inputs are sorted multisets. Writes never overtake the unread prefix.
+pub(crate) fn intersect_sorted_in_place(a: &mut Vec<u32>, b: &[u32]) {
+    if a.is_empty() || b.is_empty() || a[0] > b[b.len() - 1] || b[0] > a[a.len() - 1] {
+        a.clear();
+        return;
+    }
+    if a.as_slice() == b {
+        return;
+    }
+    if a.len() == 1 {
+        if b.binary_search(&a[0]).is_err() {
+            a.clear();
+        }
+        return;
+    }
+    if b.len() == 1 {
+        if a.binary_search(&b[0]).is_ok() {
+            a[0] = b[0];
+            a.truncate(1);
+        } else {
+            a.clear();
+        }
+        return;
+    }
+    let mut written = 0;
+    if b.len() / a.len() >= 16 {
+        let mut cursor = 0;
+        for i in 0..a.len() {
+            let value = a[i];
+            cursor += b[cursor..].partition_point(|&candidate| candidate < value);
+            if b.get(cursor) == Some(&value) {
+                a[written] = value;
+                written += 1;
+                cursor += 1;
+            }
+        }
+    } else if a.len() / b.len() >= 16 {
+        let mut cursor = 0;
+        for &value in b {
+            cursor += a[cursor..].partition_point(|&candidate| candidate < value);
+            if a.get(cursor) == Some(&value) {
+                a[written] = value;
+                written += 1;
+                cursor += 1;
+            }
+        }
+    } else {
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() && j < b.len() {
+            if a[i] == b[j] {
+                a[written] = a[i];
+                written += 1;
+                i += 1;
+                j += 1;
+            } else if a[i] < b[j] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+    }
+    a.truncate(written);
 }
 
 pub(crate) fn merge_sorted_unique(a: &mut Vec<u32>, b: &[u32]) {
@@ -188,6 +280,45 @@ impl KmerPairCursor {
 #[cfg(test)]
 mod rolling_read_tests {
     use super::*;
+
+    #[test]
+    fn sorted_intersection_preserves_multisets_and_reused_output() {
+        let mut out = vec![u32::MAX; 100];
+        for n in [0, 1, 2, 7, 31, 67, 257] {
+            for m in [0, 1, 2, 7, 31, 67, 257] {
+                for salt in [0, 1, 17] {
+                    let mut a: Vec<_> = (0..n).map(|i| (i * 13 + salt) % 37).collect();
+                    let mut b: Vec<_> = (0..m).map(|i| (i * 7 + salt) % 43).collect();
+                    a.sort_unstable();
+                    b.sort_unstable();
+                    let mut expected = Vec::new();
+                    let mut remaining = std::collections::BTreeMap::<u32, usize>::new();
+                    for &value in &b {
+                        *remaining.entry(value).or_default() += 1;
+                    }
+                    for &value in &a {
+                        if let Some(count) = remaining.get_mut(&value)
+                            && *count > 0
+                        {
+                            expected.push(value);
+                            *count -= 1;
+                        }
+                    }
+                    intersect_sorted(&a, &b, &mut out);
+                    assert_eq!(out, expected, "n={n} m={m} salt={salt}");
+                    let mut inplace = a.clone();
+                    intersect_sorted_in_place(&mut inplace, &b);
+                    assert_eq!(inplace, expected, "in-place n={n} m={m} salt={salt}");
+                    let mut same = a.clone();
+                    intersect_sorted_in_place(&mut same, &a);
+                    assert_eq!(same, a);
+
+                    intersect_sorted(&a, &a, &mut out);
+                    assert_eq!(out, a);
+                }
+            }
+        }
+    }
 
     #[test]
     fn grouped_read_encoding_matches_independent_byte_oracle() {

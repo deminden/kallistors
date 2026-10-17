@@ -23,8 +23,12 @@ pub(crate) fn filter_ec_by_fragment(
     if blocks.is_empty() || blocks[0].positions.is_none() {
         return ec.to_vec();
     }
-    let unitig_len = if best_match.unitig_id < index.unitigs.len() {
-        index.unitigs[best_match.unitig_id].len()
+    let unitig_len = if best_match.unitig_id < index.unitig_count() {
+        index
+            .encoded_unitigs
+            .unitig_bases
+            .len(best_match.unitig_id)
+            .unwrap_or(index.k)
     } else {
         index.k
     };

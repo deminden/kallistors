@@ -256,6 +256,52 @@ Index time/size comparisons do not by themselves establish index compatibility. 
 builders' indexes in both quantifiers and compare complete counted EC maps on identical reads,
 including paired/single and relevant strand options. Index bytes may differ between builders.
 
+### Eight-thread quantification measurement
+
+On Apple Silicon, quantifying **4,410,990 paired fragments** from SRR13638690 against the complete
+GENCODE v50 ALL index (670,670 transcripts, k=31, g=23) took a median **8.80 s**, with **1.15 GiB peak RSS**, and
+**1.10 GiB peak footprint**. Reads use the documented ENA/fasterp preparation. One full
+warmup per binary preceded three measured runs at eight threads, alternating with the preceding
+committed Rust baseline on identical inputs and index. Source builds used `target-cpu=native`.
+All measurements were retained; the CPU monitor flagged activity in 0 candidate and
+0 control runs. Such sampling cannot exclude all background contention.
+
+| Measurement | Preceding baseline | Current implementation |
+| --- | ---: | ---: |
+| Whole-process median | 9.272 s | 8.799 s |
+| Median peak RSS | 2.069 GiB | 1.146 GiB |
+
+The fresh comparison reduced median peak RSS by **44.6%** with a
+**1.054×** total speedup. Ten accepted memory optimization rounds each required at least
+2% lower median peak RSS and no higher median total time against the immediately preceding
+accepted binary. Partial improvements were combined; failed candidates did not count.
+
+| Phase | Current median seconds |
+| --- | ---: |
+| Index loading/setup | 1.561 |
+| Read processing | 4.900 |
+| Model + EM | 1.803 |
+| Output/shutdown | 0.533 |
+| Complete process | 8.799 |
+
+Totals include index loading, every read pair, fragment estimation, EM, full default TSV/HDF5
+output and cleanup. Deferred transcript-name loading is included in output/shutdown. Stage
+medians are independent and need not sum to the total median. Peak RSS is the operating system's
+whole-process high-water mark, not the live size of the final graph. macOS footprint is a separate
+measurement.
+
+Complete paired EC comparison preserved **190,693 nonzero classes and 4,246,399 counts** against
+both the preceding Rust baseline and original kallisto's diagnostic export. A full-mate single-end
+comparison preserved **191,262 classes and 4,276,198 counts** against the Rust baseline. Native HDF5
+readback validated every one of the 670,670 full transcript IDs, lengths and output rows.
+
+Default fragment sampling retains upstream buffer/quota behavior. Histograms can differ with
+scheduling, so exact EC parity does not imply exact default abundances. With
+`--fragment-length-samples 0`, the matched all-observation model produced identical histograms,
+target IDs, target lengths and effective lengths. The maximum estimated-count difference was
+1.1e-09. Fixed-input serial/threaded regressions also check floating-point bits. These are
+measurements of this workload and build, not a universal memory or speed estimate.
+
 ### Eight-thread index build measurement
 
 On Apple Silicon, building the complete GENCODE v50 ALL transcript FASTA with eight threads:

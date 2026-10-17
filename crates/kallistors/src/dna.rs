@@ -67,7 +67,7 @@ pub(crate) fn encode_sixteen_bases(bytes: &[u8; 16]) -> Option<u64> {
 }
 
 #[inline]
-fn reverse_complement_word(forward: u64, len: usize) -> u64 {
+pub(crate) fn reverse_complement_word(forward: u64, len: usize) -> u64 {
     if len == 0 {
         return 0;
     }

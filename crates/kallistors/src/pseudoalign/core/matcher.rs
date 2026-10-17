@@ -80,7 +80,8 @@ pub(crate) fn match_unitig_candidate_encoded(
     allow_rev: bool,
     allow_relaxed: bool,
 ) -> Option<(usize, bool, bool, bool)> {
-    let unitig_len = index.encoded_unitigs.unitig_bases.len(unitig_id)?;
+    let sequence = index.encoded_unitigs.unitig_bases.sequence(unitig_id)?;
+    let unitig_len = sequence.len;
     if unitig_len < index.k {
         return None;
     }
@@ -94,10 +95,7 @@ pub(crate) fn match_unitig_candidate_encoded(
         if (allow_forward || allow_rev) && start_fwd >= 0 {
             let start = start_fwd as usize;
             if start + index.k <= unitig_len {
-                let code = index
-                    .encoded_unitigs
-                    .unitig_bases
-                    .encode_kmer_at(unitig_id, start, index.k);
+                let code = sequence.kmer_at(start, index.k);
                 if allow_forward && code == Some(read_fwd) {
                     return Some((start, false, false, true));
                 }
@@ -109,26 +107,14 @@ pub(crate) fn match_unitig_candidate_encoded(
     } else {
         if allow_forward && start_fwd >= 0 {
             let start = start_fwd as usize;
-            if start + index.k <= unitig_len
-                && index
-                    .encoded_unitigs
-                    .unitig_bases
-                    .encode_kmer_at(unitig_id, start, index.k)
-                    == Some(read_fwd)
-            {
+            if start + index.k <= unitig_len && sequence.kmer_at(start, index.k) == Some(read_fwd) {
                 return Some((start, false, false, true));
             }
         }
 
         if allow_rev && start_rev >= 0 {
             let start = start_rev as usize;
-            if start + index.k <= unitig_len
-                && index
-                    .encoded_unitigs
-                    .unitig_bases
-                    .encode_kmer_at(unitig_id, start, index.k)
-                    == Some(read_rev)
-            {
+            if start + index.k <= unitig_len && sequence.kmer_at(start, index.k) == Some(read_rev) {
                 return Some((start, true, false, false));
             }
         }
@@ -142,11 +128,7 @@ pub(crate) fn match_unitig_candidate_encoded(
     if start_lo > start_hi {
         return None;
     }
-    if let Some(windows) = index
-        .encoded_unitigs
-        .unitig_bases
-        .kmer_range(unitig_id, start_lo, start_hi, index.k)
-    {
+    if let Some(windows) = sequence.range(start_lo, start_hi, index.k) {
         for (start, code) in windows {
             if allow_forward && code == read_fwd {
                 return Some((start, false, true, true));
@@ -158,11 +140,7 @@ pub(crate) fn match_unitig_candidate_encoded(
         return None;
     }
     for start in start_lo..=start_hi {
-        let Some(code) = index
-            .encoded_unitigs
-            .unitig_bases
-            .encode_kmer_at(unitig_id, start, index.k)
-        else {
+        let Some(code) = sequence.kmer_at(start, index.k) else {
             continue;
         };
         if allow_forward && code == read_fwd {
@@ -256,6 +234,13 @@ pub(crate) fn match_kmer_at_pos(
             allow_relaxed,
         );
     }
+    let fingerprint_codes = (index.k == 31 && index.g == 23 && !index.minz_fingerprints.is_empty())
+        .then(|| encode_kmer_pair(kmer))
+        .flatten();
+    let mut query_fingerprints = super::super::fingerprints::QueryFingerprintCache::default();
+    let encoded_match_codes = (index.k <= 32 && kmer.iter().all(u8::is_ascii_uppercase))
+        .then(|| encode_kmer_pair(kmer))
+        .flatten();
     let mut tried_tail_minimizer = false;
     'min_outer: loop {
         let mut request_next_min = false;
@@ -273,6 +258,23 @@ pub(crate) fn match_kmer_at_pos(
             let Some(min_idx) = index.mphf.lookup(&min_bytes) else {
                 continue;
             };
+            if let Some((forward, reverse)) = fingerprint_codes {
+                let fingerprint = index
+                    .minz_fingerprints
+                    .get(min_idx as usize)
+                    .copied()
+                    .unwrap_or(0);
+                if fingerprint != 0
+                    && fingerprint != super::super::fingerprints::DISABLED
+                    && fingerprint
+                        != super::super::fingerprints::word_fingerprint(u64::from_le_bytes(
+                            min_bytes,
+                        ))
+                    && !query_fingerprints.contains(forward, reverse, fingerprint)
+                {
+                    continue;
+                }
+            }
             let positions = &index.minz_positions[min_idx as usize];
             if positions.is_empty() {
                 continue;
@@ -308,12 +310,12 @@ pub(crate) fn match_kmer_at_pos(
                 let (unitig_id, rel_pos, is_km) = crate::index::bifrost::decode_pos_id(pos_id);
                 if is_km {
                     let uid = unitig_id as usize;
-                    if uid >= index.km_unitigs.len() {
+                    if uid >= index.km_unitig_count() {
                         continue;
                     }
                     let km_pos = rel_pos as usize;
-                    let km_seq = index.km_unitigs[uid].as_slice();
-                    if km_seq != kmer_canon {
+                    let km_seq = index.km_unitig_sequence(uid)?;
+                    if km_seq.as_ref() != kmer_canon {
                         continue;
                     }
                     if min_pos != km_pos && min_pos + km_pos != _diff {
@@ -323,17 +325,31 @@ pub(crate) fn match_kmer_at_pos(
                     if (used_revcomp && !allow_rev) || (!used_revcomp && !allow_forward) {
                         continue;
                     }
-                    let unitig_id = index.unitigs.len() + uid;
+                    let unitig_id = index.unitig_count() + uid;
                     let block_idx = block_index_for_position_fast(index, unitig_id, 0)?;
                     return Some((unitig_id, 0usize, used_revcomp, block_idx, false));
                 } else {
                     let uid = unitig_id as usize;
-                    if uid >= index.unitigs.len() {
+                    if uid >= index.unitig_count() {
                         continue;
                     }
-                    if let Some((start, used_revcomp, matched_relaxed, _forward_strand)) =
+                    let matched = if let Some((forward, reverse)) = encoded_match_codes {
+                        match_unitig_candidate_encoded(
+                            index,
+                            uid,
+                            rel_pos as usize,
+                            _diff,
+                            min_pos_fwd,
+                            min_pos_rev,
+                            forward,
+                            reverse,
+                            allow_forward,
+                            allow_rev,
+                            allow_relaxed,
+                        )
+                    } else {
                         match_unitig_candidate(
-                            index.unitigs[uid].as_slice(),
+                            index.unitig_sequence(uid)?.as_ref(),
                             index.k,
                             rel_pos as usize,
                             _diff,
@@ -345,7 +361,8 @@ pub(crate) fn match_kmer_at_pos(
                             allow_rev,
                             allow_relaxed,
                         )
-                    {
+                    };
+                    if let Some((start, used_revcomp, matched_relaxed, _forward_strand)) = matched {
                         let block_idx = block_index_for_position_fast(index, uid, start)?;
                         return Some((uid, start, used_revcomp, block_idx, matched_relaxed));
                     }

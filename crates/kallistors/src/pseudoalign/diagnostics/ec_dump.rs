@@ -31,12 +31,14 @@ pub fn write_index_ec_dump_filtered(
         {
             continue;
         }
-        let seq = if unitig_id < index.unitigs.len() {
-            &index.unitigs[unitig_id]
+        let seq = if unitig_id < index.unitig_count() {
+            index.unitig_sequence(unitig_id).expect("valid graph node")
         } else {
-            let km_idx = unitig_id - index.unitigs.len();
-            if km_idx < index.km_unitigs.len() {
-                &index.km_unitigs[km_idx]
+            let km_idx = unitig_id - index.unitig_count();
+            if km_idx < index.km_unitig_count() {
+                index
+                    .km_unitig_sequence(km_idx)
+                    .expect("valid fixed graph node")
             } else {
                 continue;
             }

@@ -104,8 +104,9 @@ impl PairedBatchBuilder {
 fn produce_batches<R: PackedSeqBatchSource>(
     reader: &mut R,
     tx: &Sender<Result<PackedSeqBatch>>,
+    batch_size: usize,
 ) -> Result<()> {
-    while let Some(batch) = reader.next_packed_seq_batch(super::BATCH_SIZE)? {
+    while let Some(batch) = reader.next_packed_seq_batch(batch_size)? {
         if tx.send(Ok(batch)).is_err() {
             return Ok(());
         }
@@ -150,7 +151,8 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
         let mut handles = Vec::with_capacity(threads);
 
         let read_start = Instant::now();
-        let producer = scope.spawn(move || produce_batches(reader, &producer_tx));
+        let producer =
+            scope.spawn(move || produce_batches(reader, &producer_tx, super::BATCH_SIZE));
 
         let pseudoalign_start = Instant::now();
         for _ in 0..threads {
@@ -256,46 +258,52 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
     let mut merged_map: EcCountMap = EcCountMap::default();
     let mut final_error: Option<Error> = None;
 
+    let key_pool = Arc::new(super::utils::SharedEcPool::default());
     let sampler = super::paired::FragmentLengthSampler::new(options.fragment_length_samples);
     thread::scope(|scope| {
-        let (left_tx, left_rx) = bounded::<Result<PackedSeqBatch>>(2);
-        let (right_tx, right_rx) = bounded::<Result<PackedSeqBatch>>(2);
-        let (work_tx, work_rx) = bounded::<Vec<PairedChunk>>(threads);
+        let (left_tx, left_rx) = bounded::<Result<PackedSeqBatch>>(1);
+        let (right_tx, right_rx) = bounded::<Result<PackedSeqBatch>>(1);
+        let (work_tx, work_rx) = bounded::<Vec<PairedChunk>>(0);
         let mut handles = Vec::with_capacity(threads);
 
         let read_start = Instant::now();
-        let left_producer = scope.spawn(move || produce_batches(reader1, &left_tx));
-        let right_producer = scope.spawn(move || produce_batches(reader2, &right_tx));
+        let left_producer =
+            scope.spawn(move || produce_batches(reader1, &left_tx, super::BATCH_SIZE / 2));
+        let right_producer =
+            scope.spawn(move || produce_batches(reader2, &right_tx, super::BATCH_SIZE / 2));
 
         let pseudoalign_start = Instant::now();
         for _ in 0..threads {
             let rx = work_rx.clone();
             let sampler = &sampler;
-            handles.push(scope.spawn(move || -> Result<EcCounts> {
-                let mut acc = EcCounts::new(options.bias);
-                let mut acc_map: EcCountMap = EcCountMap::default();
-                while let Ok(chunks) = rx.recv() {
-                    let budget = sampler.remaining();
-                    let local_sampler = super::paired::FragmentLengthSampler::new(budget);
-                    for chunk in chunks {
-                        super::paired::pseudoalign_paired_bifrost_batch_into(
-                            index,
-                            &chunk.left,
-                            &chunk.right,
-                            chunk.reads,
-                            strand,
-                            options,
-                            &mut acc,
-                            &mut acc_map,
-                            (options.fragment_length_samples != 0).then_some(&local_sampler),
-                        )?;
+            let key_pool = Arc::clone(&key_pool);
+            handles.push(
+                scope.spawn(move || -> Result<(EcCounts, super::utils::SharedEcKeys)> {
+                    let mut acc = EcCounts::new(options.bias);
+                    let mut acc_map = EcCountMap::shared(key_pool);
+                    while let Ok(chunks) = rx.recv() {
+                        let budget = sampler.remaining();
+                        let local_sampler = super::paired::FragmentLengthSampler::new(budget);
+                        for chunk in chunks {
+                            super::paired::pseudoalign_paired_bifrost_batch_into(
+                                index,
+                                &chunk.left,
+                                &chunk.right,
+                                chunk.reads,
+                                strand,
+                                options,
+                                &mut acc,
+                                &mut acc_map,
+                                (options.fragment_length_samples != 0).then_some(&local_sampler),
+                            )?;
+                        }
+                        if options.fragment_length_samples != 0 {
+                            sampler.submit(budget - local_sampler.remaining());
+                        }
                     }
-                    if options.fragment_length_samples != 0 {
-                        sampler.submit(budget - local_sampler.remaining());
-                    }
-                }
-                Ok(acc)
-            }));
+                    Ok((acc, acc_map.into_shared_keys()))
+                }),
+            );
         }
 
         let mut batch_builder = PairedBatchBuilder::default();
@@ -367,11 +375,17 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
         }
         timing::add_duration(Stage::FastqReadDecompress, read_start.elapsed());
 
+        key_pool.clear();
         for handle in handles {
             match handle.join() {
-                Ok(Ok(counts)) => {
+                Ok(Ok((counts, keys))) => {
                     let merge_start = Instant::now();
-                    super::merge_ec_counts(&mut merged, &mut merged_map, counts);
+                    super::utils::merge_shared_ec_counts(
+                        &mut merged,
+                        &mut merged_map,
+                        counts,
+                        keys,
+                    );
                     timing::add_duration(Stage::EcMerge, merge_start.elapsed());
                 }
                 Ok(Err(err)) => {

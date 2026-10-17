@@ -914,7 +914,7 @@ mod skipped_position_tests {
 
 mod packed_transcripts;
 
-mod scratch_pages;
+pub(crate) mod scratch_pages;
 
 mod transcript_runs;
 

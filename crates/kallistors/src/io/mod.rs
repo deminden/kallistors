@@ -164,6 +164,22 @@ impl Read for FastqInput {
 }
 
 impl BufRead for FastqInput {
+    // Delegate whole line operations once, avoiding enum dispatch for each
+    // fill_buf/consume operation inside the standard buffered loops.
+    fn read_until(&mut self, byte: u8, out: &mut Vec<u8>) -> std::io::Result<usize> {
+        match self {
+            Self::Gzip(reader) => reader.read_until(byte, out),
+            Self::Plain(reader) => reader.read_until(byte, out),
+            Self::Stdin(reader) => reader.read_until(byte, out),
+        }
+    }
+    fn skip_until(&mut self, byte: u8) -> std::io::Result<usize> {
+        match self {
+            Self::Gzip(reader) => reader.skip_until(byte),
+            Self::Plain(reader) => reader.skip_until(byte),
+            Self::Stdin(reader) => reader.skip_until(byte),
+        }
+    }
     fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
         match self {
             Self::Gzip(reader) => reader.fill_buf(),

@@ -15,7 +15,7 @@ pub(super) fn bias_hexamer_for_match(index: &BifrostIndex, best_match: MatchInfo
     let p = best_match.read_pos as isize;
     let pre = 2isize;
     let post = 4isize;
-    let unitig = index.unitigs.get(best_match.unitig_id)?;
+    let unitig = index.unitig_sequence(best_match.unitig_id)?;
     if unitig.len() < 6 {
         return None;
     }

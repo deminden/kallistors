@@ -60,11 +60,11 @@ pub fn pseudoalign_single_end<R: ReadSource>(
         }
 
         reads_aligned += 1;
-        let ec_id = match ec_map.get(&current) {
-            Some(id) => *id,
+        let ec_id = match ec_map.get(&current, &ec_list) {
+            Some(id) => id,
             None => {
                 let id = ec_list.len();
-                ec_map.insert(current.clone(), id);
+                ec_map.insert(&current, id);
                 ec_list.push(current.clone());
                 counts.push(0);
                 id
@@ -428,11 +428,11 @@ fn pseudoalign_single_end_bifrost_inner<R: ReadSource>(
         }
 
         reads_aligned += 1;
-        let ec_id = match ec_map.get(&read_ec.ec) {
-            Some(id) => *id,
+        let ec_id = match ec_map.get(&read_ec.ec, &ec_list) {
+            Some(id) => id,
             None => {
                 let id = ec_list.len();
-                ec_map.insert(read_ec.ec.clone(), id);
+                ec_map.insert(&read_ec.ec, id);
                 ec_list.push(read_ec.ec.clone());
                 counts.push(0);
                 id

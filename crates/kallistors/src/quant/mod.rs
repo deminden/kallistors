@@ -12,9 +12,13 @@ use crate::pseudoalign::StrandSpecific;
 use crate::{Error, Result};
 use rayon::prelude::*;
 
+mod compact_ids;
+mod components;
+use compact_ids::CompactTranscriptIds;
 mod output;
 pub use output::{
-    H5QuantOutput, RunInfo, write_abundance_h5, write_abundance_tsv, write_abundance_tsv_from_parts,
+    H5QuantOutput, RunInfo, write_abundance_h5, write_abundance_tsv,
+    write_abundance_tsv_from_parts, write_abundance_tsv_from_parts_threaded,
 };
 
 const MIN_ALPHA: f64 = 1e-8;
@@ -374,6 +378,62 @@ pub fn em_quantify_with_fragment_histogram_threaded(
     options: QuantOptions,
     threads: usize,
 ) -> Result<QuantResult> {
+    em_quantify_input_threaded(
+        QuantInput::Borrowed(input),
+        transcript_lengths,
+        transcript_sequences,
+        bias_counts,
+        fragment_length_hist,
+        options,
+        threads,
+    )
+}
+
+/// Quantify owned EC counts, releasing their duplicate transcript lists after
+/// preparation. Use the borrowed API when counts are needed for bootstrapping.
+pub fn em_quantify_owned_with_fragment_histogram_threaded(
+    input: EcCountsInput,
+    transcript_lengths: &[u32],
+    transcript_sequences: Option<&[Vec<u8>]>,
+    bias_counts: Option<&BiasCounts>,
+    fragment_length_hist: Option<&[u32]>,
+    options: QuantOptions,
+    threads: usize,
+) -> Result<QuantResult> {
+    em_quantify_input_threaded(
+        QuantInput::Owned(input),
+        transcript_lengths,
+        transcript_sequences,
+        bias_counts,
+        fragment_length_hist,
+        options,
+        threads,
+    )
+}
+
+enum QuantInput<'a> {
+    Borrowed(&'a EcCountsInput),
+    Owned(EcCountsInput),
+}
+impl std::ops::Deref for QuantInput<'_> {
+    type Target = EcCountsInput;
+    fn deref(&self) -> &EcCountsInput {
+        match self {
+            Self::Borrowed(input) => input,
+            Self::Owned(input) => input,
+        }
+    }
+}
+
+fn em_quantify_input_threaded(
+    input: QuantInput<'_>,
+    transcript_lengths: &[u32],
+    transcript_sequences: Option<&[Vec<u8>]>,
+    bias_counts: Option<&BiasCounts>,
+    fragment_length_hist: Option<&[u32]>,
+    options: QuantOptions,
+    threads: usize,
+) -> Result<QuantResult> {
     let num_trans = transcript_lengths.len();
     if num_trans == 0 {
         return Err(Error::InvalidFormat("no transcripts provided".into()));
@@ -400,6 +460,7 @@ pub fn em_quantify_with_fragment_histogram_threaded(
     let mut next_alpha = vec![0.0f64; num_trans];
 
     let mut em_work = prepare_em_work(&input.ec_list.classes, &input.counts, &eff_lens);
+    drop(input);
 
     let em_pool = if threads > 1 && !em_work.multi_ecs.is_empty() {
         Some(
@@ -414,27 +475,26 @@ pub fn em_quantify_with_fragment_histogram_threaded(
         None
     };
     let compact = em_pool.is_some() && !options.bias && options.max_iter != 0;
-    if compact {
+    let mut components = if compact {
+        let components = em_work.group_components();
         em_work.compact_transcript_ids();
         alpha.truncate(em_work.active_transcripts.len());
         // Compact updates use only their own previous alpha after the denominator barrier.
         next_alpha = Vec::new();
-    }
+        Some(components)
+    } else {
+        None
+    };
     let mut incoming = em_pool
         .as_ref()
         .map(|_| EmIncoming::new(&em_work, options.bias));
-    let compact_transcripts: Option<Vec<u32>> =
-        if compact && em_work.active_transcripts.len() <= u32::MAX as usize {
-            let ids = em_work
-                .multi_transcripts
-                .iter()
-                .map(|&tr| tr as u32)
-                .collect();
-            em_work.multi_transcripts = Vec::new();
-            Some(ids)
-        } else {
-            None
-        };
+    let compact_transcripts = if compact && em_work.active_transcripts.len() <= u32::MAX as usize {
+        Some(CompactTranscriptIds::new(std::mem::take(
+            &mut em_work.multi_transcripts,
+        )))
+    } else {
+        None
+    };
     let mut scales = EcScales::new(if em_pool.is_some() {
         em_work.multi_ecs.len()
     } else {
@@ -445,8 +505,46 @@ pub fn em_quantify_with_fragment_histogram_threaded(
     } else {
         Vec::new()
     };
+    // Convergence cannot terminate at iter <= min_rounds. Independent
+    // components can execute these mandatory rounds while their data is hot.
+    let burn_in = if let (Some(pool), Some(incoming), Some(components)) =
+        (&em_pool, &incoming, &mut components)
+    {
+        let rounds = options.max_iter.min(options.min_rounds.saturating_add(1));
+        match &compact_transcripts {
+            Some(ids) => {
+                components::step::<_, false>(
+                    pool,
+                    components,
+                    &em_work,
+                    incoming,
+                    ids,
+                    &mut alpha,
+                    &mut scales,
+                    rounds,
+                );
+            }
+            None => {
+                components::step::<_, false>(
+                    pool,
+                    components,
+                    &em_work,
+                    incoming,
+                    &em_work.multi_transcripts,
+                    &mut alpha,
+                    &mut scales,
+                    rounds,
+                );
+            }
+        }
+        rounds
+    } else {
+        0
+    };
     let mut final_round = false;
-    for iter in 0..options.max_iter {
+    let mut iterations = burn_in;
+    for iter in burn_in..options.max_iter {
+        iterations = iter + 1;
         if options.bias
             && (iter == options.min_rounds || iter == options.min_rounds + 500)
             && let (Some(bias_counts), Some(transcript_sequences)) =
@@ -469,7 +567,32 @@ pub fn em_quantify_with_fragment_histogram_threaded(
         }
 
         let mut parallel_changes = None;
-        if let (Some(pool), Some(incoming)) = (&em_pool, &incoming) {
+        if let (Some(pool), Some(incoming), Some(components)) =
+            (&em_pool, &incoming, &mut components)
+        {
+            parallel_changes = Some(match &compact_transcripts {
+                Some(ids) => components::step::<_, true>(
+                    pool,
+                    components,
+                    &em_work,
+                    incoming,
+                    ids,
+                    &mut alpha,
+                    &mut scales,
+                    1,
+                ),
+                None => components::step::<_, true>(
+                    pool,
+                    components,
+                    &em_work,
+                    incoming,
+                    &em_work.multi_transcripts,
+                    &mut alpha,
+                    &mut scales,
+                    1,
+                ),
+            });
+        } else if let (Some(pool), Some(incoming)) = (&em_pool, &incoming) {
             pool.install(|| {
                 scales
                     .values
@@ -583,12 +706,19 @@ pub fn em_quantify_with_fragment_histogram_threaded(
         }
         if stop_em {
             final_round = true;
+            if let Some(groups) = &mut components {
+                components::reset_fixed(groups);
+            }
             for val in &mut alpha {
                 if *val < ALPHA_LIMIT / 10.0 {
                     *val = 0.0;
                 }
             }
         }
+    }
+
+    if crate::timing::is_enabled() {
+        eprintln!("[quant-em] iterations={iterations}");
     }
 
     if compact {

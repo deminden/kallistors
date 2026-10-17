@@ -126,14 +126,9 @@ pub fn run(args: QuantArgs) -> Result<()> {
     };
 
     mark_phase("index_begin");
-    let index = super::build_mapping_index(
-        &args.index,
-        load_positional_info,
-        args.threads,
-        options,
-        false,
-    )
-    .map_err(|err| anyhow!("pseudoalign failed: {err}"))?;
+    let mut index =
+        super::build_quant_index(&args.index, load_positional_info, args.threads, options)
+            .map_err(|err| anyhow!("pseudoalign failed: {err}"))?;
     mark_phase("index_end");
 
     let mut reader1 = kallistors::io::open_fastq_reader(reads1)?;
@@ -207,6 +202,14 @@ pub fn run(args: QuantArgs) -> Result<()> {
         counts,
     };
 
+    // Mapping is complete. Retain output/model metadata and release the graph,
+    // minimizer tables and caches before allocating EM/output working arrays.
+    let transcript_names = index.take_transcript_names();
+    let transcript_lengths = std::mem::take(&mut index.transcript_lengths);
+    let index_version = index.index_version;
+    let k = index.k;
+    index.retire();
+
     let quant_options = kallistors::quant::QuantOptions {
         mean_fragment_length,
         fragment_length_sd,
@@ -214,40 +217,62 @@ pub fn run(args: QuantArgs) -> Result<()> {
         strand_specific,
         ..kallistors::quant::QuantOptions::default()
     };
+    let mut ec_input = Some(ec_input);
     mark_phase("em_begin");
     let result = {
         let _em_timing = kallistors::timing::scoped(kallistors::timing::Stage::Em);
-        kallistors::quant::em_quantify_with_fragment_histogram_threaded(
-            &ec_input,
-            &index.transcript_lengths,
-            transcript_seqs.as_deref(),
-            bias.as_ref(),
-            if single {
-                None
-            } else {
-                fragment_length_hist.as_deref()
-            },
-            quant_options,
-            args.threads,
-        )?
+        if args.bootstrap_samples == 0 {
+            kallistors::quant::em_quantify_owned_with_fragment_histogram_threaded(
+                ec_input.take().expect("owned EC input available"),
+                &transcript_lengths,
+                transcript_seqs.as_deref(),
+                bias.as_ref(),
+                if single {
+                    None
+                } else {
+                    fragment_length_hist.as_deref()
+                },
+                quant_options,
+                args.threads,
+            )?
+        } else {
+            kallistors::quant::em_quantify_with_fragment_histogram_threaded(
+                ec_input.as_ref().expect("bootstrap EC input retained"),
+                &transcript_lengths,
+                transcript_seqs.as_deref(),
+                bias.as_ref(),
+                if single {
+                    None
+                } else {
+                    fragment_length_hist.as_deref()
+                },
+                quant_options,
+                args.threads,
+            )?
+        }
     };
     mark_phase("em_end");
 
+    let transcript_names = transcript_names.load()?;
     let output_timing = kallistors::timing::scoped(kallistors::timing::Stage::QuantOutput);
     fs::create_dir_all(&args.out_dir)?;
     let abundance_path = args.out_dir.join("abundance.tsv");
     let run_info_path = args.out_dir.join("run_info.json");
-    let target_names = index
-        .transcript_names
+    let target_names = transcript_names
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
     let write_tsv = || {
-        kallistors::quant::write_abundance_tsv_from_parts(
+        kallistors::quant::write_abundance_tsv_from_parts_threaded(
             &abundance_path,
             &target_names,
-            &index.transcript_lengths,
+            &transcript_lengths,
             &result,
+            if args.plaintext {
+                args.threads
+            } else {
+                args.threads.saturating_sub(1).max(1)
+            },
         )
     };
 
@@ -256,7 +281,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
             Vec::new()
         } else {
             kallistors::quant::bootstrap_quantify(
-                &ec_input,
+                ec_input.as_ref().expect("bootstrap EC input retained"),
                 &result.eff_lengths,
                 args.bootstrap_samples,
                 args.seed,
@@ -270,7 +295,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
                 kallistors::quant::write_abundance_tsv_from_parts(
                     &path,
                     &target_names,
-                    &index.transcript_lengths,
+                    &transcript_lengths,
                     bootstrap,
                 )?;
             }
@@ -286,13 +311,13 @@ pub fn run(args: QuantArgs) -> Result<()> {
                 &h5_path,
                 kallistors::quant::H5QuantOutput {
                     target_names: &target_names,
-                    target_lengths: &index.transcript_lengths,
+                    target_lengths: &transcript_lengths,
                     result: &result,
                     bootstrap_est_counts: &bootstrap_counts,
                     reads_processed,
                     fragment_length_hist: fragment_length_hist.as_deref(),
                     bias_observed: bias.as_ref().map(|counts| counts.counts.as_slice()),
-                    index_version: index.index_version,
+                    index_version,
                     kallisto_version: &format!("kallistors {}", env!("CARGO_PKG_VERSION")),
                     call: &std::env::args().collect::<Vec<_>>().join(" "),
                     start_time: &start_time,
@@ -318,7 +343,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
     let p_pseudoaligned = percent(reads_aligned, reads_processed);
     let p_unique = percent(unique, reads_processed);
     let run_info = kallistors::quant::RunInfo {
-        n_targets: index.transcript_names.len(),
+        n_targets: transcript_names.len(),
         n_bootstraps: args.bootstrap_samples,
         n_processed: reads_processed,
         n_pseudoaligned: reads_aligned,
@@ -326,8 +351,8 @@ pub fn run(args: QuantArgs) -> Result<()> {
         p_pseudoaligned,
         p_unique,
         kallisto_version: format!("kallistors {}", env!("CARGO_PKG_VERSION")),
-        index_version: index.index_version,
-        kmer_length: index.k as u32,
+        index_version,
+        kmer_length: k as u32,
         start_time,
         call: std::env::args().collect::<Vec<_>>().join(" "),
     };

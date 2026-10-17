@@ -22,6 +22,21 @@ use super::runtime::{
     onlist_cardinality,
 };
 
+// Counting callers have finished placement sampling and do not consume hit metadata.
+pub(crate) fn ec_for_read_bifrost_counting(
+    index: &BifrostIndex,
+    seq: &[u8],
+    strand: Strand,
+    options: PseudoalignOptions,
+) -> Option<ReadEc> {
+    if index.k > 0 && seq.len() >= index.k && fast_path_enabled(index, false, options) {
+        super::runtime::ensure_cache_context(index);
+        super::fast::ec_for_read_bifrost_fast_counting(index, seq, strand, options)
+    } else {
+        ec_for_read_bifrost(index, seq, strand, None, options)
+    }
+}
+
 // Main parity scanner: stream hits, keep an online EC intersection, and jump when safe.
 pub(crate) fn ec_for_read_bifrost(
     index: &BifrostIndex,
@@ -297,12 +312,12 @@ pub(crate) fn ec_for_read_bifrost(
                     let (unitig_id, rel_pos, is_km) = crate::index::bifrost::decode_pos_id(pos_id);
                     if is_km {
                         let uid = unitig_id as usize;
-                        if uid >= index.km_unitigs.len() {
+                        if uid >= index.km_unitig_count() {
                             continue;
                         }
                         let km_pos = rel_pos as usize;
-                        let km_seq = index.km_unitigs[uid].as_slice();
-                        if km_seq != kmer_canon {
+                        let km_seq = index.km_unitig_sequence(uid)?;
+                        if km_seq.as_ref() != kmer_canon {
                             continue;
                         }
                         if min_pos != km_pos && min_pos + km_pos != diff {
@@ -316,7 +331,7 @@ pub(crate) fn ec_for_read_bifrost(
                         }
                         candidate.matched = true;
                         local_match = Some((
-                            index.unitigs.len() + uid,
+                            index.unitig_count() + uid,
                             0usize,
                             pos,
                             min_pos,
@@ -332,12 +347,12 @@ pub(crate) fn ec_for_read_bifrost(
                         break;
                     } else {
                         let uid = unitig_id as usize;
-                        if uid >= index.unitigs.len() {
+                        if uid >= index.unitig_count() {
                             continue;
                         }
                         if let Some((start, used_revcomp, matched_relaxed, forward_strand)) =
                             match_unitig_candidate(
-                                index.unitigs[uid].as_slice(),
+                                index.unitig_sequence(uid)?.as_ref(),
                                 index.k,
                                 rel_pos as usize,
                                 diff,

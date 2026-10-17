@@ -1,6 +1,6 @@
 //! Release fully unused pages from a deduplicated scratch allocation.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-pub(super) fn discard_unused<T>(words: &mut Vec<T>, written: usize) {
+pub(crate) fn discard_unused<T>(words: &mut Vec<T>, written: usize) {
     let written = written.min(words.capacity());
     if written <= words.len() {
         return;
@@ -59,11 +59,11 @@ pub(super) fn discard_unused<T>(words: &mut Vec<T>, written: usize) {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub(super) fn discard_unused<T>(_words: &mut Vec<T>, _written: usize) {}
+pub(crate) fn discard_unused<T>(_words: &mut Vec<T>, _written: usize) {}
 
 // Clear first so destructors finish before releasing the allocation's wholly
 // unused pages. The Vec retains ownership through normal allocator deallocation.
-pub(super) fn retire<T>(mut buffer: Vec<T>) {
+pub(crate) fn retire<T>(mut buffer: Vec<T>) {
     let written = buffer.len();
     buffer.clear();
     discard_unused(&mut buffer, written);

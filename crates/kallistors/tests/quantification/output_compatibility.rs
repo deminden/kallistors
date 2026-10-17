@@ -59,3 +59,39 @@ fn abundance_tsv_preserves_transcript_identity_and_numeric_values() {
     assert_eq!(rows["tx0"], (100, 50.5, 2.25, 200_000.0));
     assert_eq!(rows["tx1"], (200, 150.25, 5.75, 800_000.0));
 }
+
+#[test]
+fn parallel_abundance_rows_match_serial_bytes_across_waves_and_short_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let names: Vec<_> = (0..32771).map(|i| format!("tx_{i}_é")).collect();
+    let names: Vec<_> = names.iter().map(String::as_str).collect();
+    let lengths = vec![100u32; names.len() - 3];
+    let values = [
+        -0.0,
+        0.0,
+        f64::MIN_POSITIVE,
+        f64::MAX,
+        f64::INFINITY,
+        f64::NAN,
+        1e-320,
+        1.0 / 3.0,
+    ];
+    let make = |len| (0..len).map(|i| values[i % values.len()]).collect();
+    let result = QuantResult {
+        est_counts: make(names.len() - 2),
+        tpm: make(names.len()),
+        eff_lengths: make(names.len() - 1),
+        post_bias: None,
+    };
+    let serial = dir.path().join("serial.tsv");
+    write_abundance_tsv_from_parts(&serial, &names, &lengths, &result).unwrap();
+    let expected = std::fs::read(serial).unwrap();
+    for threads in [2, 8] {
+        let path = dir.path().join(format!("parallel{threads}.tsv"));
+        kallistors::quant::write_abundance_tsv_from_parts_threaded(
+            &path, &names, &lengths, &result, threads,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), expected, "threads={threads}");
+    }
+}

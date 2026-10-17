@@ -379,12 +379,14 @@ pub fn debug_minimizer_lookup(
                     let (unitig_id, rel_pos, is_km) = crate::index::bifrost::decode_pos_id(pos_id);
                     if is_km {
                         let uid = unitig_id as usize;
-                        if uid >= index.km_unitigs.len() {
+                        if uid >= index.km_unitig_count() {
                             continue;
                         }
                         let km_pos = rel_pos as usize;
-                        let km_seq = index.km_unitigs[uid].as_slice();
-                        if km_seq != kmer_canon {
+                        let Some(km_seq) = index.km_unitig_sequence(uid) else {
+                            continue;
+                        };
+                        if km_seq.as_ref() != kmer_canon {
                             continue;
                         }
                         if !kallisto_bifrost_find && min_pos != km_pos && min_pos + km_pos != diff {
@@ -396,17 +398,19 @@ pub fn debug_minimizer_lookup(
                         {
                             continue;
                         }
-                        let unitig_id = index.unitigs.len() + uid;
+                        let unitig_id = index.unitig_count() + uid;
                         let block_idx =
                             block_index_for_position(index.ec_blocks[unitig_id].as_slice(), 0);
                         matched = Some((unitig_id, 0usize, block_idx, Some(true), used_revcomp));
                         break;
                     } else {
                         let uid = unitig_id as usize;
-                        if uid >= index.unitigs.len() {
+                        if uid >= index.unitig_count() {
                             continue;
                         }
-                        let unitig = &index.unitigs[uid];
+                        let Some(unitig) = index.unitig_sequence(uid) else {
+                            continue;
+                        };
                         if unitig.len() < index.k {
                             continue;
                         }

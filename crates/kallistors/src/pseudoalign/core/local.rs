@@ -103,7 +103,7 @@ pub(crate) fn collect_unitigs_for_read(
                     let (unitig_id, _rel_pos, is_km) = crate::index::bifrost::decode_pos_id(pos_id);
                     let uid = unitig_id as usize;
                     let real_id = if is_km {
-                        index.unitigs.len() + uid
+                        index.unitig_count() + uid
                     } else {
                         uid
                     };
@@ -134,11 +134,11 @@ pub(crate) fn collect_unitigs_for_read(
 fn build_local_kmer_map(index: &BifrostIndex, unitig_ids: &[usize]) -> HashMap<u64, Vec<u32>> {
     let mut map: HashMap<u64, Vec<u32>> = HashMap::new();
     for &unitig_id in unitig_ids {
-        let seq_ref: Option<&[u8]> = if unitig_id < index.unitigs.len() {
-            Some(index.unitigs[unitig_id].as_slice())
+        let seq_ref: Option<std::borrow::Cow<'_, [u8]>> = if unitig_id < index.unitig_count() {
+            index.unitig_sequence(unitig_id)
         } else {
-            let km_idx = unitig_id - index.unitigs.len();
-            index.km_unitigs.get(km_idx).map(|v| v.as_slice())
+            let km_idx = unitig_id - index.unitig_count();
+            index.km_unitig_sequence(km_idx)
         };
         let Some(seq_ref) = seq_ref else { continue };
         let blocks = match index.ec_blocks.get(unitig_id) {

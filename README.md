@@ -16,6 +16,18 @@ A Rust implementation of kallisto-style pseudoalignment and RNA-seq quantificati
 
 Quantification uses the requested thread count for mapping and EM. Compact index storage,
 packed matching, bounded input queues and buffered output reduce work and memory use.
+Graph storage is released before EM, and ordinary transcript names are allocated at output;
+every transcript row is retained. Worker caches retain exact keys and all matching modes. Conservative minimizer fingerprints
+reject impossible buckets while preserving candidate order and relaxed matches. After paired
+fragment sampling finishes, counting avoids collecting unused placement records. Independent
+EM components run in parallel without changing transcript arithmetic or convergence rules;
+only bitwise unchanged components skip repeated updates. See
+[quantification details](docs/development.md#quantification).
+On Apple Silicon at eight threads, 4.41 million fasterp-trimmed SRR13638690 read pairs against
+GENCODE v50 ALL took a median **8.80 s**, with **1.15 GiB peak RSS** (one warmup, three measured
+whole-process runs, default TSV/HDF5 output). See the
+[measurement scope and validation](docs/benchmarks.md#eight-thread-quantification-measurement).
+
 Index construction deduplicates byte-proven repeated windows. Large parallel collections losslessly
 pack each completed transcript group before sorting its words. Compact exact lookups, contiguous transcript/EC position
 storage and timely scratch release reduce peak memory. One requested worker pool handles graph

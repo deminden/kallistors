@@ -78,11 +78,11 @@ pub fn pseudoalign_paired_naive<R1: ReadSource, R2: ReadSource>(
                     continue;
                 }
                 reads_aligned += 1;
-                let ec_id = match ec_map.get(&merged) {
-                    Some(id) => *id,
+                let ec_id = match ec_map.get(&merged, &ec_list) {
+                    Some(id) => id,
                     None => {
                         let id = ec_list.len();
-                        ec_map.insert(merged.clone(), id);
+                        ec_map.insert(&merged, id);
                         ec_list.push(merged.clone());
                         counts.push(0);
                         id
@@ -351,6 +351,7 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
 
     let fragment_budget = sampling.map_or(usize::MAX, FragmentLengthSampler::remaining);
     let mut sampled = 0usize;
+    let mut merged = Vec::new();
     for idx in read_range {
         let a_seq = unsafe { left_batch.seq_unchecked(idx) };
         let b_seq = unsafe { right_batch.seq_unchecked(idx) };
@@ -359,8 +360,22 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
         }
         counts.reads_processed = counts.reads_processed.saturating_add(1);
 
-        let mut ec1 = super::ec_for_read_bifrost(index, a_seq, strand, None, options);
-        let mut ec2 = super::ec_for_read_bifrost(index, b_seq, strand, None, options);
+        let count_only =
+            fragment_budget == 0 && counts.bias.is_none() && options.strand_specific.is_none();
+        let scan = |seq: &[u8]| {
+            if count_only {
+                super::core::ec_for_read_bifrost_counting(index, seq, strand, options)
+            } else {
+                super::ec_for_read_bifrost(index, seq, strand, None, options)
+            }
+        };
+        let mut ec1 = scan(a_seq);
+        // A hard rejection of either mate always rejects the pair. Both FASTQ
+        // records have already been parsed and this pair is already counted.
+        if ec1.as_ref().is_some_and(|ec| ec.hard_reject_pair) {
+            continue;
+        }
+        let mut ec2 = scan(b_seq);
         if ec1.is_none() && ec2.is_none() {
             continue;
         }
@@ -421,7 +436,7 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
             }
         }
 
-        let mut merged = Vec::new();
+        merged.clear();
         match (ec1.as_ref(), ec2.as_ref()) {
             (None, None) => continue,
             (Some(ec), None) | (None, Some(ec)) => merged.extend_from_slice(&ec.ec),
@@ -503,7 +518,7 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
         }
 
         counts.reads_aligned = counts.reads_aligned.saturating_add(1);
-        super::add_ec_count(counts, ec_map, merged);
+        super::utils::add_ec_count_slice(counts, ec_map, &merged);
     }
     if let Some(sampler) = sampling {
         sampler.submit(sampled);
@@ -812,11 +827,11 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                         right_ec: ec2.as_ref().map(|v| v.ec.as_slice()),
                     })?;
                 }
-                let ec_id = match ec_map.get(&merged) {
-                    Some(id) => *id,
+                let ec_id = match ec_map.get(&merged, &ec_list) {
+                    Some(id) => id,
                     None => {
                         let id = ec_list.len();
-                        ec_map.insert(merged.clone(), id);
+                        ec_map.insert(&merged, id);
                         ec_list.push(merged.clone());
                         counts.push(0);
                         id

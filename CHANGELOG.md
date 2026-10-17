@@ -62,14 +62,35 @@
 - Report non-overlapping index stages, separate MPHF construction from writing and include final
   allocation cleanup in the internal total. Dispose independent allocations in the requested pool.
 - Compact singleton minimizer buckets, sequence/EC metadata, loader scratch and EM working arrays.
-- Reuse loader bucket lookups and decode packed sequence/EC data without unnecessary allocations.
+- Decode graph sequences directly into packed words, avoiding duplicate ordinary/fixed/abundant
+  ASCII storage. Share adjacent identical EC payloads, keep narrow block descriptors with wide
+  fallbacks and retain abundant-node key associations and candidate order.
+- Build eligible minimizer tables in one lookup pass, retaining ordered repeated/special events
+  and aligned full-width runtime descriptors. Release redundant rank storage and use bounded,
+  exact gap-encoded bitmap scratch with a raw fallback.
+- Share complete paired-worker EC keys through collision-checked sharded tables and keep worker
+  counters independent. Rendezvous work dispatch bounds queued read storage while preserving
+  upstream sampling buffers and all reads.
+- Release graph storage before EM, consume unneeded EC input after preparation and narrow
+  transcript IDs in place. Bootstrap input remains available when needed.
+- Defer ordinary transcript-name allocation until output after scanning all names for shades.
+  Retain the same open index file, complete target IDs and eager compatibility loaders.
 - Use exact grouped hashing, precomputed MPHF divisors, compact caches and packed reference
   windows. AArch64 NEON encoding has a portable fallback; wide values and minimizer ties retain
   complete fallback handling.
-- Parallelize independent transcript updates and convergence checks while retaining each
-  transcript's arithmetic order.
+- Group independent EM components in stable order, fuse their denominator/update work and
+  skip only bitwise fixed components. Preserve mandatory iterations, stopping rules, final
+  threshold updates and every transcript's arithmetic order; cache entirely fixed branches without
+  changing component partitions. Bias correction retains its general path.
+- Reuse scan scratch and exact mode-aware matching caches. Filter ordinary minimizer buckets
+  against every possible read anchor, bypassing conflicting/special buckets. Use compact MPHF
+  rank records with full-width fallbacks and exact reciprocal reduction. Bounded AArch64 cache
+  hints accelerate ordered loader writes without changing candidate order.
+- Fold paired hits directly into ECs after fragment sampling finishes when placement metadata
+  is unused. Reject an already hard-rejected pair before scanning its second mate.
 - Bound paired input queues and release blocked producers after input errors.
-- Overlap TSV/HDF5 output and bound HDF5 chunks to 16,384 elements with DEFLATE level 6.
+- Format TSV rows in bounded ordered chunks, overlap TSV/HDF5 output and bound HDF5 chunks
+  to 16,384 elements with DEFLATE level 6.
 
 ### Structure and validation
 

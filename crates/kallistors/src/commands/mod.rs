@@ -50,6 +50,24 @@ fn build_mapping_index(
     options: kallistors::pseudoalign::PseudoalignOptions,
     debug: bool,
 ) -> kallistors::Result<kallistors::pseudoalign::BifrostIndex> {
+    build_mapping_index_impl(path, load_positional_info, threads, options, debug, false)
+}
+fn build_quant_index(
+    path: &std::path::Path,
+    load_positional_info: bool,
+    threads: usize,
+    options: kallistors::pseudoalign::PseudoalignOptions,
+) -> kallistors::Result<kallistors::pseudoalign::BifrostIndex> {
+    build_mapping_index_impl(path, load_positional_info, threads, options, false, true)
+}
+fn build_mapping_index_impl(
+    path: &std::path::Path,
+    load_positional_info: bool,
+    threads: usize,
+    options: kallistors::pseudoalign::PseudoalignOptions,
+    debug: bool,
+    defer_names: bool,
+) -> kallistors::Result<kallistors::pseudoalign::BifrostIndex> {
     use kallistors::pseudoalign::*;
     let load_positional_info = load_positional_info || options.strand_specific.is_some();
     if options.kallisto_direct_kmer {
@@ -70,7 +88,11 @@ fn build_mapping_index(
         || options.investigation.any_enabled()
     {
         build_bifrost_index_with_positions_threaded(path, load_positional_info, threads)
-    } else {
+    } else if options.bias {
         build_bifrost_index_quant_threaded(path, false, threads)
+    } else if defer_names {
+        build_bifrost_index_quant_deferred_threaded(path, threads)
+    } else {
+        build_bifrost_index_quant_packed_threaded(path, threads)
     }
 }

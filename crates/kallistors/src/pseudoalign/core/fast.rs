@@ -2,7 +2,7 @@ use super::super::debug::{
     DroppedHitTrace, JumpDecisionTrace, MinimizerCandidateTrace, ReadDebugState,
     format_positions_sample,
 };
-use super::super::ec::{KmerPairCursor, encode_kmer_pair, intersect_sorted};
+use super::super::ec::{KmerPairCursor, encode_kmer_pair, intersect_sorted_in_place};
 use super::super::minimizers::minimizer_tail_for_kmer;
 use super::super::{BifrostIndex, Hit, MatchInfo, PseudoalignOptions, ReadEc, Strand};
 use super::matcher::{
@@ -12,9 +12,28 @@ use super::matcher::{
 use super::runtime::{
     DISABLE_MATCH_CACHE, DISABLE_MINIMIZER_CACHE, FastKmerMatch, MphfLookupCache,
     block_index_for_position_fast, ec_slice, env_flag, minimizer_bucket_has_overcrowded_marker,
-    minimizer_bucket_idx, minimizer_candidates_cached_into_with_code, minimizer_hex,
-    onlist_cardinality, read_fast_match_cache, write_fast_match_cache,
+    minimizer_bucket_idx, minimizer_bucket_with_fingerprint,
+    minimizer_candidates_cached_into_with_code, minimizer_hex, onlist_cardinality,
 };
+
+#[inline]
+fn bucket_may_match(
+    index: &BifrostIndex,
+    cache: &mut MphfLookupCache,
+    fingerprint: u8,
+    key: &[u8; 8],
+    forward: u64,
+    reverse: u64,
+) -> bool {
+    if index.k != 31 || index.g != 23 {
+        return true;
+    }
+    // Uninitialized, conflicting, KM and special buckets retain every probe.
+    fingerprint == 0
+        || fingerprint == super::super::fingerprints::DISABLED
+        || fingerprint == super::super::fingerprints::word_fingerprint(u64::from_le_bytes(*key))
+        || cache.query_fingerprint_matches(forward, reverse, fingerprint)
+}
 
 // Encoded fast path for the common unshaded, non-union pseudoalignment mode.
 #[allow(clippy::too_many_arguments)]
@@ -50,9 +69,14 @@ fn match_kmer_at_pos_fast_uncached_precomputed(
         {
             positions
         } else {
-            let Some(bucket_idx) = minimizer_bucket_idx(index, cache, &min_bytes) else {
+            let Some((bucket_idx, fingerprint)) =
+                minimizer_bucket_with_fingerprint(index, cache, &min_bytes)
+            else {
                 continue;
             };
+            if !bucket_may_match(index, cache, fingerprint, &min_bytes, read_fwd, read_rev) {
+                continue;
+            }
             index.minz_positions.get(bucket_idx)
         };
         for &pos_id in positions {
@@ -84,7 +108,7 @@ fn match_kmer_at_pos_fast_uncached_precomputed(
             let (unitig_id, rel_pos, is_km) = crate::index::bifrost::decode_pos_id(pos_id);
             if is_km {
                 let uid = unitig_id as usize;
-                if uid >= index.km_unitigs.len() {
+                if uid >= index.km_unitig_count() {
                     continue;
                 }
                 let km_pos = rel_pos as usize;
@@ -104,7 +128,7 @@ fn match_kmer_at_pos_fast_uncached_precomputed(
                 if (used_revcomp && !allow_rev) || (!used_revcomp && !allow_forward) {
                     continue;
                 }
-                let unitig_id = index.unitigs.len() + uid;
+                let unitig_id = index.unitig_count() + uid;
                 let block_idx = block_index_for_position_fast(index, unitig_id, 0)?;
                 return Some(FastKmerMatch {
                     unitig_id,
@@ -116,7 +140,7 @@ fn match_kmer_at_pos_fast_uncached_precomputed(
                 });
             }
             let uid = unitig_id as usize;
-            if uid >= index.unitigs.len() {
+            if uid >= index.unitig_count() {
                 continue;
             }
             if let Some((start, used_revcomp, matched_relaxed, forward_strand)) =
@@ -171,7 +195,7 @@ fn match_kmer_at_pos_fast_uncached_precomputed(
             let (unitig_id, rel_pos, is_km) = crate::index::bifrost::decode_pos_id(pos_id);
             if is_km {
                 let uid = unitig_id as usize;
-                if uid >= index.km_unitigs.len() {
+                if uid >= index.km_unitig_count() {
                     continue;
                 }
                 let km_pos = rel_pos as usize;
@@ -191,7 +215,7 @@ fn match_kmer_at_pos_fast_uncached_precomputed(
                 if (used_revcomp && !allow_rev) || (!used_revcomp && !allow_forward) {
                     continue;
                 }
-                let unitig_id = index.unitigs.len() + uid;
+                let unitig_id = index.unitig_count() + uid;
                 let block_idx = block_index_for_position_fast(index, unitig_id, 0)?;
                 return Some(FastKmerMatch {
                     unitig_id,
@@ -203,7 +227,7 @@ fn match_kmer_at_pos_fast_uncached_precomputed(
                 });
             }
             let uid = unitig_id as usize;
-            if uid >= index.unitigs.len() {
+            if uid >= index.unitig_count() {
                 continue;
             }
             if let Some((start, used_revcomp, matched_relaxed, forward_strand)) =
@@ -266,6 +290,7 @@ fn match_kmer_at_pos_fast_uncached_with_codes(
     minimizer_cache_disabled: bool,
 ) -> Option<FastKmerMatch> {
     if !minimizer_candidates_cached_into_with_code(
+        cache,
         kmer,
         index.g,
         read_fwd,
@@ -313,9 +338,16 @@ fn match_kmer_at_pos_fast_uncached_with_candidates(
         && *min_bytes != [0u8; 8]
     {
         Some(
-            minimizer_bucket_idx(index, cache, min_bytes).map_or((&[][..], false), |bucket| {
-                index.minz_positions.get_with_overcrowded(bucket)
-            }),
+            minimizer_bucket_with_fingerprint(index, cache, min_bytes).map_or(
+                (&[][..], false),
+                |(bucket, fingerprint)| {
+                    if bucket_may_match(index, cache, fingerprint, min_bytes, read_fwd, read_rev) {
+                        index.minz_positions.get_with_overcrowded(bucket)
+                    } else {
+                        (&[][..], false)
+                    }
+                },
+            ),
         )
     } else {
         None
@@ -381,8 +413,17 @@ fn match_kmer_at_pos_fast_uncached_with_candidates(
         let tail_positions = if tail_bytes == [0u8; 8] {
             &[][..]
         } else {
-            minimizer_bucket_idx(index, cache, &tail_bytes)
-                .map_or(&[][..], |bucket| index.minz_positions.get(bucket))
+            minimizer_bucket_with_fingerprint(index, cache, &tail_bytes).map_or(
+                &[][..],
+                |(bucket, fingerprint)| {
+                    if bucket_may_match(index, cache, fingerprint, &tail_bytes, read_fwd, read_rev)
+                    {
+                        index.minz_positions.get(bucket)
+                    } else {
+                        &[][..]
+                    }
+                },
+            )
         };
         if tail_bytes == [0u8; 8]
             || tail_positions
@@ -450,6 +491,7 @@ fn match_kmer_at_pos_fast_with_codes(
     minimizer_cache_disabled: bool,
     match_cache_disabled: bool,
     cache_misses: bool,
+    negative_cache_enabled: bool,
 ) -> Option<FastKmerMatch> {
     // The full forward word is unique within the owning index/k context.
     let cache_key = read_fwd;
@@ -457,11 +499,25 @@ fn match_kmer_at_pos_fast_with_codes(
         | ((allow_rev as u8) << 2)
         | ((allow_relaxed as u8) << 1)
         | (allow_tail_minimizer as u8);
-    if !match_cache_disabled
-        && let Some(cached) = read_fast_match_cache(cache_key, flags)
-        && (cache_misses || cached.is_some())
-    {
-        return cached;
+    if !match_cache_disabled && let Some(cached) = cache.match_get(cache_key, flags) {
+        if cache_misses || cached.is_some() {
+            return cached;
+        }
+        if negative_cache_enabled {
+            // Only ordinary backoff callers inspect the primary candidate list.
+            if !allow_tail_minimizer {
+                minimizer_candidates_cached_into_with_code(
+                    cache,
+                    kmer,
+                    index.g,
+                    read_fwd,
+                    read_rev,
+                    min_candidates,
+                    minimizer_cache_disabled,
+                );
+            }
+            return None;
+        }
     }
     let matched = match_kmer_at_pos_fast_uncached_with_codes(
         index,
@@ -477,10 +533,27 @@ fn match_kmer_at_pos_fast_with_codes(
         allow_tail_minimizer,
         minimizer_cache_disabled,
     );
-    if !match_cache_disabled && (cache_misses || matched.is_some()) {
-        write_fast_match_cache(cache_key, flags, matched);
+    if !match_cache_disabled && (cache_misses || matched.is_some() || negative_cache_enabled) {
+        cache.match_put(cache_key, flags, matched);
     }
     matched
+}
+
+#[derive(Default)]
+pub(super) struct FastScannerScratch {
+    min_candidates: Vec<([u8; 8], usize)>,
+    jump_candidates: Vec<([u8; 8], usize)>,
+    online_intersection: Vec<u32>,
+    fallback_rev_buf: Vec<u8>,
+}
+
+impl FastScannerScratch {
+    fn clear(&mut self) {
+        self.min_candidates.clear();
+        self.jump_candidates.clear();
+        self.online_intersection.clear();
+        self.fallback_rev_buf.clear();
+    }
 }
 
 pub(crate) fn ec_for_read_bifrost_fast(
@@ -491,22 +564,69 @@ pub(crate) fn ec_for_read_bifrost_fast(
     options: PseudoalignOptions,
 ) -> Option<ReadEc> {
     super::runtime::with_mphf_lookup_cache(|cache| {
-        ec_for_read_bifrost_fast_with_cache(index, seq, strand, dbg, options, cache)
+        let mut scratch = std::mem::take(&mut cache.scan_scratch);
+        scratch.clear();
+        let result = if dbg.is_some() {
+            ec_for_read_bifrost_fast_with_cache::<true, false>(
+                index,
+                seq,
+                strand,
+                dbg,
+                options,
+                cache,
+                &mut scratch,
+            )
+        } else {
+            ec_for_read_bifrost_fast_with_cache::<false, false>(
+                index,
+                seq,
+                strand,
+                dbg,
+                options,
+                cache,
+                &mut scratch,
+            )
+        };
+        cache.scan_scratch = scratch;
+        result
     })
 }
 
-fn ec_for_read_bifrost_fast_with_cache(
+pub(super) fn ec_for_read_bifrost_fast_counting(
+    index: &BifrostIndex,
+    seq: &[u8],
+    strand: Strand,
+    options: PseudoalignOptions,
+) -> Option<ReadEc> {
+    super::runtime::with_mphf_lookup_cache(|cache| {
+        let mut scratch = std::mem::take(&mut cache.scan_scratch);
+        scratch.clear();
+        let result = ec_for_read_bifrost_fast_with_cache::<false, true>(
+            index,
+            seq,
+            strand,
+            None,
+            options,
+            cache,
+            &mut scratch,
+        );
+        cache.scan_scratch = scratch;
+        result
+    })
+}
+
+fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool>(
     index: &BifrostIndex,
     seq: &[u8],
     strand: Strand,
     mut dbg: Option<&mut ReadDebugState>,
     options: PseudoalignOptions,
     cache: &mut MphfLookupCache,
+    scratch: &mut FastScannerScratch,
 ) -> Option<ReadEc> {
     let mut current: Vec<u32> = Vec::new();
-    let mut next: Vec<u32> = Vec::new();
-    let mut min_candidates: Vec<([u8; 8], usize)> = Vec::with_capacity(8);
-    let mut jump_candidates: Vec<([u8; 8], usize)> = Vec::with_capacity(8);
+    let min_candidates = &mut scratch.min_candidates;
+    let jump_candidates = &mut scratch.jump_candidates;
     let allow_forward_base = strand != Strand::Reverse;
     let allow_rev_base = strand != Strand::Forward;
     let mut has_hit = false;
@@ -514,27 +634,32 @@ fn ec_for_read_bifrost_fast_with_cache(
     let mut best_match: Option<MatchInfo> = None;
     let mut first_hit: Option<Hit> = None;
     let mut hits: Vec<Hit> = Vec::new();
+    let mut counted = super::count::FinalHitFold::default();
     // Ordinary reads only need to know whether an on-list exists. Counting every
     // transcript here would rescan the whole reference for every read.
     let dlist_onlist = index.onlist.as_deref();
     let mut any_dlist_kmer = false;
     let mut dlist_early_return = false;
     let mut append_dummy_hit = false;
-    let mut online_intersection: Vec<u32> = Vec::new();
+    let online_intersection = &mut scratch.online_intersection;
     let mut has_online_intersection = false;
+    let mut last_online_block = None;
     let mut backoff_until: Option<usize> = None;
     let mut fallback_probe_pending = false;
-    let mut fallback_rev_buf: Vec<u8> = Vec::new();
+    let fallback_rev_buf = &mut scratch.fallback_rev_buf;
     let minimizer_cache_disabled = env_flag(
         &DISABLE_MINIMIZER_CACHE,
         "KALLISTORS_DISABLE_MINIMIZER_CACHE",
     );
     let match_cache_disabled = env_flag(&DISABLE_MATCH_CACHE, "KALLISTORS_DISABLE_MATCH_CACHE");
+    let negative_cache_enabled = dbg.is_none()
+        && !options.investigation.any_enabled()
+        && seq.iter().all(u8::is_ascii_uppercase);
     let mut kmer_cursor = KmerPairCursor::new(index.k);
     let mut pos = 0usize;
     let last_pos = seq.len() - index.k;
     while pos <= last_pos {
-        if let Some(state) = dbg.as_deref_mut() {
+        if TRACE && let Some(state) = dbg.as_deref_mut() {
             state.saw_valid_kmer = true;
             if state.visited_positions.len() < 4096 {
                 state.visited_positions.push(pos);
@@ -570,19 +695,20 @@ fn ec_for_read_bifrost_fast_with_cache(
         if dlist_onlist.is_some() && kmer_in_dlist {
             append_dummy_hit = true;
         }
-        if let Some(state) = dbg.as_deref_mut() {
+        if TRACE && let Some(state) = dbg.as_deref_mut() {
             if !minimizer_candidates_cached_into_with_code(
+                cache,
                 kmer,
                 index.g,
                 read_fwd,
                 read_rev,
-                &mut min_candidates,
+                min_candidates,
                 minimizer_cache_disabled,
             ) {
                 pos += 1;
                 continue;
             }
-            for (min_bytes, min_pos) in &min_candidates {
+            for (min_bytes, min_pos) in min_candidates.iter() {
                 let bucket = minimizer_bucket_idx(index, cache, min_bytes);
                 let positions_len = bucket
                     .map(|idx| index.minz_positions.get(idx).len())
@@ -617,13 +743,14 @@ fn ec_for_read_bifrost_fast_with_cache(
             allow_forward_base,
             allow_rev_base,
             diff,
-            &mut min_candidates,
+            min_candidates,
             cache,
             true,
             !in_backoff,
             minimizer_cache_disabled,
-            match_cache_disabled || dbg.is_some(),
+            match_cache_disabled || TRACE,
             false,
+            negative_cache_enabled,
         ) {
             matched
         } else if !options.kallisto_strict
@@ -636,7 +763,7 @@ fn ec_for_read_bifrost_fast_with_cache(
                 allow_forward_base,
                 allow_rev_base,
                 diff,
-                &mut fallback_rev_buf,
+                fallback_rev_buf,
                 options.kallisto_direct_kmer,
                 options.kallisto_enum,
                 options.kallisto_strict,
@@ -654,7 +781,8 @@ fn ec_for_read_bifrost_fast_with_cache(
                 matched_relaxed,
             }
         } else {
-            if let Some(state) = dbg.as_deref_mut()
+            if TRACE
+                && let Some(state) = dbg.as_deref_mut()
                 && state.first_no_match.is_none()
             {
                 state.first_no_match = Some((pos, 0));
@@ -670,7 +798,7 @@ fn ec_for_read_bifrost_fast_with_cache(
         let forward_strand = matched.forward_strand;
         let matched_relaxed = matched.matched_relaxed;
         let ec = ec_slice(index, uid, block_idx);
-        if let Some(state) = dbg.as_deref_mut() {
+        if TRACE && let Some(state) = dbg.as_deref_mut() {
             state.saw_match = true;
             if ec.is_empty() {
                 if state.first_empty_ec.is_none() {
@@ -692,7 +820,8 @@ fn ec_for_read_bifrost_fast_with_cache(
         let mut accept_for_stream = true;
         if matched_relaxed && has_hit {
             accept_for_stream = false;
-            if let Some(state) = dbg.as_deref_mut()
+            if TRACE
+                && let Some(state) = dbg.as_deref_mut()
                 && state.dropped_hits.len() < 256
             {
                 state.dropped_hits.push(DroppedHitTrace {
@@ -711,11 +840,10 @@ fn ec_for_read_bifrost_fast_with_cache(
                 });
             }
         }
-        if accept_for_stream && !ec.is_empty() {
+        if accept_for_stream && !ec.is_empty() && last_online_block != Some((uid, block_idx)) {
             if has_online_intersection {
-                next.clear();
-                intersect_sorted(&online_intersection, ec, &mut next);
-                if next.is_empty() {
+                intersect_sorted_in_place(online_intersection, ec);
+                if online_intersection.is_empty() {
                     return Some(ReadEc {
                         ec: Vec::new(),
                         best_match,
@@ -726,13 +854,13 @@ fn ec_for_read_bifrost_fast_with_cache(
                         hard_reject_pair: true,
                     });
                 }
-                std::mem::swap(&mut online_intersection, &mut next);
             } else {
                 online_intersection.extend_from_slice(ec);
                 has_online_intersection = true;
             }
+            last_online_block = Some((uid, block_idx));
         }
-        if best_match.map(|m| kmer_pos < m.read_pos).unwrap_or(true) {
+        if !COUNT_ONLY && best_match.map(|m| kmer_pos < m.read_pos).unwrap_or(true) {
             best_match = Some(MatchInfo {
                 unitig_id: uid,
                 unitig_pos: start,
@@ -740,16 +868,22 @@ fn ec_for_read_bifrost_fast_with_cache(
                 used_revcomp,
             });
         }
-        hits.push(Hit {
+        let hit = Hit {
             unitig_id: uid,
             read_pos: kmer_pos,
             block_idx,
             used_revcomp,
-        });
-        if first_hit
-            .as_ref()
-            .map(|h| kmer_pos < h.read_pos)
-            .unwrap_or(true)
+        };
+        if COUNT_ONLY {
+            counted.push(index, hit);
+        } else {
+            hits.push(hit);
+        }
+        if !COUNT_ONLY
+            && first_hit
+                .as_ref()
+                .map(|h| kmer_pos < h.read_pos)
+                .unwrap_or(true)
         {
             first_hit = Some(Hit {
                 unitig_id: uid,
@@ -787,13 +921,14 @@ fn ec_for_read_bifrost_fast_with_cache(
                         allow_forward_base,
                         allow_rev_base,
                         diff,
-                        &mut jump_candidates,
+                        jump_candidates,
                         cache,
                         true,
                         !in_backoff,
                         minimizer_cache_disabled,
                         match_cache_disabled,
                         true,
+                        negative_cache_enabled,
                     )
                 });
                 if next_hit.is_none()
@@ -805,7 +940,7 @@ fn ec_for_read_bifrost_fast_with_cache(
                             allow_forward_base,
                             allow_rev_base,
                             diff,
-                            &mut fallback_rev_buf,
+                            fallback_rev_buf,
                             options.kallisto_direct_kmer,
                             options.kallisto_enum,
                             options.kallisto_strict,
@@ -831,7 +966,7 @@ fn ec_for_read_bifrost_fast_with_cache(
                     let next_relaxed = next_hit.matched_relaxed;
                     let next_ec = ec_slice(index, uid2, block_idx2);
                     if uid2 == uid && next_ec == current_ec {
-                        if let Some(state) = dbg.as_deref_mut() {
+                        if TRACE && let Some(state) = dbg.as_deref_mut() {
                             state.jump_decisions.push(JumpDecisionTrace {
                                 read_pos: pos,
                                 matched_unitig_id: uid,
@@ -881,13 +1016,14 @@ fn ec_for_read_bifrost_fast_with_cache(
                                         allow_forward_base,
                                         allow_rev_base,
                                         diff,
-                                        &mut jump_candidates,
+                                        jump_candidates,
                                         cache,
                                         true,
                                         !in_backoff,
                                         minimizer_cache_disabled,
                                         match_cache_disabled,
                                         true,
+                                        negative_cache_enabled,
                                     )
                                 });
                             if mid_hit.is_none()
@@ -904,7 +1040,7 @@ fn ec_for_read_bifrost_fast_with_cache(
                                     allow_forward_base,
                                     allow_rev_base,
                                     diff,
-                                    &mut fallback_rev_buf,
+                                    fallback_rev_buf,
                                     options.kallisto_direct_kmer,
                                     options.kallisto_enum,
                                     options.kallisto_strict,
@@ -931,7 +1067,7 @@ fn ec_for_read_bifrost_fast_with_cache(
                                 let mid_matches_current = uid3 == uid && mid_ec == current_ec;
                                 let mid_matches_next = uid3 == uid2 && mid_ec == next_ec;
                                 if mid_matches_current || mid_matches_next {
-                                    if let Some(state) = dbg.as_deref_mut() {
+                                    if TRACE && let Some(state) = dbg.as_deref_mut() {
                                         state.jump_decisions.push(JumpDecisionTrace {
                                             read_pos: pos,
                                             matched_unitig_id: uid,
@@ -950,15 +1086,12 @@ fn ec_for_read_bifrost_fast_with_cache(
                                             reason: "middle_confirms_jump",
                                         });
                                     }
-                                    if !mid_ec.is_empty() {
+                                    if !mid_ec.is_empty()
+                                        && last_online_block != Some((uid3, block_idx3))
+                                    {
                                         if has_online_intersection {
-                                            next.clear();
-                                            intersect_sorted(
-                                                &online_intersection,
-                                                mid_ec,
-                                                &mut next,
-                                            );
-                                            if next.is_empty() {
+                                            intersect_sorted_in_place(online_intersection, mid_ec);
+                                            if online_intersection.is_empty() {
                                                 return Some(ReadEc {
                                                     ec: Vec::new(),
                                                     best_match,
@@ -969,11 +1102,11 @@ fn ec_for_read_bifrost_fast_with_cache(
                                                     hard_reject_pair: true,
                                                 });
                                             }
-                                            std::mem::swap(&mut online_intersection, &mut next);
                                         } else {
                                             online_intersection.extend_from_slice(mid_ec);
                                             has_online_intersection = true;
                                         }
+                                        last_online_block = Some((uid3, block_idx3));
                                     }
                                     let found3pos = if mid_matches_current {
                                         middle_pos
@@ -1005,7 +1138,7 @@ fn ec_for_read_bifrost_fast_with_cache(
                         dlist_early_return = true;
                         append_dummy_hit = dlist_onlist.is_some();
                     }
-                    if let Some(state) = dbg.as_deref_mut() {
+                    if TRACE && let Some(state) = dbg.as_deref_mut() {
                         state.jump_decisions.push(JumpDecisionTrace {
                             read_pos: pos,
                             matched_unitig_id: uid,
@@ -1067,13 +1200,14 @@ fn ec_for_read_bifrost_fast_with_cache(
                                         allow_forward_base,
                                         allow_rev_base,
                                         diff,
-                                        &mut jump_candidates,
+                                        jump_candidates,
                                         cache,
                                         options.investigation.candidate_reuse,
                                         !in_backoff,
                                         minimizer_cache_disabled,
                                         match_cache_disabled,
                                         true,
+                                        negative_cache_enabled,
                                     )
                                 });
                             if let Some(scan_hit) = scan_hit {
@@ -1085,7 +1219,7 @@ fn ec_for_read_bifrost_fast_with_cache(
                                 });
                                 jump_to = Some(scan_pos);
                                 recovered = true;
-                                if let Some(state) = dbg.as_deref_mut() {
+                                if TRACE && let Some(state) = dbg.as_deref_mut() {
                                     state.jump_decisions.push(JumpDecisionTrace {
                                         read_pos: pos,
                                         matched_unitig_id: uid,
@@ -1116,7 +1250,11 @@ fn ec_for_read_bifrost_fast_with_cache(
                     }
                 }
                 if let Some(hit) = synthetic_hit.take() {
-                    hits.push(hit);
+                    if COUNT_ONLY {
+                        counted.push(index, hit);
+                    } else {
+                        hits.push(hit);
+                    }
                 }
                 if use_backoff {
                     backoff_until = Some(next_pos);
@@ -1137,7 +1275,7 @@ fn ec_for_read_bifrost_fast_with_cache(
     if !dlist_early_return && any_dlist_kmer && has_hit {
         append_dummy_hit = dlist_onlist.is_some();
     }
-    if !has_hit || hits.is_empty() {
+    if !has_hit || (!COUNT_ONLY && hits.is_empty()) {
         return None;
     }
 
@@ -1146,35 +1284,8 @@ fn ec_for_read_bifrost_fast_with_cache(
     let mut last_unitig = None;
     let mut last_block_idx = None;
     let mut found_nonempty = false;
-    for hit in &hits {
-        minpos = minpos.min(hit.read_pos);
-        maxpos = maxpos.max(hit.read_pos);
-        let ec = ec_slice(index, hit.unitig_id, hit.block_idx);
-        if !found_nonempty {
-            if !ec.is_empty() {
-                current.extend_from_slice(ec);
-                last_unitig = Some(hit.unitig_id);
-                last_block_idx = Some(hit.block_idx);
-                found_nonempty = true;
-            }
-            continue;
-        }
-        if last_unitig == Some(hit.unitig_id) && last_block_idx == Some(hit.block_idx) {
-            continue;
-        }
-        if ec.is_empty() {
-            continue;
-        }
-        if current.is_empty() {
-            current.extend_from_slice(ec);
-            last_unitig = Some(hit.unitig_id);
-            last_block_idx = Some(hit.block_idx);
-            continue;
-        }
-        next.clear();
-        intersect_sorted(&current, ec, &mut next);
-        std::mem::swap(&mut current, &mut next);
-        if current.is_empty() {
+    if COUNT_ONLY {
+        if counted.rejected {
             return Some(ReadEc {
                 ec: Vec::new(),
                 best_match,
@@ -1185,8 +1296,48 @@ fn ec_for_read_bifrost_fast_with_cache(
                 hard_reject_pair: true,
             });
         }
-        last_unitig = Some(hit.unitig_id);
-        last_block_idx = Some(hit.block_idx);
+        current = counted.ec;
+    } else {
+        for hit in &hits {
+            minpos = minpos.min(hit.read_pos);
+            maxpos = maxpos.max(hit.read_pos);
+            let ec = ec_slice(index, hit.unitig_id, hit.block_idx);
+            if !found_nonempty {
+                if !ec.is_empty() {
+                    current.extend_from_slice(ec);
+                    last_unitig = Some(hit.unitig_id);
+                    last_block_idx = Some(hit.block_idx);
+                    found_nonempty = true;
+                }
+                continue;
+            }
+            if last_unitig == Some(hit.unitig_id) && last_block_idx == Some(hit.block_idx) {
+                continue;
+            }
+            if ec.is_empty() {
+                continue;
+            }
+            if current.is_empty() {
+                current.extend_from_slice(ec);
+                last_unitig = Some(hit.unitig_id);
+                last_block_idx = Some(hit.block_idx);
+                continue;
+            }
+            intersect_sorted_in_place(&mut current, ec);
+            if current.is_empty() {
+                return Some(ReadEc {
+                    ec: Vec::new(),
+                    best_match,
+                    first_hit,
+                    hits,
+                    had_offlist: false,
+                    shade_union: Vec::new(),
+                    hard_reject_pair: true,
+                });
+            }
+            last_unitig = Some(hit.unitig_id);
+            last_block_idx = Some(hit.block_idx);
+        }
     }
 
     if append_dummy_hit && let Some(onlist) = dlist_onlist {
@@ -1195,9 +1346,7 @@ fn ec_for_read_bifrost_fast_with_cache(
         if current.is_empty() {
             current.extend_from_slice(&ec);
         } else {
-            next.clear();
-            intersect_sorted(&current, &ec, &mut next);
-            std::mem::swap(&mut current, &mut next);
+            intersect_sorted_in_place(&mut current, &ec);
             if current.is_empty() {
                 return Some(ReadEc {
                     ec: Vec::new(),

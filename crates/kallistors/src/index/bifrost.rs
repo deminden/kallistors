@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::Read;
+#[cfg(test)]
 use strength_reduce::StrengthReducedU64;
 
 use croaring_sys::{
@@ -65,11 +66,64 @@ pub struct MphfDebugInfo {
     pub final_hash_hit: bool,
 }
 
+// floor(2^64 / divisor) underestimates the quotient by at most one for
+// a u64 numerator. One exact correction therefore preserves every remainder.
+#[derive(Clone, Copy)]
+struct ReducedDomain {
+    divisor: u64,
+    reciprocal: u64,
+}
+impl ReducedDomain {
+    fn new(divisor: u64) -> Self {
+        assert_ne!(divisor, 0);
+        let reciprocal = if divisor == 1 {
+            0
+        } else {
+            ((1u128 << 64) / u128::from(divisor)) as u64
+        };
+        Self {
+            divisor,
+            reciprocal,
+        }
+    }
+    #[inline]
+    fn remainder(self, value: u64) -> u64 {
+        if self.divisor == 1 {
+            return 0;
+        }
+        let quotient = ((u128::from(value) * u128::from(self.reciprocal)) >> 64) as u64;
+        let remainder = value - quotient * self.divisor;
+        if remainder >= self.divisor {
+            remainder - self.divisor
+        } else {
+            remainder
+        }
+    }
+}
+
 #[derive(Clone)]
 struct BooLevel {
     bitset: BitVector,
     hash_domain: u64,
-    reduced_domain: Option<StrengthReducedU64>,
+    reduced_domain: Option<ReducedDomain>,
+}
+
+impl BooLevel {
+    #[inline]
+    fn rank_for_hash(&self, hash: u64) -> Option<u64> {
+        let bucket = match self.reduced_domain {
+            Some(domain) => domain.remainder(hash),
+            None => hash % self.hash_domain,
+        };
+        self.bitset.get_rank(bucket)
+    }
+}
+
+#[derive(Clone)]
+#[repr(C, packed(4))]
+struct RankedBitWord {
+    bits: u64,
+    rank: u32,
 }
 
 #[derive(Clone)]
@@ -78,6 +132,7 @@ struct BitVector {
     _nchar: u64,
     bit_array: Vec<u64>,
     ranks: Vec<u64>,
+    ranked_words: Vec<RankedBitWord>,
 }
 
 impl BitVector {
@@ -93,15 +148,54 @@ impl BitVector {
         for slot in &mut ranks {
             *slot = read_u64_le(reader)?;
         }
+        let mut ranked_words = Vec::with_capacity(bit_array.len());
+        'blocks: for (words, &base) in bit_array.chunks(8).zip(&ranks) {
+            let mut rank = base;
+            for &bits in words {
+                let Ok(compact_rank) = u32::try_from(rank) else {
+                    // Very large rank domains retain the independent full-width
+                    // bitmap/rank implementation, including its original order.
+                    ranked_words = Vec::new();
+                    break 'blocks;
+                };
+                ranked_words.push(RankedBitWord {
+                    bits,
+                    rank: compact_rank,
+                });
+                rank += u64::from(bits.count_ones());
+            }
+        }
         Ok(Self {
             _size: size,
             _nchar: nchar,
             bit_array,
             ranks,
+            ranked_words,
         })
     }
 
+    #[inline]
+    fn get_rank(&self, pos: u64) -> Option<u64> {
+        let offset = (pos & 63) as u32;
+        if let Some(word) = self.ranked_words.get((pos >> 6) as usize) {
+            if word.bits & (1u64 << offset) == 0 {
+                return None;
+            }
+            let before = if offset == 0 {
+                0
+            } else {
+                (word.bits << (64 - offset)).count_ones()
+            };
+            Some(u64::from(word.rank) + u64::from(before))
+        } else {
+            self.get(pos).then(|| self.rank(pos))
+        }
+    }
+
     fn get(&self, pos: u64) -> bool {
+        if self.bit_array.is_empty() && !self.ranked_words.is_empty() {
+            return (self.ranked_words[(pos >> 6) as usize].bits >> (pos & 63)) & 1 != 0;
+        }
         let idx = (pos >> 6) as usize;
         let bit = pos & 63;
         ((self.bit_array[idx] >> bit) & 1) != 0
@@ -112,6 +206,16 @@ impl BitVector {
     }
 
     fn rank(&self, pos: u64) -> u64 {
+        if self.bit_array.is_empty() && !self.ranked_words.is_empty() {
+            let word = &self.ranked_words[(pos >> 6) as usize];
+            let offset = (pos & 63) as u32;
+            return u64::from(word.rank)
+                + u64::from(if offset == 0 {
+                    0
+                } else {
+                    (word.bits << (64 - offset)).count_ones()
+                });
+        }
         let word_idx = pos / 64;
         let word_offset = pos % 64;
         let block = pos / 512;
@@ -129,6 +233,25 @@ impl BitVector {
 }
 
 impl BooPhf {
+    // Compact rank words already contain the complete bitmap and absolute rank.
+    // Wider or incomplete tables retain their original full-width storage.
+    pub(crate) fn retire_storage(self) {
+        for level in self.levels {
+            super::scratch_pages::retire(level.bitset.bit_array);
+            super::scratch_pages::retire(level.bitset.ranks);
+            super::scratch_pages::retire(level.bitset.ranked_words);
+        }
+    }
+
+    pub(crate) fn release_redundant_rank_storage(&mut self) {
+        for level in &mut self.levels {
+            let bits = &mut level.bitset;
+            if bits.ranked_words.len() == bits._nchar as usize && !bits.ranked_words.is_empty() {
+                bits.bit_array = Vec::new();
+                bits.ranks = Vec::new();
+            }
+        }
+    }
     pub fn load<R: Read>(reader: &mut R) -> Result<Self> {
         let gamma = read_f64_le(reader)?;
         let nb_levels = read_i32_le(reader)?;
@@ -141,7 +264,7 @@ impl BooPhf {
             levels.push(BooLevel {
                 bitset,
                 hash_domain,
-                reduced_domain: (hash_domain != 0).then(|| StrengthReducedU64::new(hash_domain)),
+                reduced_domain: (hash_domain != 0).then(|| ReducedDomain::new(hash_domain)),
             });
         }
         let final_hash_size = read_u64_le(reader)? as usize;
@@ -163,25 +286,25 @@ impl BooPhf {
     }
 
     pub fn lookup(&self, key: &[u8; 8]) -> Option<u64> {
-        // Both seeded levels use the same wyhash value. Later levels depend only
-        // on the existing xorshift recurrence, so no lookup order changes.
         let base_hash = minimizer_hash(key, 0);
         let mut s0 = base_hash ^ 0xAAAAAAAA55555555;
         let mut s1 = base_hash ^ 0x33333333CCCCCCCC;
-        let max_level = self.nb_levels.saturating_sub(1);
-        for i in 0..max_level {
-            let hash_raw = match i {
-                0 => s0,
-                1 => s1,
-                _ => xorshift_next(&mut s0, &mut s1),
-            };
-            let level = &self.levels[i as usize];
-            let bucket = match level.reduced_domain {
-                Some(domain) => hash_raw % domain,
-                None => hash_raw % level.hash_domain,
-            };
-            if level.bitset.get(bucket) {
-                return Some(level.bitset.rank(bucket));
+        let max_level = self.nb_levels.saturating_sub(1).max(0) as usize;
+        let mut levels = self.levels.iter().take(max_level);
+        // The first two seeds do not depend on the xorshift recurrence.
+        if let Some(level) = levels.next()
+            && let Some(rank) = level.rank_for_hash(s0)
+        {
+            return Some(rank);
+        }
+        if let Some(level) = levels.next()
+            && let Some(rank) = level.rank_for_hash(s1)
+        {
+            return Some(rank);
+        }
+        for level in levels {
+            if let Some(rank) = level.rank_for_hash(xorshift_next(&mut s0, &mut s1)) {
+                return Some(rank);
             }
         }
         self.final_hash.get(key).map(|v| v + self.lastbitsetrank)
@@ -538,20 +661,38 @@ mod mphf_lookup_tests {
             u64::MAX,
         ] {
             let reduced = StrengthReducedU64::new(domain);
+            let reciprocal = ReducedDomain::new(domain);
             for value in [0, 1, domain - 1, domain, domain.saturating_add(1), u64::MAX] {
                 assert_eq!(value % reduced, value % domain);
+                assert_eq!(reciprocal.remainder(value), value % domain);
             }
             for _ in 0..20_000 {
                 state ^= state << 13;
                 state ^= state >> 7;
                 state ^= state << 17;
                 assert_eq!(state % reduced, state % domain);
+                assert_eq!(reciprocal.remainder(state), state % domain);
             }
         }
     }
 
     #[test]
     fn lookup_matches_diagnostic_oracle_across_hash_levels() {
+        assert_eq!(std::mem::size_of::<RankedBitWord>(), 12);
+        for base in [u64::from(u32::MAX) - 1, u64::from(u32::MAX) + 1] {
+            let bytes: Vec<u8> = [64u64, 1, 0b101, 1, base]
+                .into_iter()
+                .flat_map(u64::to_le_bytes)
+                .collect();
+            let bitset = BitVector::load(&mut std::io::Cursor::new(bytes)).unwrap();
+            for pos in 0..64 {
+                assert_eq!(
+                    bitset.get_rank(pos),
+                    bitset.get(pos).then(|| bitset.rank(pos))
+                );
+            }
+        }
+
         let temp = tempfile::tempdir().unwrap();
         let fasta = temp.path().join("transcripts.fa");
         let mut state = 137u64;
@@ -574,6 +715,23 @@ mod mphf_lookup_tests {
         reader.set_position(16 + graph_bytes);
         let _mphf_bytes = read_u64_le(&mut reader).unwrap();
         let mphf = BooPhf::load(&mut reader).unwrap();
+        let mut compact = mphf.clone();
+        compact.release_redundant_rank_storage();
+        for (old, new) in mphf.levels.iter().zip(&compact.levels) {
+            for pos in 0..old.hash_domain {
+                assert_eq!(new.bitset.get_rank(pos), old.bitset.get_rank(pos));
+                assert_eq!(new.bitset.get(pos), old.bitset.get(pos));
+                assert_eq!(new.bitset.rank(pos), old.bitset.rank(pos));
+            }
+        }
+        for level in &mphf.levels {
+            for pos in 0..level.hash_domain {
+                assert_eq!(
+                    level.bitset.get_rank(pos),
+                    level.bitset.get(pos).then(|| level.bitset.rank(pos))
+                );
+            }
+        }
         for _ in 0..20_000 {
             state ^= state << 13;
             state ^= state >> 7;

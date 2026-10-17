@@ -294,7 +294,7 @@ Use a new output directory after changing either executable.
 | Read matching | `pseudoalign/core/`, `pseudoalign/single.rs`, `pseudoalign/paired.rs` |
 | Threaded input and EC aggregation | `pseudoalign/threaded.rs` |
 | EC dumps, minimizer lookup and read traces | `pseudoalign/diagnostics/{ec_dump,minimizer,tracing}.rs` |
-| Fragment models, EM and bootstraps | `quant/mod.rs` |
+| Fragment models, EM and bootstraps | `quant/mod.rs`, `quant/components.rs` |
 | Abundance TSV/HDF5 and run metadata | `quant/output/{tsv,hdf5,metadata}.rs` |
 | BUS input, records and technology definitions | `commands/bus/{input,output,technology}.rs` |
 | BUS genome projection and BAM output | `commands/bus/{genome,pseudobam}.rs` |
@@ -308,6 +308,69 @@ Changes to EM must preserve per-transcript addition order and convergence rules.
 Validate structural changes with complete EC maps, matched-model abundances, native HDF5
 readback and diagnostic/BAM output checks. Compare one- and eight-thread whole-process timing
 and memory with alternating controls. Use the same executable for all validation of a candidate.
+
+## Quantification
+
+The threaded loader retains packed sequence metadata and compact MPHF rank records, with
+full-width fallbacks. On AArch64, bounded cache hints fetch upcoming inline descriptors and
+overflow slots during ordered loading; all writes retain their original order. Exact reciprocal division and peeled initial hash levels change lookup
+work without changing index bytes or candidate order. Per-worker caches verify complete keys,
+matching flags and index ownership; scratch allocations are reused between reads. Intersections
+retain sorted-set semantics, including singleton and unbalanced-size paths.
+
+The ordinary quantification loader reads two-bit graph sequences directly, without duplicate
+ASCII unitigs or k-mers. Cold sequence helpers decode packed bases on demand; full and positional
+loaders retain their existing fields. Flat EC blocks share adjacent identical transcript lists and
+use narrow metadata only when every bound fits. Canonical fallback entries retain complete keys,
+original candidate order and explicit abundant-node associations.
+
+Eligible k=31, g=23 graphs build the aligned runtime minimizer table in one lookup pass. Temporary
+first-position/ordinal records retain singletons; repeated and special buckets retain ordered
+events. Finalization restores source candidate order and the same full-width runtime descriptors.
+Larger layouts use the general loader. Gap-encoded bitmap scratch has exact-sized allocation and
+raw fallback, and redundant MPHF rank arrays are released only after their packed copy is complete.
+
+Paired workers keep independent counters while sharing identical complete EC keys through sharded
+intern tables. Compact 32-bit fingerprints and head IDs reduce per-worker lookup storage, with
+full-width fallback IDs. Every hash collision is resolved by comparing transcript vectors. Pool roots are
+released before merging, and public EC lists retain their owned-vector interface. Paired work uses
+rendezvous dispatch and bounded mate queues; parser chunks still assemble into upstream's unchanged
+8 MiB sampling buffers. Queue sizes do not alter the sampling quota or omit reads.
+
+Ordinary quantification scans every transcript name for shade annotations, using a reusable
+buffer, then defers name allocation until output. The deferred reader retains the same open
+index file; full IDs and UTF-8 replacement behavior are preserved. Shade references, bias,
+positional and diagnostic loaders keep eager names. Every transcript still appears in output.
+
+Mapping releases graph storage before EM. Owned EC input is released once the EM representation
+has been prepared; bootstrap runs retain the input they need. EM transcript IDs narrow in place
+when their full domain fits. Wholly unused scratch pages can be retired on macOS/Linux while
+normal allocator ownership and live boundary bytes are preserved.
+
+For ordinary k=31, g=23 indexes, an optional byte fingerprint rejects a bucket only when none
+of the read k-mer's nine canonical g-mer anchors can match it. Checking only the selected
+minimizer would lose relaxed matches. Conflicting fingerprints and special/KM buckets always
+bypass rejection. Fingerprints travel through the loader's sorted count batches and do not
+change the serialized v13 index.
+
+After the paired fragment quota is exhausted, unstranded counting without bias correction folds
+hits directly into ECs, retaining online jump/rejection behavior and the separate final all-hit
+intersection. Placement records are still collected whenever sampling or another consumer needs
+them. A hard rejection of mate 1 can reject the pair before scanning mate 2; both records have
+already been parsed and the processed-pair count is retained.
+
+Without bias correction, EM groups independent transcript/EC components while retaining each
+transcript's original contribution order. Each component computes its denominators before
+updating transcripts. Mandatory initial iterations omit convergence bookkeeping; subsequent
+iterations use the original stopping predicate. Only exact equality of every alpha bit permits
+skipping a component. Entirely fixed branches cache that fact and skip scheduling with their
+original component boundaries intact. Thresholding resets component and branch state before
+the final update. Bias correction
+retains the general EM path. Regression tests compare serial and threaded floating-point bits
+against the independent reference implementation.
+
+TSV formatting uses bounded, ordered chunks and retains the serial writer's exact bytes.
+Default output still includes HDF5 with DEFLATE level 6 and bounded 16,384-element chunks.
 
 ## Index construction
 

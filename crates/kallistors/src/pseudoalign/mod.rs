@@ -20,6 +20,7 @@ mod core;
 mod debug;
 mod diagnostics;
 mod ec;
+mod fingerprints;
 mod io;
 mod minimizers;
 mod onlist;
@@ -29,7 +30,8 @@ mod threaded;
 mod utils;
 use bias::bias_hexamer_for_match;
 pub use bifrost::{
-    BifrostIndex, build_bifrost_index, build_bifrost_index_quant_threaded,
+    BifrostIndex, build_bifrost_index, build_bifrost_index_quant_deferred_threaded,
+    build_bifrost_index_quant_packed_threaded, build_bifrost_index_quant_threaded,
     build_bifrost_index_threaded, build_bifrost_index_with_kmer_pos,
     build_bifrost_index_with_kmer_pos_threaded, build_bifrost_index_with_positions,
     build_bifrost_index_with_positions_threaded,
@@ -53,6 +55,7 @@ pub(super) use ec::{
     ec_has_offlist, encode_kmer_pair, filter_shades, filter_shades_in_place, intersect_sorted,
     lookup_ec, merge_sorted_unique, merge_sorted_unique_vec,
 };
+pub use onlist::TranscriptNames;
 use onlist::{read_onlist, read_onlist_with_lengths};
 pub use paired::{
     pseudoalign_paired_bifrost_debug_with_options, pseudoalign_paired_bifrost_debug_with_strand,
