@@ -1,167 +1,58 @@
 #!/usr/bin/env python3
-"""Compare kallisto and kallistors index build time on the same transcript FASTA."""
-
-from __future__ import annotations
+"""Compare index build time, file size and optional peak RSS with alternating controls."""
 
 import argparse
-import csv
-import statistics
-import subprocess
-import tempfile
-import time
 from pathlib import Path
-from typing import Any
+import sys
+
+from benchmark_common import digest, executable, fingerprint, run_process, summarize, write_json
 
 
-def build_once(
-    tool: str,
-    binary: Path,
-    fasta: Path,
-    threads: int,
-    temp_root: Path,
-) -> tuple[float, int]:
-    with tempfile.TemporaryDirectory(prefix="local-index-", dir=temp_root) as tmp:
-        output = Path(tmp) / "transcripts.idx"
-        command = [str(binary), "index", "-i", str(output), "-t", str(threads)]
-        if tool == "kallisto":
-            command.append(str(fasta))
-        else:
-            command.extend(["--timings", str(fasta)])
-
-        start = time.perf_counter()
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
-        elapsed = time.perf_counter() - start
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"{tool} failed ({result.returncode})\n"
-                f"command: {' '.join(command)}\n{result.stdout}\n{result.stderr}"
-            )
-        if not output.is_file():
-            raise RuntimeError(f"{tool} did not write {output}")
-        return elapsed, output.stat().st_size
-
-
-def write_tsv(path: Path, rows: list[dict[str, Any]], fields: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields, delimiter="\t", extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def main() -> None:
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--kallisto", type=Path, default=Path("target/tools/kallisto-0.52.0"))
-    parser.add_argument("--kallistors", type=Path, default=Path("target/release/kallistors"))
-    parser.add_argument(
-        "--fasta", type=Path, default=Path("data/srr-small/gencode.v50.transcripts.fa.gz")
-    )
-    parser.add_argument("--threads", type=int, default=4)
-    parser.add_argument("--warmups", type=int, default=1)
-    parser.add_argument("--runs", type=int, default=3)
-    parser.add_argument(
-        "--out-prefix", type=Path, default=Path("target/benchmarks/real-reads-2026-10-14/index")
-    )
+    parser.add_argument('--kallisto', default='target/tools/kallisto-0.52.0')
+    parser.add_argument('--kallistors', default='target/release/kallistors')
+    parser.add_argument('--fasta', type=Path, default=Path('data/srr-small/gencode.v50.transcripts.fa.gz'))
+    parser.add_argument('--threads', type=int, default=8)
+    parser.add_argument('--runs', type=int, default=3)
+    parser.add_argument('--warmups', type=int, default=1)
+    parser.add_argument('--memory', action=argparse.BooleanOptionalAction, default=sys.platform in ('darwin', 'linux'))
+    parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
-
-    repo = Path(__file__).resolve().parents[1]
-    binaries = {
-        "kallisto": (repo / args.kallisto).resolve(),
-        "kallistors": (repo / args.kallistors).resolve(),
-    }
-    fasta = (repo / args.fasta).resolve()
-    if args.warmups != 1 or args.runs != 3:
-        parser.error("this benchmark uses one warmup and three measured runs")
-    if not fasta.is_file():
-        parser.error(f"missing transcript FASTA: {fasta}")
-    for tool, binary in binaries.items():
-        if not binary.is_file():
-            parser.error(f"missing {tool} executable: {binary}")
-
-    temp_root = (repo / "target/benchmarks/real-reads-2026-10-14/tmp").resolve()
-    temp_root.mkdir(parents=True, exist_ok=True)
-    raw_rows: list[dict[str, Any]] = []
-    measured: dict[str, list[tuple[float, int]]] = {tool: [] for tool in binaries}
-
-    for tool, binary in binaries.items():
-        print(f"{tool} threads={args.threads}: warmup", flush=True)
-        elapsed, size = build_once(tool, binary, fasta, args.threads, temp_root)
-        raw_rows.append(
-            {
-                "tool": tool,
-                "threads": args.threads,
-                "phase": "warmup",
-                "replicate": 0,
-                "wall_seconds": f"{elapsed:.6f}",
-                "index_bytes": size,
-            }
-        )
-
-    for replicate in range(1, args.runs + 1):
-        order = list(binaries)
-        if replicate % 2 == 0:
-            order.reverse()
-        for tool in order:
-            elapsed, size = build_once(tool, binaries[tool], fasta, args.threads, temp_root)
-            measured[tool].append((elapsed, size))
-            raw_rows.append(
-                {
-                    "tool": tool,
-                    "threads": args.threads,
-                    "phase": "measured",
-                    "replicate": replicate,
-                    "wall_seconds": f"{elapsed:.6f}",
-                    "index_bytes": size,
-                }
-            )
-        print(
-            f"replicate {replicate}/{args.runs}: "
-            f"kallisto={measured['kallisto'][-1][0]:.2f}s, "
-            f"kallistors={measured['kallistors'][-1][0]:.2f}s",
-            flush=True,
-        )
-
-    medians = {
-        tool: statistics.median(run[0] for run in tool_runs)
-        for tool, tool_runs in measured.items()
-    }
-    median_sizes = {
-        tool: int(statistics.median(run[1] for run in tool_runs))
-        for tool, tool_runs in measured.items()
-    }
-    summary_rows = [
-        {
-            "threads": args.threads,
-            "runs": args.runs,
-            "warmups_per_tool": args.warmups,
-            "kallisto_median_seconds": f"{medians['kallisto']:.6f}",
-            "kallistors_median_seconds": f"{medians['kallistors']:.6f}",
-            "kallisto_over_kallistors_speedup": f"{medians['kallisto'] / medians['kallistors']:.4f}",
-            "kallisto_index_bytes_median": median_sizes["kallisto"],
-            "kallistors_index_bytes_median": median_sizes["kallistors"],
-        }
-    ]
-    write_tsv(
-        args.out_prefix.with_suffix(".runs.tsv"),
-        raw_rows,
-        ["tool", "threads", "phase", "replicate", "wall_seconds", "index_bytes"],
-    )
-    write_tsv(
-        args.out_prefix.with_suffix(".summary.tsv"),
-        summary_rows,
-        [
-            "threads",
-            "runs",
-            "warmups_per_tool",
-            "kallisto_median_seconds",
-            "kallistors_median_seconds",
-            "kallisto_over_kallistors_speedup",
-            "kallisto_index_bytes_median",
-            "kallistors_index_bytes_median",
-        ],
-    )
-    print(f"wrote {args.out_prefix}.runs.tsv and {args.out_prefix}.summary.tsv")
+    try:
+        if args.threads < 1 or args.runs < 1 or args.warmups < 0:
+            raise ValueError('Require positive threads/runs and nonnegative warmups')
+        if args.out.exists() and any(args.out.iterdir()):
+            raise ValueError('--out must be new or empty')
+        args.out = args.out.resolve()
+        tools = {key: executable(getattr(args, key)) for key in ('kallisto', 'kallistors')}
+        config = {'fasta': fingerprint(args.fasta), 'binaries': {key: fingerprint(p) for key, p in tools.items()},
+                  'threads': args.threads, 'runs': args.runs, 'warmups': args.warmups, 'memory': args.memory,
+                  'scripts': {p.name: digest(p) for p in [Path(__file__), Path(__file__).with_name('benchmark_common.py')]}}
+        write_json(args.out / 'protocol.json', {'schema_version': 1, 'kind': 'index', 'configuration': config})
+        rows = []
+        for phase, count in [('warmup', args.warmups), ('measured', args.runs)]:
+            for rep in range(1, count + 1):
+                for tool in list(tools) if rep % 2 else list(reversed(tools)):
+                    if fingerprint(tools[tool]) != config['binaries'][tool]:
+                        raise ValueError('An executable changed during measurement')
+                    prefix = args.out / f'{phase}-{rep}-{tool}'
+                    index = prefix.with_suffix('.idx')
+                    row = run_process([str(tools[tool]), 'index', '-t', str(args.threads),
+                                       '-i', str(index), config['fasta']['path']], prefix, args.memory)
+                    if not index.is_file() or not index.stat().st_size:
+                        raise ValueError(f'{tool} did not write an index')
+                    row.update(tool=tool, phase=phase, replicate=rep, index_bytes=index.stat().st_size)
+                    rows.append(row)
+                    write_json(args.out / 'runs.json', rows)
+                    index.unlink()
+                    print(f'{phase} {rep} {tool}: {row["wall_seconds"]:.3f}s', flush=True)
+        if fingerprint(args.fasta) != config['fasta'] or any(fingerprint(p) != config['binaries'][key] for key, p in tools.items()):
+            raise ValueError('An input or executable changed during measurement')
+        write_json(args.out / 'summary.json', {'schema_version': 1, 'kind': 'index', 'complete': True, **summarize(rows)})
+    except (OSError, ValueError, KeyError, RuntimeError) as error:
+        parser.exit(1, f'Index benchmark failed: {error}\n')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

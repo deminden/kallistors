@@ -1,0 +1,63 @@
+[
+  {
+    "run_accession": "ERR2260014",
+    "scientific_name": "Homo sapiens",
+    "library_layout": "PAIRED",
+    "library_strategy": "RNA-Seq",
+    "data_directory": "srr-small",
+    "fastq_ftp": "ftp.sra.ebi.ac.uk/vol1/fastq/ERR226/004/ERR2260014/ERR2260014_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/ERR226/004/ERR2260014/ERR2260014_2.fastq.gz",
+    "fastq_md5": "695aee1b6358b4514b488d1008f9c290;b92a4181c93bbde2228891735e0e26b0"
+  },
+  {
+    "run_accession": "DRR023395",
+    "scientific_name": "Homo sapiens",
+    "library_layout": "PAIRED",
+    "library_strategy": "RNA-Seq",
+    "data_directory": "drr023395",
+    "fastq_ftp": "ftp.sra.ebi.ac.uk/vol1/fastq/DRR023/DRR023395/DRR023395_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/DRR023/DRR023395/DRR023395_2.fastq.gz",
+    "fastq_md5": "56fab394ca1e9ddcb077c7064c430d1f;4ee867f3bcd04c2754a8ca65a7b83d91"
+  },
+  {
+    "run_accession": "SRR13638690",
+    "scientific_name": "Homo sapiens",
+    "library_layout": "PAIRED",
+    "library_strategy": "RNA-Seq",
+    "data_directory": "srr13638690",
+    "fastq_ftp": "ftp.sra.ebi.ac.uk/vol1/fastq/SRR136/090/SRR13638690/SRR13638690_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/SRR136/090/SRR13638690/SRR13638690_2.fastq.gz",
+    "fastq_md5": "b6282c8f9f618dea68cc92c887e74616;13e9ea4645d46a6c0b3a72b40afedbe5"
+  },
+  {
+    "run_accession": "SRR1039508",
+    "study_accession": "PRJNA229998",
+    "experiment_accession": "SRX384345",
+    "sample_accession": "SAMN02422669",
+    "scientific_name": "Homo sapiens",
+    "instrument_model": "Illumina HiSeq 2000",
+    "library_layout": "PAIRED",
+    "library_strategy": "RNA-Seq",
+    "library_selection": "cDNA",
+    "read_count": "22935521",
+    "base_count": "2889875646",
+    "fastq_ftp": "ftp.sra.ebi.ac.uk/vol1/fastq/SRR103/008/SRR1039508/SRR1039508_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/SRR103/008/SRR1039508/SRR1039508_2.fastq.gz",
+    "fastq_bytes": "1243786980;1230997455",
+    "fastq_md5": "d57df747bc142e9850074d512ab9d6db;3331c6a9e0183ff9d398a3292dd45f66",
+    "metadata_url": "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRR1039508&result=read_run&fields=run_accession,study_accession,experiment_accession,sample_accession,scientific_name,instrument_model,library_layout,library_strategy,library_selection,read_count,base_count,fastq_ftp,fastq_bytes,fastq_md5&format=json"
+  },
+  {
+    "run_accession": "SRR307903",
+    "study_accession": "PRJNA30709",
+    "experiment_accession": "SRX082568",
+    "sample_accession": "SAMN00634073",
+    "scientific_name": "Homo sapiens",
+    "instrument_model": "Illumina Genome Analyzer II",
+    "library_layout": "PAIRED",
+    "library_strategy": "RNA-Seq",
+    "library_selection": "cDNA",
+    "read_count": "36010036",
+    "base_count": "5473525472",
+    "fastq_ftp": "ftp.sra.ebi.ac.uk/vol1/fastq/SRR307/SRR307903/SRR307903_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/SRR307/SRR307903/SRR307903_2.fastq.gz",
+    "fastq_bytes": "2373907470;2386825782",
+    "fastq_md5": "a3128a10cb6e05b5f002ff52943bebee;fd9d4e4203e4fe6ee81a8d8de70e7c61",
+    "metadata_url": "https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRR307903&result=read_run&fields=run_accession,study_accession,experiment_accession,sample_accession,scientific_name,instrument_model,library_layout,library_strategy,library_selection,read_count,base_count,fastq_ftp,fastq_bytes,fastq_md5&format=json"
+  }
+]

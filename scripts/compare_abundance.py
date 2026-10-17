@@ -6,31 +6,30 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import statistics
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
 
 
 def load_abundance(path: Path) -> Dict[str, Dict[str, float]]:
-    data: Dict[str, Dict[str, float]] = {}
-    with path.open("r", encoding="utf-8") as handle:
-        reader = csv.reader(handle, delimiter="\t")
-        header = next(reader, None)
-        if not header:
-            return data
-        idx = {name: i for i, name in enumerate(header)}
-        name_key = "name" if "name" in idx else "target_id" if "target_id" in idx else "transcript_id"
-        for row in reader:
-            if not row:
-                continue
-            name = row[idx.get(name_key, 0)]
-            est_counts = float(row[idx.get("est_counts", 3)])
-            tpm = float(row[idx.get("tpm", 4)])
-            data[name] = {
-                "est_counts": est_counts,
-                "tpm": tpm,
-                "eff_length": float(row[idx["eff_length"]]) if "eff_length" in idx else 0.0,
-            }
+    data = {}
+    with path.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        required = {"target_id", "length", "eff_length", "est_counts", "tpm"}
+        if not reader.fieldnames or not required <= set(reader.fieldnames):
+            raise ValueError(f"{path}: missing abundance columns")
+        for line_number, row in enumerate(reader, 2):
+            name = row["target_id"]
+            if not name or name in data or None in row or any(value is None for value in row.values()):
+                raise ValueError(f"{path}:{line_number}: malformed row or duplicate target")
+            length = int(row["length"])
+            values = {key: float(row[key]) for key in ("eff_length", "est_counts", "tpm")}
+            if length < 0 or any(not math.isfinite(v) or v < 0 for v in values.values()):
+                raise ValueError(f"{path}:{line_number}: invalid abundance value")
+            data[name] = values
+    if not data:
+        raise ValueError(f"{path}: empty abundance table")
     return data
 
 
@@ -160,16 +159,13 @@ def main() -> None:
 
     k_path = Path(args.kallisto)
     o_path = Path(args.kallistors)
-    if not k_path.exists() or not o_path.exists():
-        missing = [str(p) for p in (k_path, o_path) if not p.exists()]
-        print(f"Skipping: missing file(s): {', '.join(missing)}")
-        return
-
-    kallisto = load_abundance(k_path)
-    kallistors = load_abundance(o_path)
-    if not kallisto or not kallistors:
-        print("Skipping: empty abundance file(s).")
-        return
+    try:
+        kallisto = load_abundance(k_path)
+        kallistors = load_abundance(o_path)
+        if kallisto.keys() != kallistors.keys():
+            raise ValueError("Transcript sets differ; the outputs do not share the same reference")
+    except (OSError, ValueError, KeyError) as error:
+        parser.exit(1, f"Abundance comparison failed: {error}\n")
 
     if args.summary_json:
         summary = audit_summary(kallisto, kallistors, args.significant_digits)

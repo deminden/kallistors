@@ -1,0 +1,182 @@
+diff --git a/src/PlaintextWriter.cpp b/src/PlaintextWriter.cpp
+index ad21f2c..8b760c9 100644
+--- a/src/PlaintextWriter.cpp
++++ b/src/PlaintextWriter.cpp
+@@ -36,6 +36,7 @@ void plaintext_writer(
+ 
+   std::ofstream of;
+   of.open( out_name );
++  of << std::setprecision(17);
+ 
+   if (!of.is_open()) {
+     std::cerr << "Error: Couldn't open file: " << out_name << std::endl;
+diff --git a/src/ProcessReads.cpp b/src/ProcessReads.cpp
+index 861186b..d093624 100644
+--- a/src/ProcessReads.cpp
++++ b/src/ProcessReads.cpp
+@@ -973,6 +973,7 @@ ReadProcessor::~ReadProcessor() {
+ 
+ void ReadProcessor::operator()() {
+   while (true) {
++    if (std::getenv("KALLISTO_DIAGNOSTIC_STOP_AFTER_SAMPLING") && mp.tlencount >= 10000) return;
+     int readbatch_id;
+     // grab the reader lock
+     if (mp.opt.batch_mode) {
+@@ -990,7 +991,7 @@ void ReadProcessor::operator()() {
+       } else {
+         // get new sequences
+         mp.SR->fetchSequences(buffer, bufsize, seqs, names, quals, flags, umis, readbatch_id,
+-                              mp.opt.pseudobam || mp.opt.fusion);
++                              mp.opt.pseudobam || mp.opt.fusion || std::getenv("KALLISTO_DIAGNOSTIC_READS") || std::getenv("KALLISTO_DIAGNOSTIC_HITS") || std::getenv("KALLISTO_DIAGNOSTIC_SELECTED_PAIRS"));
+       }
+ 
+       // release the reader lock
+@@ -1073,6 +1074,11 @@ void ReadProcessor::processBuffer() {
+     }
+   }
+ 
++  const char* sampling_path = std::getenv("KALLISTO_DIAGNOSTIC_SAMPLING");
++  std::ostringstream sampling_trace;
++  if (sampling_path && findFragmentLength && !flags.empty()) {
++    sampling_trace << "batch\t" << pseudobatch.batch_id << "\t" << flags.front() << "\t" << flags.back() << "\t" << flengoal << "\n";
++  }
+   // actually process the sequences
+   for (int i = 0; i < seqs.size(); i++) {
+     s1 = seqs[i].first;
+@@ -1155,6 +1161,19 @@ void ReadProcessor::processBuffer() {
+       mp.outputNovel(ss);
+     }
+ 
++    if (std::getenv("KALLISTO_DIAGNOSTIC_HITS")) {
++      static std::mutex hits_mutex;
++      std::lock_guard<std::mutex> hits_lock(hits_mutex);
++      static std::ofstream hits(std::getenv("KALLISTO_DIAGNOSTIC_HITS"));
++      hits << std::string(names[i].first,names[i].second) << "\tbefore\t";
++      for (auto t : u) hits << t << ",";
++      hits << "\n";
++      for (auto &h : v1) {
++        hits << std::string(names[i].first,names[i].second) << "\thit\t" << h.first.getData()->id << "\t" << h.first.dist << "\t" << h.second << "\t" << h.first.strand << "\t";
++        for (auto t : h.first.getData()->ec[h.first.dist].getIndices()) hits << t << ",";
++        hits << "\n";
++      }
++    }
+     /* --  possibly modify the pseudoalignment  -- */
+     if (!novel || !mp.opt.long_read) {
+       // If we have paired end reads where one end maps or single end reads, check if some
+@@ -1222,6 +1241,49 @@ void ReadProcessor::processBuffer() {
+         doStrandSpecificity(u, mp.opt.strand, v1, v2, comprehensive);
+       }
+ 
++      if (std::getenv("KALLISTO_DIAGNOSTIC_READS") && std::getenv("KALLISTO_DIAGNOSTIC_TID") && u.cardinality() == 1 &&
++          u.maximum() == std::atoi(std::getenv("KALLISTO_DIAGNOSTIC_TID"))) {
++        static std::mutex trace_mutex;
++        std::lock_guard<std::mutex> trace_lock(trace_mutex);
++        static std::ofstream trace(std::getenv("KALLISTO_DIAGNOSTIC_READS"));
++        trace << std::string(names[i].first, names[i].second) << "\t" << std::string(s1,l1) << "\t" << u.maximum() << "\n";
++      }
++      if (std::getenv("KALLISTO_DIAGNOSTIC_SELECTED_PAIRS")) {
++        static const std::vector<Roaring> selected_ecs = []() {
++          std::vector<Roaring> result;
++          const char* filter = std::getenv("KALLISTO_DIAGNOSTIC_EC_FILTER");
++          if (!filter) return result;
++          std::stringstream groups(filter);
++          std::string group;
++          while (std::getline(groups, group, ';')) {
++            Roaring ec;
++            std::stringstream members(group);
++            std::string member;
++            while (std::getline(members, member, ',')) {
++              if (!member.empty()) ec.add(std::stoul(member));
++            }
++            if (!ec.isEmpty()) result.push_back(ec);
++          }
++          return result;
++        }();
++        bool selected = false;
++        for (const auto& ec : selected_ecs) selected = selected || (ec == u);
++        if (selected) {
++          static std::mutex selected_mutex;
++          std::lock_guard<std::mutex> lock(selected_mutex);
++          static std::ofstream selected_reads(std::getenv("KALLISTO_DIAGNOSTIC_SELECTED_PAIRS"));
++          selected_reads << std::string(names[i].first, names[i].second) << "\t"
++                         << std::string(s1, l1) << "\t"
++                         << (paired ? std::string(s2, l2) : "-") << "\t";
++          bool first = true;
++          for (auto transcript : u) {
++            if (!first) selected_reads << ",";
++            selected_reads << transcript;
++            first = false;
++          }
++          selected_reads << "\n";
++        }
++      }
+       // find the ec
+       if (!u.isEmpty()) {
+         std::lock_guard<std::mutex> lock(mp.transfer_locks[local_id]);
+@@ -1256,6 +1318,7 @@ void ReadProcessor::processBuffer() {
+           if (0 < tl && tl < flens.size()) {
+             flens[tl]++;
+             flengoal--;
++            if (sampling_path) sampling_trace << "pair\t" << flags[i / 2] << "\t" << tl << "\n";
+           }
+         }
+ 
+@@ -1322,6 +1385,13 @@ void ReadProcessor::processBuffer() {
+       }
+     }
+   }
++  if (sampling_path && findFragmentLength) {
++    static std::mutex sampling_mutex;
++    std::lock_guard<std::mutex> sampling_lock(sampling_mutex);
++    static std::ofstream sampling_file(sampling_path);
++    sampling_file << sampling_trace.str();
++    sampling_file.flush();
++  }
+ }
+ 
+ void ReadProcessor::clear() {
+diff --git a/src/main.cpp b/src/main.cpp
+index 0a54130..11caad3 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -2836,6 +2836,28 @@ int main(int argc, char *argv[]) {
+         MinCollector collection(index, opt);
+         MasterProcessor MP(index, opt, collection, model);
+         num_processed = ProcessReads(MP, opt);
++        if (std::getenv("KALLISTO_DIAGNOSTIC_ECS")) {
++          std::ofstream diagnostic(opt.output + "/diagnostic.ec_counts.tsv");
++          diagnostic << "#ec_id\tcount\ttranscripts\n";
++          for (const auto &entry : index.ecmapinv) {
++            auto count = collection.counts[entry.second];
++            if (!count) continue;
++            diagnostic << entry.second << "\t" << count << "\t";
++            bool first = true;
++            for (auto transcript : entry.first) {
++              if (!first) diagnostic << ",";
++              diagnostic << transcript;
++              first = false;
++            }
++            diagnostic << "\n";
++          }
++        }
++
++
++        // Mapping diagnostics need the complete EC map but no abundance estimation.
++        if (std::getenv("KALLISTO_DIAGNOSTIC_MAPPING_ONLY")) {
++          return 0;
++        }
+ 
+         // save modified index for future use
+         if (opt.write_index) {
+@@ -2861,6 +2883,11 @@ int main(int argc, char *argv[]) {
+         }
+ 
+         auto fl_means = get_frag_len_means(index.target_lens_, collection.mean_fl_trunc);
++        if (std::getenv("KALLISTO_DIAGNOSTIC_ECS")) {
++          std::ofstream hist(opt.output + "/diagnostic.fragment_lengths.tsv");
++          for (size_t f = 0; f < fld.size(); ++f) hist << f << "\t" << fld[f] << "\n";
++        }
++
+ 
+         EMAlgorithm em(collection.counts, index, collection, fl_means, opt);
+         if (opt.priors != "") {

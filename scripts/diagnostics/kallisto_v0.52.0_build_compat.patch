@@ -1,0 +1,31 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8a7c700..6aff569 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-cmake_minimum_required(VERSION 3.0.0)
++cmake_minimum_required(VERSION 3.5)
+ 
+ project(kallisto)
+ 
+diff --git a/ext/bifrost/CMakeLists.txt b/ext/bifrost/CMakeLists.txt
+index a605f7c..5a88051 100644
+--- a/ext/bifrost/CMakeLists.txt
++++ b/ext/bifrost/CMakeLists.txt
+@@ -1,4 +1,4 @@
+-cmake_minimum_required(VERSION 3.0.0)
++cmake_minimum_required(VERSION 3.5)
+ 
+ project(Bifrost)
+ 
+@@ -35,8 +35,8 @@ endif(COMPILATION_ARCH MATCHES "OFF")
+ 
+ if(ENABLE_AVX2 MATCHES "OFF")
+ 	message("Disabling AVX2 instructions")
+-	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mno-avx2")
+-	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mno-avx2")
++	set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS}")
++	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+ endif(ENABLE_AVX2 MATCHES "OFF")
+ 
+ # Manages build types

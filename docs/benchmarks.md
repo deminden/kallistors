@@ -1,180 +1,221 @@
 # Benchmarks
 
-This page indexes benchmark results and correctness evidence. The inputs and raw artifacts are not
-part of the repository. Results are machine- and cache-sensitive; compare only runs measured with
-the same inputs, binaries, and timing method.
+Compare current kallistors with official kallisto v0.52.0 using the same index and trimmed
+FASTQs. The quantification runner requires complete EC parity before timing, saves executable
+and input hashes, and validates retained abundance/HDF5 outputs after timing. Results depend on
+the input, reference, hardware, power mode and compiler settings.
 
-The paired/single-end comparison using GENCODE v50 and three ENA human RNA-seq runs is recorded
-in [read_comparison_2026-10-14.md](read_comparison_2026-10-14.md). Its download,
-trimming, repeated index-build, and multicore quantification workflows are implemented by
-`scripts/prepare_benchmark.sh`, `scripts/benchmark_index.py`, and
-`scripts/benchmark_reads.py`.
+## Tools
 
-The [quantification mismatch audit](quantification_mismatch_audit_2026-10-14.md) identifies
-paired-end effective-length differences and a minimal single-end TTN scanner reproducer.
-The [fix report](quantification_fixes_2026-10-14.md) records both corrections, full EC validation,
-and the repeated eight-thread comparison after the fixes. The original October 14 timing tables
-are historical measurements from before these corrections.
+Python 3.9 or newer runs the benchmark tools. Native HDF5 validation also needs h5py and NumPy:
 
-## 0.5.0 performance evidence
+```bash
+python3 -m venv target/hdf5-native-check
+target/hdf5-native-check/bin/python -m pip install h5py numpy
+```
 
-The [performance report](performance_0.5.0.md) records the implementation included in
-0.5.0: full fastp-trimmed SRR13638690 paired reads, GENCODE v50 ALL transcripts, Apple Silicon,
-eight threads, full process wall time including load, default HDF5 output and shutdown.
+Put the official timing executable at `target/tools/kallisto-0.52.0`, or pass `--kallisto`.
+Build a separate instrumented original as described in the [debugging guide](kallisto_debug_build.md).
+Pass it with `--diagnostic-kallisto`; it supplies EC evidence and is never the timing control.
 
-| Tool | Full elapsed time | Peak RSS |
-| --- | ---: | ---: |
-| Original kallisto v0.52.0 | 47.673 s | 2.85 GiB |
-| kallistors 0.5.0 | 17.532 s | 3.01 GiB |
+| Command | Purpose |
+| --- | --- |
+| `prepare_benchmark.py` | ENA download verification and fasterp trimming |
+| `prepare_reference.py` | GENCODE cDNA or Pachter Lab NAC FASTA preparation |
+| `subsample_benchmark_pairs.py` | Exact seeded paired subsets |
+| `benchmark_reads.py` | Quantification, thread scaling, optional stage timing and EC preflight |
+| `benchmark_index.py` | Index build time, size and peak RSS |
+| `report_benchmarks.py` | Portable JSON/TSV export from completed runs |
+| `compare_ec_counts.py` | Independent comparison of complete counted EC maps |
+| `compare_abundance.py` | Transcript abundance and effective-length comparisons |
+| `check_hdf5_output.py` | Independent native HDF5 validation and fragment-model statistics |
+| `diagnostics/prepare_quant_replay.py` | Fixed-EC, fixed-fragment-model inputs for EM investigation |
 
-**2.72x faster; 63.22% less elapsed time; 5.7% more peak memory (0.16 GiB extra).**
-One measured pair with already warmed inputs and no additional warmup, using macOS
-`/usr/bin/time -l`. RSS covers the complete process lifetime; GiB = 2^30 bytes. CPU contention
-is recorded in the [performance report](performance_0.5.0.md), alongside exact byte counts,
-allocation diagnosis, limitations and reproduction. Complete EC maps match original kallisto in
-all six cases. Earlier diagnosis is in the
-[on-list bottleneck report](paired_performance_fix_2026-10-14.md).
+`benchmark_common.py` supplies shared execution, memory measurement, hashes, downloads and
+result writing. The [ENA manifest](../scripts/benchmarks/human_datasets.json) defines all five
+public datasets and their directories. The [suite manifest](../scripts/benchmarks/quantification.json)
+defines larger-library/reference combinations; the runner contains no accession-specific plans.
 
-## Historical release evidence — 0.4.2
+## Retrieve and trim reads
 
-GENCODE v50 ALL transcripts, shared upstream-built index, fastp-trimmed SRR13638690, Apple Silicon
-macOS, eight threads, one warmup and the median of three measured runs:
+```bash
+cargo install --locked fasterp --version 0.2.1
+python3 scripts/prepare_benchmark.py --samples SRR13638690
+```
 
-| Mode | kallisto v0.52.0 | kallistors with 0.4.2 fixes | EC count map |
-| --- | ---: | ---: | --- |
-| paired | 46.694 s | 78.123 s | Exact |
+`--samples all` selects all five manifest entries, including the two larger libraries.
+`--samples SRR1039508,SRR307903` selects those two. The manifest pins mate URLs and MD5s;
+compressed sizes are checked when supplied. Downloads support resumption and gzip integrity is
+checked. `--data DIRECTORY` changes the data root; `--fasterp PATH` selects the trimmer.
 
-In this historical 0.4.2 measurement, the large paired workload was slower in kallistors.
-Complete EC count maps match for all three October datasets in both read modes. Remaining paired abundance differences arise from fragment
-observation sampling; the largest paired TPM mass difference fell from 3.94% to 0.080%.
-The large single-end post-fix timing was stopped after warmups, so there is no new single-end
-median. See the [fix report](quantification_fixes_2026-10-14.md) for provenance and limitations.
+| Run | Source | Deposited pairs |
+| --- | --- | ---: |
+| SRR13638690 | Temporal muscle, PRJNA699558 | 4,451,399 |
+| SRR1039508 | Untreated airway smooth muscle N61311, PRJNA229998 | 22,935,521 |
+| SRR307903 | ENCODE BJ fibroblast poly(A)+ RNA, PRJNA30709 | 36,010,036 |
 
-## Historical May 19, 2026 benchmark
+Preparation enables fasterp adapter detection, front/tail trimming with a four-base Q20 window,
+minimum length 50, qualified-base Q15, at most 40% unqualified bases and five Ns. Defaults are
+four threads and gzip level 4. `trimmed-fasterp/preparation.json` records settings, trimmer
+version/hash, input checksums, output hashes and actual before/after pair counts. Cached outputs
+must match those records. The benchmark verifies prepared-read hashes before measuring.
 
-The sections below describe a different host, reference, release snapshot, and timing protocol.
+A pair is two FASTQ records. Retrieval and trimming are outside quantification timing.
 
-### Environment
+## Prepare references
 
-- Date: 2026-05-19
-- OS: Linux x86_64
-- CPU: AMD Ryzen 9 7950X3D
-- Thread counts: `1, 2, 4, 8, 16, 32`
-- Timing method: `/usr/bin/time -f '%e %M'`
-- Builds: release binaries
-- Upstream kallisto: `kallisto_src/build/src/kallisto`, version `0.52.0`
-- kallistors: `target/release/kallistors`, benchmark snapshot from the pre-`0.4.0`
-  development line
+Reference preparation writes FASTA provenance and target counts in `reference.json`.
+Index construction is a separate step using the same official builder for both quantifiers.
 
-## Paired-End Quant
+### GENCODE v50 ALL cDNAs
 
-### Full Dataset, 32 Threads
+```bash
+python3 scripts/prepare_reference.py --reference gencode50
+target/tools/kallisto-0.52.0 index -t 8 \
+  -i data/srr-small/gencode.v50.kallisto.idx \
+  data/srr-small/gencode.v50.transcripts.fa.gz
+```
 
-Input:
-- Reads:
-  - `data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade.gz`
-  - `data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade (2).gz`
-- Read pairs: `4,408,640`
-- Index: `data/gencode.v49_kallisto.idx`
-- Flags: `-t 32`
+The ALL transcript FASTA has 670,670 targets and MD5 `4d5bd41b247480e12c0b370490f52ddd`.
 
-Method:
-- one warmup run for each binary
-- five measured runs for each binary
-- alternating kallisto and kallistors runs
-- table reports median elapsed time and median peak RSS
-- count columns report the latest post-fix full-file validation on the same input
+### Intronic reference: Pachter Lab human NAC
 
-| tool | median elapsed | mean elapsed | min | max | median RSS | n_processed | n_pseudoaligned | n_unique |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| kallisto | `55.81s` | `56.49s` | `55.44s` | `57.76s` | `2784 MiB` | `4,408,640` | `4,244,771` | `276,251` |
-| kallistors | `32.79s` | `32.38s` | `31.53s` | `33.09s` | `5504 MiB` | `4,408,640` | `4,244,771` | `276,251` |
+```bash
+python3 scripts/prepare_reference.py --reference official-nac
+target/tools/kallisto-0.52.0 index -t 8 -k 31 -m 23 \
+  -i data/official-human-nac/human_nac.mature-plus-nascent.idx \
+  data/official-human-nac/human_nac.mature-plus-nascent.fa
+```
 
-Result:
-- kallistors median wall time is `1.70x` faster than upstream kallisto at `-t 32`.
-- kallistors uses about `2.7 GiB` more peak RSS on this run.
-- Post-fix full-file paired validation matches upstream kallisto counts exactly:
-  `n_processed=4,408,640`, `n_pseudoaligned=4,244,771`, `n_unique=276,251`. The deterministic
-  `1,048,576`-pair prefix in the multicore table below is exact at all measured thread counts.
+Intronic benchmarks use only Pachter Lab's published [mature](https://github.com/pachterlab/kallisto-transcriptome-indices/releases/download/v1/human_nac.mature.fa.gz)
+and [nascent](https://github.com/pachterlab/kallisto-transcriptome-indices/releases/download/v1/human_nac.nascent.fa.gz)
+FASTAs, concatenated in that order with IDs and sequences preserved. They use Ensembl 108
+with selected gene biotypes:
+227,665 mature and 39,546 nascent targets. Asset sizes and gzip integrity are checked;
+retrieved SHA-256 hashes are recorded, without claiming publisher-provided checksums.
 
-Raw artifacts:
-- `target/benchmarks/paired_after_fix_2026-05-19/full_paired_after_fix_runs.tsv`
-- `target/benchmarks/paired_after_fix_2026-05-19/full_paired_after_fix_summary.json`
-- `KALLISTORS_RUN_REAL_PAIRED_REGRESSION=1 cargo test -p kallistors --test real_paired_regression`
-  runs the isolated full-index pair regression; normal CI skips the expensive index load.
+`--out DIRECTORY` changes the reference directory. `--transcripts FASTA.gz` can reuse the
+verified GENCODE cDNA file for `--reference gencode50`. Reference preparation does not invoke
+platform-specific timing tools.
 
-### Multicore Scaling, 1,048,576 Pairs
+## Exact paired subsets
 
-Input:
-- Reads:
-  - `data/subsets/real_mate1_n1048576.fastq.gz`
-  - `data/subsets/real_mate2_n1048576.fastq.gz`
-- Read pairs: `1,048,576`
-- Index: `data/gencode.v49_kallisto.idx`
+To select four million airway pairs after trimming:
 
-Method:
-- one warmup run per binary per thread count
-- five measured runs per binary per thread count
-- alternating kallisto and kallistors runs
-- table reports median elapsed time and median peak RSS
+```bash
+python3 scripts/subsample_benchmark_pairs.py \
+  --reads data/srr1039508/trimmed-fasterp/SRR1039508_1.trimmed.fastq.gz \
+  --reads2 data/srr1039508/trimmed-fasterp/SRR1039508_2.trimmed.fastq.gz \
+  --total-pairs "$(python3 -c 'import json; print(json.load(open("data/srr1039508/trimmed-fasterp/preparation.json"))["pairs_after"])')" \
+  --pairs 4000000 --seed 42 --out data/srr1039508/trimmed-fasterp/subset
+```
 
-| threads | kallisto median | kallistors median | speedup | kallisto RSS | kallistors RSS | run_info parity |
-| ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| 1 | `56.87s` | `76.81s` | `0.74x` | `2228 MiB` | `4180 MiB` | exact |
-| 2 | `41.63s` | `45.65s` | `0.91x` | `2360 MiB` | `4580 MiB` | exact |
-| 4 | `31.41s` | `30.21s` | `1.04x` | `2380 MiB` | `4658 MiB` | exact |
-| 8 | `27.08s` | `22.42s` | `1.21x` | `2435 MiB` | `4749 MiB` | exact |
-| 16 | `25.76s` | `19.19s` | `1.34x` | `2542 MiB` | `4947 MiB` | exact |
-| 32 | `25.47s` | `17.56s` | `1.45x` | `2763 MiB` | `5005 MiB` | exact |
+Use SRR307903's paths and recorded pair count for its subset. Selection is uniform without
+replacement, checks mate names and FASTQ structure, preserves order, and writes deterministic
+compressed mates plus `subset.json`. Subset compression is separate from fasterp compression.
 
-Observed scaling:
-- kallistors is slower at one and two threads on this subset.
-- kallistors becomes faster from four threads onward.
-- The largest measured benefit on this subset is at 32 threads: `25.47s -> 17.56s`.
+## Quantification timing
 
-Raw artifacts:
-- `target/benchmarks/paired_2026-05-19/paired_1m_multicore_median5.tsv`
-- `target/benchmarks/paired_2026-05-19/paired_1m_multicore_summary.tsv`
+Build the candidate with locked dependencies. Source builds use `target-cpu=native`; CI uses
+`target-cpu=generic` for portable artifacts. Record compiler/CPU-target settings with results.
 
-## Single-End Quant
+```bash
+cargo build --locked --release --package kallistors --bin kallistors
+python3 scripts/benchmark_reads.py \
+  --samples SRR13638690 --modes paired,single --thread-counts 1,8 \
+  --diagnostic-kallisto target/tools/kallisto-src/build/src/kallisto \
+  --hdf-python target/hdf5-native-check/bin/python \
+  --warmups 1 --runs 3 --stages --out target/benchmarks/read-scaling
+```
 
-Measured after the positional fragment-filter parity fixes.
+All requested configurations must pass complete EC preflight before any timed quantification.
+Each uses the same index bytes, mode, fragment parameters and thread count in both tools.
+`--reads FASTQ --reads2 FASTQ --index INDEX` supplies custom paired inputs. For single-end-only
+input, use `--reads FASTQ --modes single`. Single-end defaults are mean 200 and SD 20, configurable
+with `--fragment-length` and `--fragment-sd`. Use `--reference-metadata reference.json` to attach
+reference provenance to a direct run.
 
-Input:
-- Index: `data/gencode.v49_kallisto.idx`
-- Reads:
-  - `data/subsets/real_mate1_n1048576.fastq.gz`
-  - `data/subsets/real_mate1_n2097152.fastq.gz`
-- Flags: `--single -l 200 -s 20 -t 32`
-- Method: one warmup per binary, alternating measured runs
+Defaults are eight threads, one full warmup and three measured runs per tool/configuration.
+Measured order alternates. Every execution includes index loading, all reads, model fitting,
+EM, normal TSV/HDF5 output and shutdown. Last measured outputs are retained for validation;
+other outputs are removed after their records are saved. Counter differences and disagreement
+with preflight EC totals fail the run. Equal counters alone never establish EC parity.
 
-### Patched Rust vs Upstream Kallisto
+Peak RSS is enabled by default on macOS/Linux; `--no-memory` disables it. macOS uses
+`/usr/bin/time -l` and also records peak footprint. Linux uses GNU time and converts KiB to
+bytes. `--stages` additionally records live progress-marker arrival times on either platform.
+CPU contention is sampled outside the benchmark process tree; available power/swap context
+and OS elapsed/CPU times are retained. Apple Silicon hardware is identified by family only. An OS-real versus stage-clock gap over two seconds is
+flagged as interrupted timing. Interrupted records remain saved and cannot be exported as
+an uninterrupted result; use a fresh series for replacement measurements.
 
-| subset | runs | upstream kallisto mean | patched Rust mean | elapsed delta | kallisto RSS | patched RSS |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1,048,576 reads | 3 | `27.17s` | `18.69s` | `31%` faster | `2723 MiB` | `5687 MiB` |
-| 2,097,152 reads | 2 | `36.35s` | `21.70s` | `40%` faster | `2918 MiB` | `5721 MiB` |
+| Comparable phase | Boundary |
+| --- | --- |
+| Loading/setup | Process start to read-processing marker, including index/input setup |
+| Read processing | Read-processing start to end; decompression, matching and EC counting overlap |
+| Model + EM | Read-processing end to EM completion |
+| Output/shutdown | EM completion to exit, including writing and cleanup |
 
-## Index Build
+Individual stage medians need not sum to the median total. TSV phase columns use the phases
+of the median-total execution; for even repetition counts, they average the two central runs.
+Progress-marker timing is an external approximation, not an isolated kernel measurement.
 
-Input:
-- Reference transcripts: `data/gencode.v49.transcripts.fa.gz`
-- `kallistors index` threads: `-t 8`
+`--pause-file PATH` exits with status 75 after a complete execution if that file exists.
+Remove it and pass `--resume` to continue the same output directory. Resume checks frozen
+input/executable/script hashes and protocol, preserves completed records, and adds one warmup
+per tool/configuration (`--resume-warmups` controls that count). Incomplete attempts are archived.
+Changing inputs or tools requires a new directory. `protocol.json`, `runs.json` and `summary.json`
+use the same schema across direct and suite quantification runs.
 
-| tool | elapsed | peak RSS | index size |
-| --- | ---: | ---: | ---: |
-| kallisto | `6:24.81` | `12175612KB` | `878M` |
-| kallistors | `2:02.23` | `9975360KB` | `894M` |
+## Configured suites and reports
 
-Result:
-- kallistors built the GENCODE index about `3.15x` faster.
-- kallistors peak RSS was about `18%` lower for this index-build run.
+Prepare the full libraries, subsets and references first, then select a manifest group:
 
-Use `scripts/bench_index_build.py` to regenerate an index-build report for another machine, FASTA,
-or thread count.
+```bash
+python3 scripts/benchmark_reads.py \
+  --suite scripts/benchmarks/quantification.json --group gencode50 \
+  --diagnostic-kallisto target/tools/kallisto-src/build/src/kallisto \
+  --hdf-python target/hdf5-native-check/bin/python \
+  --thread-counts 8 --runs 3 --warmups 1 --stages \
+  --out target/benchmarks/gencode50-suite
+python3 scripts/report_benchmarks.py \
+  --benchmark target/benchmarks/gencode50-suite \
+  --json target/benchmarks/gencode50-results.json \
+  --tsv target/benchmarks/gencode50-results.tsv
+```
 
-## Performance methodology
+`--group gencode50` selects cDNA-only cases; `--group official-nac` selects all intronic
+cases using the Pachter Lab mature-plus-nascent reference. A suite case names its accession,
+index, reference metadata, modes and optional subset; read paths come from the ENA manifest.
+Custom suites use the same schema. Reporting rechecks EC evidence, validated output hashes, run completeness, warmups,
+counters and interruption status, then exports portable JSON and TSV without rerunning quant.
+The reports include HDF5 validation, abundance differences, fragment statistics and reference
+provenance. NAC ECs are partitioned as `mature_only`, `nascent_only` or `mixed` using the
+recorded mature-target boundary.
 
-The [0.5.0 performance report](performance_0.5.0.md) records eight-thread comparisons
-against original kallisto, CPU contention, exact EC evidence and the reproducible
-`scripts/benchmark_quant_variants.py` workflow.
+For index build comparisons:
+
+```bash
+python3 scripts/benchmark_index.py \
+  --fasta data/srr-small/gencode.v50.transcripts.fa.gz --threads 8 \
+  --runs 3 --warmups 1 --out target/benchmarks/index-build
+```
+
+Index benchmarking shares execution, provenance, memory and summary code with quantification.
+Its outputs can be exported with `report_benchmarks.py` using the same command structure.
+Index time/size comparisons do not by themselves establish index compatibility.
+
+## Correctness and interpretation
+
+Compare complete EC count maps with `compare_ec_counts.py`, independent of EC numbering.
+Match index bytes and transcript ordering. Missing, malformed or empty comparison inputs fail
+explicitly. The native HDF5 checker verifies IDs, lengths, counts, bootstrap metadata/values and
+fragment histograms. Candidate TSV values must match HDF5 exactly; official TSV values are
+checked at its six-significant-digit precision. `compare_abundance.py` reports numeric
+differences and rejects missing/empty inputs, duplicate IDs and mismatched transcript sets.
+
+[Fragment sampling](fragment_length_sampling.md) can change effective lengths, EM convergence
+and ambiguous isoform estimates even with identical ECs. Compare saved histograms when
+interpreting model/EM speed. Fixed EC/model replays and matched iteration settings isolate EM
+behavior. Bulk poly(A) libraries can assess reference cost and compatibility; biological
+nascent-RNA accuracy requires suitable assays and independent evidence.

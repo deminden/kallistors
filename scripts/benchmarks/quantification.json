@@ -1,0 +1,76 @@
+{
+  "cases": [
+    {
+      "name": "SRR13638690-cdna-full",
+      "group": "gencode50",
+      "sample": "SRR13638690",
+      "index": "srr-small/gencode.v50.kallisto.idx",
+      "reference_metadata": "srr-small/reference.json",
+      "modes": [
+        "paired"
+      ]
+    },
+    {
+      "name": "SRR1039508-cdna-full",
+      "group": "gencode50",
+      "sample": "SRR1039508",
+      "index": "srr-small/gencode.v50.kallisto.idx",
+      "reference_metadata": "srr-small/reference.json",
+      "modes": [
+        "paired"
+      ]
+    },
+    {
+      "name": "SRR1039508-cdna-subset",
+      "group": "gencode50",
+      "sample": "SRR1039508",
+      "subset": true,
+      "index": "srr-small/gencode.v50.kallisto.idx",
+      "reference_metadata": "srr-small/reference.json",
+      "modes": [
+        "paired"
+      ]
+    },
+    {
+      "name": "SRR1039508-official-nac-full",
+      "group": "official-nac",
+      "sample": "SRR1039508",
+      "index": "official-human-nac/human_nac.mature-plus-nascent.idx",
+      "reference_metadata": "official-human-nac/reference.json",
+      "modes": [
+        "paired"
+      ]
+    },
+    {
+      "name": "SRR307903-cdna-full",
+      "group": "gencode50",
+      "sample": "SRR307903",
+      "index": "srr-small/gencode.v50.kallisto.idx",
+      "reference_metadata": "srr-small/reference.json",
+      "modes": [
+        "paired"
+      ]
+    },
+    {
+      "name": "SRR307903-cdna-subset",
+      "group": "gencode50",
+      "sample": "SRR307903",
+      "subset": true,
+      "index": "srr-small/gencode.v50.kallisto.idx",
+      "reference_metadata": "srr-small/reference.json",
+      "modes": [
+        "paired"
+      ]
+    },
+    {
+      "name": "SRR307903-official-nac-full",
+      "group": "official-nac",
+      "sample": "SRR307903",
+      "index": "official-human-nac/human_nac.mature-plus-nascent.idx",
+      "reference_metadata": "official-human-nac/reference.json",
+      "modes": [
+        "paired"
+      ]
+    }
+  ]
+}

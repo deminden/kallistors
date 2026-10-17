@@ -1,114 +1,81 @@
-# Modified kallisto build and debug usage
+# Instrumented kallisto for correctness checks
 
-Two diagnostic workflows are documented here. The October 14 v0.52.0 quantification audit uses
-the tracked patch below. The older `kallisto_src` workflow later on this page uses a separate
-patch whose CLI tracing flags are not in the tracked audit patch or stock upstream kallisto.
+Use the official kallisto v0.52.0 release executable as the performance control. A separate
+instrumented build supplies complete EC counts and targeted traces for correctness work.
+The patches target upstream commit `4e9f29cf3b021260415430c057a22469ca081391` (tag v0.52.0).
 
-## Reproducible v0.52.0 quantification audit build
+## Build
 
-The tracked [quant audit patch](../scripts/diagnostics/kallisto_v0.52.0_quant_audit.patch) applies
-to upstream tag v0.52.0 (`4e9f29cf3b021260415430c057a22469ca081391`). It adds EC counts,
-fragment histograms, per-read diagnostics, and 17-digit abundance output, plus CMake/Apple Silicon
-build compatibility changes. It was used for the [mismatch audit](quantification_mismatch_audit_2026-10-14.md).
-
-From the repository root, with Git and CMake available:
+The [build compatibility patch](../scripts/diagnostics/kallisto_v0.52.0_build_compat.patch)
+contains CMake/Apple Silicon adjustments and the Bifrost copy-constructor build fix.
+The [diagnostics patch](../scripts/diagnostics/kallisto_v0.52.0_diagnostics.patch) provides EC
+exports, mapping-only execution, selected reads, fragment-sampling traces and 17-digit TSVs.
 
 ```bash
 git clone --branch v0.52.0 --depth 1 https://github.com/pachterlab/kallisto.git \
   target/tools/kallisto-src
 git -C target/tools/kallisto-src apply \
-  "$PWD/scripts/diagnostics/kallisto_v0.52.0_quant_audit.patch"
+  "$PWD/scripts/diagnostics/kallisto_v0.52.0_build_compat.patch"
+git -C target/tools/kallisto-src apply \
+  "$PWD/scripts/diagnostics/kallisto_v0.52.0_diagnostics.patch"
 cmake -S target/tools/kallisto-src -B target/tools/kallisto-src/build \
   -DUSE_BAM=OFF -DUSE_HDF5=OFF -DENABLE_AVX2=OFF -DCOMPILATION_ARCH=OFF
 cmake --build target/tools/kallisto-src/build --parallel 8
+```
 
-KALLISTO_DIAGNOSTIC_ECS=1 target/tools/kallisto-src/build/src/kallisto quant \
+Use a fresh checkout for these commands. The diagnostic executable is passed separately as
+`--diagnostic-kallisto` to the [benchmark runner](benchmarks.md); the runner rejects using the
+same executable bytes for diagnostic work and the timing control.
+
+## Complete EC exports
+
+```bash
+KALLISTO_DIAGNOSTIC_ECS=1 KALLISTO_DIAGNOSTIC_MAPPING_ONLY=1 \
+  target/tools/kallisto-src/build/src/kallisto quant \
   -i data/srr-small/gencode.v50.kallisto.idx -t 8 \
   -o target/validation/upstream-ec \
-  data/srr13638690/trimmed/SRR13638690_1.trimmed.fastq.gz \
-  data/srr13638690/trimmed/SRR13638690_2.trimmed.fastq.gz
+  data/srr13638690/trimmed-fasterp/SRR13638690_1.trimmed.fastq.gz \
+  data/srr13638690/trimmed-fasterp/SRR13638690_2.trimmed.fastq.gz
 ```
 
-This emits `diagnostic.ec_counts.tsv` and `diagnostic.fragment_lengths.tsv` in the quant output
-directory. Optional environment controls:
+This writes `diagnostic.ec_counts.tsv` and exits before fragment-model fitting and EM.
+Omit mapping-only mode to run full quantification and also export
+`diagnostic.fragment_lengths.tsv`. Numeric transcript/unitig IDs depend on the index;
+compare counted transcript sets using identical index bytes.
 
-| Variable | Output |
+## Targeted diagnostics
+
+| Variable | Behavior |
 | --- | --- |
-| `KALLISTO_DIAGNOSTIC_HITS=<path>` | Per-read EC/hit-unitig and position trace |
-| `KALLISTO_DIAGNOSTIC_READS=<path>` | Singleton read IDs and sequences; also set the TID below |
-| `KALLISTO_DIAGNOSTIC_TID=96635` | Select TTN-206 in the documented GENCODE v50 index |
+| `KALLISTO_DIAGNOSTIC_HITS=PATH` | Read ECs and hit-unitig/position traces |
+| `KALLISTO_DIAGNOSTIC_READS=PATH` | Singleton read IDs/sequences; also set `KALLISTO_DIAGNOSTIC_TID=ID` |
+| `KALLISTO_DIAGNOSTIC_SELECTED_PAIRS=PATH` | Read name, both sequences and final EC |
+| `KALLISTO_DIAGNOSTIC_EC_FILTER='0,1;2,3'` | Select counted transcript sets for paired-read export |
+| `KALLISTO_DIAGNOSTIC_SAMPLING=PATH` | Native buffer quotas and accepted pair ordinals/fragment lengths |
+| `KALLISTO_DIAGNOSTIC_STOP_AFTER_SAMPLING=1` | Stop after the sampling goal, for prefix investigation |
 
-Numeric transcript and unitig IDs depend on the index. The no-HDF5/no-BAM diagnostic binary is
-for correctness investigation; use the official release executable for benchmark timing.
+Selected-pair export requests names and synchronizes writes across workers. Sampling traces
+retain ordinal information without requesting names, preserving sequence-buffer boundaries.
+The sampling-prefix shortcut can be combined with mapping-only mode. These diagnostic
+shortcuts are excluded from timing; the runner clears diagnostic environment controls in
+measured processes.
 
-## Historical tracing build
+## Fixed-EC/model replay
 
-## Build (macOS arm64 + BAM support)
+`scripts/diagnostics/prepare_quant_replay.py` reads complete EC exports and native HDF5
+histograms to prepare all transcript lengths, ECs and fragment bins. The `replay_ec_quant`
+Rust example runs the existing quantifier without rereading FASTQs or an index:
 
-Requirements:
-- CMake 3.x (use `/Applications/CMake.app/Contents/bin/cmake`)
-- autotools (autoconf, automake, libtool)
-- htslib (built from `kallisto_src/ext/htslib` when `USE_BAM=ON`)
-
-Commands:
-```sh
-cd kallisto_src
-rm -rf build
-mkdir build
-cd build
-/Applications/CMake.app/Contents/bin/cmake .. -DUSE_BAM=ON -DENABLE_AVX2=OFF -DCOMPILATION_ARCH=OFF
-make
+```bash
+python scripts/diagnostics/prepare_quant_replay.py \
+  --ecs path/to/diagnostic.ec_counts.tsv \
+  --original path/to/original/abundance.h5 --candidate path/to/candidate/abundance.h5 \
+  --out target/validation/replay
+cargo run --locked --release --example replay_ec_quant -- \
+  target/validation/replay/ecs.tsv target/validation/replay/lengths \
+  target/validation/replay/original.histogram target/validation/replay/quant.tsv 8 default
 ```
 
-Binary output:
-`kallisto_src/build/src/kallisto`
-
-## Debug outputs added to kallisto
-
-These flags are added to the `kallisto quant` and `kallisto inspect` CLIs.
-
-### Per-read EC trace (quant)
-Flags:
-- `--ec-trace=FILE` write per-read trace rows
-- `--ec-trace-max-reads=INT` limit to first N reads (0 = all)
-- `--hit-dump=FILE` unitig/block hit dump per read
-
-Example:
-```sh
-./kallisto quant \
-  -i INDEX \
-  -o OUTDIR \
-  --ec-trace OUTDIR/ec_trace.tsv \
-  --ec-trace-max-reads 1000 \
-  --hit-dump OUTDIR/hits.tsv \
-  READS_1.fq READS_2.fq
-```
-
-`ec_trace.tsv` columns:
-```
-type	read_id	read_name1	read_name2	part	hit_idx	unitig_id	unitig_pos	read_pos	block_id	block_lb	block_ub	ec	running_ec	action
-```
-Row types:
-- `READ` metadata about the read and hit counts
-- `HIT` per-hit candidate EC + running intersection state
-- `FINAL` final EC or empty reason
-
-`hits.tsv` columns:
-```
-read_id	read_name	part	hit_idx	unitig_id	unitig_pos	read_pos	block_id	block_lb	block_ub
-```
-
-### Index-level k-mer -> EC dump (inspect)
-Flags:
-- `--ec-dump=FILE` write k-mer/EC mapping dump
-- `--ec-dump-limit=INT` maximum k-mers to dump (default 1000)
-
-Example:
-```sh
-./kallisto inspect INDEX --ec-dump index_ec_dump.tsv --ec-dump-limit 500
-```
-
-`index_ec_dump.tsv` columns:
-```
-unitig_id	unitig_pos	kmer	block_id	block_lb	block_ub	ec
-```
+Use a Python interpreter with h5py and NumPy for replay preparation. Target-name filtering
+selects metadata for inspection; it does not remove transcripts or ECs from the replay.
+Matched ECs, models and iteration settings separate EM behavior from mapping and sampling.
