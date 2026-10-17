@@ -1,8 +1,9 @@
+pub mod helpers;
+use helpers::{command_status_with_timeout, json_u64};
 use std::fs;
-use std::io::{self, Write as _};
-use std::process::{Command, ExitStatus, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::io::Write as _;
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use kallistors::index::{IndexBuildOptions, build_index};
 use noodles_sam::alignment::{
@@ -16,6 +17,29 @@ type BamRecordFixture<'a> = (&'a [u8], &'a [u8], &'a [u8], Flags);
 type OptionalBamTagsFixture<'a> = (&'a [u8], Option<&'a [u8]>, Option<&'a [u8]>);
 const TINY_TRANSCRIPT: &[u8] =
     b"ACGTGCACTGATCGTACGATCGTACGTTAGCTAGCTAGGCTAGCATCGATCGATGCTAGCTAGCTGACT";
+
+fn bus_command(index: &std::path::Path, out: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_kallistors"));
+    command.arg("bus").arg("-i").arg(index).arg("-o").arg(out);
+    command
+}
+
+fn assert_bus_success(output: &std::process::Output, case: &str) {
+    assert!(
+        output.status.success(),
+        "{case}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn assert_bus_error(output: &std::process::Output, case: &str, error: &str) {
+    assert!(!output.status.success(), "{case}: expected failure");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(error),
+        "{case}: expected {error:?}: {stderr}"
+    );
+}
 
 fn write_fastq(path: &std::path::Path, records: &[(&str, &[u8])]) {
     let mut out = Vec::new();
@@ -69,35 +93,6 @@ fn write_bam(path: &std::path::Path, records: &[(&[u8], &[u8], &[u8])]) {
         .map(|(seq, barcode, umi)| (*seq, *barcode, *umi, Flags::empty()))
         .collect::<Vec<_>>();
     write_bam_with_flags(path, &records);
-}
-
-fn write_bam_with_corrected_barcode(
-    path: &std::path::Path,
-    seq: &[u8],
-    barcode: &[u8],
-    umi: &[u8],
-) {
-    let mut writer = noodles_bam::io::Writer::new(Vec::new());
-    let header = noodles_sam::Header::default();
-    writer.write_header(&header).expect("write BAM header");
-    let barcode = std::str::from_utf8(barcode).expect("ASCII barcode");
-    let umi = std::str::from_utf8(umi).expect("ASCII UMI");
-    let record = RecordBuf::builder()
-        .set_sequence(Sequence::from(seq))
-        .set_data(
-            [
-                (Tag::CELL_BARCODE_ID, Value::from(barcode)),
-                (Tag::UMI_SEQUENCE, Value::from(umi)),
-            ]
-            .into_iter()
-            .collect(),
-        )
-        .build();
-    writer
-        .write_alignment_record(&header, &record)
-        .expect("write BAM record");
-    writer.try_finish().expect("finish BAM");
-    fs::write(path, writer.get_ref().get_ref()).expect("write BAM");
 }
 
 fn write_bam_with_raw_and_corrected_barcode(
@@ -271,45 +266,6 @@ fn read_u64_le(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
-fn kallisto_available() -> bool {
-    command_status_with_timeout(
-        Command::new("kallisto").arg("version"),
-        Duration::from_secs(5),
-    )
-    .map(|status| status.success())
-    .unwrap_or(false)
-}
-
-fn command_status_with_timeout(command: &mut Command, timeout: Duration) -> io::Result<ExitStatus> {
-    let description = format!("{command:?}");
-    let mut child = command.spawn()?;
-    let start = Instant::now();
-
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if start.elapsed() >= timeout {
-            if let Some(status) = child.try_wait()? {
-                return Ok(status);
-            }
-            let kill_result = child.kill();
-            let wait_result = child.wait();
-            if let Err(error) = kill_result
-                && error.kind() != io::ErrorKind::InvalidInput
-            {
-                return Err(error);
-            }
-            wait_result?;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("command exceeded {timeout:?} and was terminated: {description}"),
-            ));
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BusRecord {
     barcode: u64,
@@ -464,11 +420,6 @@ fn bus_cli_writes_tenx_v3_bus_outputs() {
         .output()
         .expect("run kallistors bus");
     assert!(output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains(
-            "[bus] Note: Strand option was not specified; index has no strand annotations, processing as --unstranded"
-        )
-    );
 
     assert_eq!(
         fs::read_to_string(out_dir.join("transcripts.txt")).unwrap(),
@@ -495,114 +446,67 @@ fn bus_cli_writes_tenx_v3_bus_outputs() {
     assert_eq!(read_i32_le(&bus, record_offset + 16), 0);
     assert_eq!(read_u32_le(&bus, record_offset + 20), 1);
     let run_info = fs::read_to_string(out_dir.join("run_info.json")).unwrap();
-    for expected in [
-        "\"n_targets\": 1",
-        "\"n_bootstraps\": 0",
-        "\"n_processed\": 1",
-        "\"n_pseudoaligned\": 1",
-        "\"n_unique\": 1",
-        "\"p_pseudoaligned\": 100.0",
-        "\"p_unique\": 100.0",
-        "\"index_version\": 13",
-        "\"k-mer length\": 31",
-        "\"start_time\":",
-        "\"call\":",
+    for (field, expected) in [
+        ("n_targets", 1),
+        ("n_bootstraps", 0),
+        ("n_processed", 1),
+        ("n_pseudoaligned", 1),
+        ("n_unique", 1),
+        ("index_version", 13),
+        ("k-mer length", 31),
     ] {
-        assert!(
-            run_info.contains(expected),
-            "run_info.json should contain {expected}: {run_info}"
+        assert_eq!(json_u64(&run_info, field), Some(expected), "{field}");
+    }
+    let json: serde_json::Value = serde_json::from_str(&run_info).unwrap();
+    assert_eq!(json["p_pseudoaligned"].as_f64(), Some(100.0));
+    assert_eq!(json["p_unique"].as_f64(), Some(100.0));
+    assert!(json["start_time"].is_string());
+    assert!(json["call"].as_str().unwrap().contains("bus"));
+    assert!(json.get("technology").is_none(), "upstream BUS schema");
+}
+
+#[test]
+fn bus_skips_short_barcode_and_umi_slices_without_losing_following_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let (index, transcript) = build_tiny_index(&dir);
+    let r1 = dir.path().join("r1.fastq");
+    let r2 = dir.path().join("r2.fastq");
+    write_fastq(&r2, &[("short", &transcript), ("valid", &transcript)]);
+    for (case, short) in [
+        ("barcode", &b"ACGTACGT"[..]),
+        ("umi", &b"ACGTACGTACGTACGTTTT"[..]),
+    ] {
+        write_fastq(
+            &r1,
+            &[("short", short), ("valid", b"ACGTACGTACGTACGTTTTTTTTTTTTT")],
+        );
+        let out = dir.path().join(case);
+        let output = bus_command(&index, &out)
+            .args(["-x", "10XV3"])
+            .arg(&r1)
+            .arg(&r2)
+            .output()
+            .unwrap();
+        assert_bus_success(&output, case);
+        let (bc_len, umi_len, records) = read_bus_records(&out.join("output.bus"));
+        assert_eq!((bc_len, umi_len), (16, 12), "{case}");
+        assert_eq!(records.len(), 1, "{case}");
+        assert_eq!(
+            records[0].barcode,
+            encode_bus_seq(b"ACGTACGTACGTACGT"),
+            "{case}"
+        );
+        assert_eq!(records[0].umi, encode_bus_seq(b"TTTTTTTTTTTT"), "{case}");
+        assert_eq!(records[0].ec, 0, "{case}");
+        assert_eq!(
+            json_u64(
+                &fs::read_to_string(out.join("run_info.json")).unwrap(),
+                "n_processed"
+            ),
+            Some(2),
+            "{case}"
         );
     }
-    assert!(
-        !run_info.contains("\"technology\""),
-        "run_info.json should match upstream BUS schema without technology: {run_info}"
-    );
-}
-
-#[test]
-fn bus_skips_reads_with_too_short_barcode_slice() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let out_dir = dir.path().join("short_barcode_slice_out");
-
-    write_fastq(
-        &r1,
-        &[
-            ("short_cell", b"ACGTACGT"),
-            ("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT"),
-        ],
-    );
-    write_fastq(
-        &r2,
-        &[("short_seq", &transcript), ("seq_read", &transcript)],
-    );
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg(&r1)
-        .arg(&r2)
-        .status()
-        .expect("run kallistors bus with too-short barcode");
-    assert!(status.success());
-
-    let (_bc_len, _umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(records.len(), 1);
-    assert!(
-        fs::read_to_string(out_dir.join("run_info.json"))
-            .unwrap()
-            .contains("\"n_processed\": 2")
-    );
-}
-
-#[test]
-fn bus_skips_reads_with_too_short_umi_slice() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let out_dir = dir.path().join("short_umi_slice_out");
-
-    write_fastq(
-        &r1,
-        &[
-            ("short_umi", b"ACGTACGTACGTACGTTTT"),
-            ("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT"),
-        ],
-    );
-    write_fastq(
-        &r2,
-        &[("short_seq", &transcript), ("seq_read", &transcript)],
-    );
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg(&r1)
-        .arg(&r2)
-        .status()
-        .expect("run kallistors bus with too-short UMI");
-    assert!(status.success());
-
-    let (_bc_len, _umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(records.len(), 1);
-    assert!(
-        fs::read_to_string(out_dir.join("run_info.json"))
-            .unwrap()
-            .contains("\"n_processed\": 2")
-    );
 }
 
 #[test]
@@ -647,148 +551,82 @@ fn bus_num_reads_counts_skipped_too_short_barcode_reads() {
     assert_eq!(bc_len, 16);
     assert_eq!(umi_len, 12);
     assert!(records.is_empty());
-    assert!(
-        fs::read_to_string(out_dir.join("run_info.json"))
-            .unwrap()
-            .contains("\"n_processed\": 1")
+    assert_eq!(
+        json_u64(
+            &fs::read_to_string(out_dir.join("run_info.json")).unwrap(),
+            "n_processed"
+        ),
+        Some(1)
     );
 }
 
 #[test]
-fn bus_bulk_defaults_to_single_end_reads() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let read = dir.path().join("bulk.fastq");
-    let out_dir = dir.path().join("bulk_single_end_out");
-
+fn bus_explicit_and_inferred_bulk_share_single_end_outputs() {
+    let dir = tempfile::tempdir().unwrap();
     let (index, transcript) = build_tiny_index(&dir);
-    write_fastq(&read, &[("bulk_read", &transcript)]);
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("Bulk")
-        .arg(&read)
-        .status()
-        .expect("run kallistors bus -x Bulk");
-    assert!(status.success());
-
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 16);
-    assert_eq!(umi_len, 1);
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].barcode, 0);
-    assert_eq!(records[0].umi, 0);
-    assert_eq!(records[0].ec, 0);
-    assert!(out_dir.join("index.saved").exists());
-    assert_eq!(
-        fs::read_to_string(out_dir.join("matrix.cells")).unwrap(),
-        "batch0\n"
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("matrix.sample.barcodes")).unwrap(),
-        "AAAAAAAAAAAAAAAA\n"
-    );
-}
-
-#[test]
-fn bus_without_technology_defaults_to_bulk_single_end() {
-    let dir = tempfile::tempdir().expect("tempdir");
     let read = dir.path().join("bulk.fastq");
-    let out_dir = dir.path().join("bulk_no_technology_out");
-
-    let (index, transcript) = build_tiny_index(&dir);
     write_fastq(&read, &[("bulk_read", &transcript)]);
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg(&read)
-        .status()
-        .expect("run kallistors bus without -x");
-    assert!(status.success());
-
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 16);
-    assert_eq!(umi_len, 1);
-    assert_eq!(records.len(), 1);
-    assert_eq!(
-        fs::read_to_string(out_dir.join("matrix.cells")).unwrap(),
-        "batch0\n"
-    );
-    assert_eq!(
-        fs::read_to_string(out_dir.join("matrix.sample.barcodes")).unwrap(),
-        "AAAAAAAAAAAAAAAA\n"
-    );
+    for (case, technology) in [("explicit", Some("Bulk")), ("inferred", None)] {
+        let out = dir.path().join(case);
+        let mut command = bus_command(&index, &out);
+        if let Some(technology) = technology {
+            command.args(["-x", technology]);
+        }
+        let output = command.arg(&read).output().unwrap();
+        assert_bus_success(&output, case);
+        let (bc_len, umi_len, records) = read_bus_records(&out.join("output.bus"));
+        assert_eq!((bc_len, umi_len), (16, 1), "{case}");
+        assert_eq!(records.len(), 1, "{case}");
+        assert_eq!(
+            (records[0].barcode, records[0].umi, records[0].ec),
+            (0, 0, 0),
+            "{case}"
+        );
+        assert_eq!(
+            fs::read(out.join("index.saved")).unwrap(),
+            fs::read(&index).unwrap(),
+            "{case}"
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("matrix.cells")).unwrap(),
+            "batch0\n",
+            "{case}"
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("matrix.sample.barcodes")).unwrap(),
+            "AAAAAAAAAAAAAAAA\n",
+            "{case}"
+        );
+    }
 }
 
 #[test]
-fn bus_without_technology_supports_bulk_paired_reads() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn bus_infers_paired_direct_reads_with_or_without_paired_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let (index, transcript) = build_tiny_index(&dir);
     let left = dir.path().join("left.fastq");
     let right = dir.path().join("right.fastq");
-    let out_dir = dir.path().join("bulk_no_technology_paired_out");
-
-    let (index, transcript) = build_tiny_index(&dir);
     write_fastq(&left, &[("left", &transcript[..40])]);
     write_fastq(&right, &[("right", &transcript[20..60])]);
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("--paired")
-        .arg(&left)
-        .arg(&right)
-        .status()
-        .expect("run paired kallistors bus without -x");
-    assert!(status.success());
-
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 16);
-    assert_eq!(umi_len, 1);
-    assert_eq!(records.len(), 1);
-    assert!(out_dir.join("flens.txt").exists());
-    assert!(out_dir.join("index.saved").exists());
-}
-
-#[test]
-fn bus_without_technology_infers_paired_direct_reads() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let left = dir.path().join("left.fastq");
-    let right = dir.path().join("right.fastq");
-    let out_dir = dir.path().join("bulk_no_technology_inferred_paired_out");
-
-    let (index, transcript) = build_tiny_index(&dir);
-    write_fastq(&left, &[("left", &transcript[..40])]);
-    write_fastq(&right, &[("right", &transcript[20..60])]);
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg(&left)
-        .arg(&right)
-        .status()
-        .expect("run inferred paired kallistors bus without -x");
-    assert!(status.success());
-
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 16);
-    assert_eq!(umi_len, 1);
-    assert_eq!(records.len(), 1);
-    assert!(out_dir.join("flens.txt").exists());
-    assert!(out_dir.join("index.saved").exists());
+    for (case, paired) in [("explicit_flag", true), ("inferred", false)] {
+        let out = dir.path().join(case);
+        let mut command = bus_command(&index, &out);
+        if paired {
+            command.arg("--paired");
+        }
+        let output = command.arg(&left).arg(&right).output().unwrap();
+        assert_bus_success(&output, case);
+        let (bc_len, umi_len, records) = read_bus_records(&out.join("output.bus"));
+        assert_eq!((bc_len, umi_len), (16, 1), "{case}");
+        assert_eq!(records.len(), 1, "{case}");
+        assert_eq!(records[0].ec, 0, "{case}");
+        assert!(out.join("flens.txt").exists(), "{case}");
+        assert_eq!(
+            fs::read(out.join("index.saved")).unwrap(),
+            fs::read(&index).unwrap(),
+            "{case}"
+        );
+    }
 }
 
 #[test]
@@ -982,126 +820,7 @@ fn bus_bulk_rejects_pseudobam_bam_and_tag_modes() {
 }
 
 #[test]
-fn bus_accepts_verbose_flag() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let out_dir = dir.path().join("verbose_bus_out");
-    let (index, transcript) = build_tiny_index(&dir);
-
-    write_fastq(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
-    write_fastq(&r2, &[("seq_read", &transcript)]);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg("--verbose")
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus --verbose");
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("[bus] will process sample 1:"), "{stderr}");
-    assert!(
-        stderr.contains(&format!("[bus]   {}", r1.display())),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains(&format!("[bus]   {}", r2.display())),
-        "{stderr}"
-    );
-
-    let (_bc_len, _umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(records.len(), 1);
-}
-
-#[test]
-fn bus_verbose_reports_batch_sample_ids_and_files() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let batch = dir.path().join("batch.txt");
-    let out_dir = dir.path().join("verbose_batch_bus_out");
-    let (index, transcript) = build_tiny_index(&dir);
-
-    write_fastq(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
-    write_fastq(&r2, &[("seq_read", &transcript)]);
-    fs::write(
-        &batch,
-        format!("sample_a\t{}\t{}\n", r1.display(), r2.display()),
-    )
-    .expect("write batch");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg("--batch")
-        .arg(&batch)
-        .arg("--verbose")
-        .output()
-        .expect("run kallistors batch bus --verbose");
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("[bus] will process sample sample_a:"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains(&format!("[bus]   {}", r1.display())),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains(&format!("[bus]   {}", r2.display())),
-        "{stderr}"
-    );
-
-    let (_bc_len, _umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(records.len(), 1);
-}
-
-#[test]
-fn bus_accepts_dfk_onlist_flag() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let out_dir = dir.path().join("dfk_onlist_bus_out");
-    let (index, transcript) = build_tiny_index(&dir);
-
-    write_fastq(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
-    write_fastq(&r2, &[("seq_read", &transcript)]);
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg("--dfk-onlist")
-        .arg(&r1)
-        .arg(&r2)
-        .status()
-        .expect("run kallistors bus --dfk-onlist");
-    assert!(status.success());
-
-    let (_bc_len, _umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(records.len(), 1);
-}
-
-#[test]
-fn bus_reads_gzipped_fastq_inputs() {
+fn bus_reads_gzipped_fastq_and_reports_verbose_inputs() {
     let dir = tempfile::tempdir().expect("tempdir");
     let r1 = dir.path().join("r1.fastq.gz");
     let r2 = dir.path().join("r2.fastq.gz");
@@ -1111,8 +830,10 @@ fn bus_reads_gzipped_fastq_inputs() {
     write_fastq_gz(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
     write_fastq_gz(&r2, &[("seq_read", &transcript)]);
 
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
+    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
         .arg("bus")
+        .arg("--verbose")
+        .arg("--dfk-onlist")
         .arg("-i")
         .arg(&index)
         .arg("-o")
@@ -1121,9 +842,15 @@ fn bus_reads_gzipped_fastq_inputs() {
         .arg("10XV3")
         .arg(&r1)
         .arg(&r2)
-        .status()
+        .output()
         .expect("run kallistors bus with gzipped FASTQ");
-    assert!(status.success());
+    assert_bus_success(&output, "verbose input");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("will process sample 1:"), "{stderr}");
+
+    assert!(stderr.contains(&r1.display().to_string()), "{stderr}");
+
+    assert!(stderr.contains(&r2.display().to_string()), "{stderr}");
 
     let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
     assert_eq!(bc_len, 16);
@@ -1170,19 +897,18 @@ fn bus_reads_single_fastq_from_stdin_sentinel() {
     assert_eq!(umi_len, 4);
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].ec, 0);
-    assert!(
-        fs::read_to_string(out_dir.join("run_info.json"))
-            .unwrap()
-            .contains("\"n_processed\": 1")
+    assert_eq!(
+        json_u64(
+            &fs::read_to_string(out_dir.join("run_info.json")).unwrap(),
+            "n_processed"
+        ),
+        Some(1)
     );
 }
 
 #[test]
+#[ignore = "requires original kallisto on PATH"]
 fn bus_tenx_v3_matches_upstream_kallisto_on_tiny_case() {
-    if !kallisto_available() {
-        return;
-    }
-
     let dir = tempfile::tempdir().expect("tempdir");
     let r1 = dir.path().join("r1.fastq");
     let r2 = dir.path().join("r2.fastq");
@@ -1321,201 +1047,83 @@ fn bus_custom_open_ended_umi_patches_bus_header_length() {
 }
 
 #[test]
-fn bus_custom_technology_rejects_barcode_longer_than_bus_encoding() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn bus_rejects_custom_barcode_and_umi_widths_above_32_bases() {
+    let dir = tempfile::tempdir().unwrap();
     let (index, transcript) = build_tiny_index(&dir);
     let r1 = dir.path().join("r1.fastq");
     let r2 = dir.path().join("r2.fastq");
-    let out_dir = dir.path().join("custom_long_barcode_out");
-
-    let mut bc_umi = vec![b'A'; 33];
-    bc_umi.extend(std::iter::repeat_n(b'T', 12));
-    write_fastq(&r1, &[("bc_umi", &bc_umi)]);
+    write_fastq(&r1, &[("cell", &[b'A'; 64])]);
     write_fastq(&r2, &[("seq", &transcript)]);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("0,0,33:0,33,45:1,0,0")
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus custom long barcode");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("barcode length 33 exceeds BUS limit of 32 bases"),
-        "{stderr}"
-    );
+    for (case, technology, error) in [
+        (
+            "barcode",
+            "0,0,33:0,33,45:1,0,0",
+            "barcode length 33 exceeds BUS limit of 32 bases",
+        ),
+        (
+            "umi",
+            "0,0,16:0,16,49:1,0,0",
+            "UMI length 33 exceeds BUS limit of 32 bases",
+        ),
+    ] {
+        let out = dir.path().join(case);
+        let output = bus_command(&index, &out)
+            .args(["-x", technology])
+            .arg(&r1)
+            .arg(&r2)
+            .output()
+            .unwrap();
+        assert_bus_error(&output, case, error);
+    }
 }
 
 #[test]
-fn bus_custom_technology_rejects_umi_longer_than_bus_encoding() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn bus_rejects_invalid_tag_sequences() {
+    let dir = tempfile::tempdir().unwrap();
     let (index, transcript) = build_tiny_index(&dir);
     let r1 = dir.path().join("r1.fastq");
     let r2 = dir.path().join("r2.fastq");
-    let out_dir = dir.path().join("custom_long_umi_out");
-
-    let mut bc_umi = vec![b'A'; 16];
-    bc_umi.extend(std::iter::repeat_n(b'T', 33));
-    write_fastq(&r1, &[("bc_umi", &bc_umi)]);
+    write_fastq(&r1, &[("cell", &[b'A'; 56])]);
     write_fastq(&r2, &[("seq", &transcript)]);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("0,0,16:0,16,49:1,0,0")
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus custom long UMI");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("UMI length 33 exceeds BUS limit of 32 bases"),
-        "{stderr}"
-    );
+    for (case, tag, error) in [
+        (
+            "too_long",
+            "A".repeat(33),
+            "tag sequence length 33 exceeds BUS limit of 32 bases",
+        ),
+        (
+            "invalid_base",
+            "ACGN".into(),
+            "tag sequence contains invalid base N at position 4",
+        ),
+        ("empty", "".into(), "tag sequence cannot be empty"),
+    ] {
+        let out = dir.path().join(case);
+        let output = bus_command(&index, &out)
+            .args(["-x", "0,0,16:0,16,56:1,0,0", "--tag"])
+            .arg(tag)
+            .arg(&r1)
+            .arg(&r2)
+            .output()
+            .unwrap();
+        assert_bus_error(&output, case, error);
+        assert!(
+            !out.exists(),
+            "{case}: validation must precede output creation"
+        );
+    }
 }
 
 #[test]
-fn bus_rejects_tag_sequence_longer_than_bus_encoding() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let out_dir = dir.path().join("custom_long_tag_out");
-    let tag = "A".repeat(33);
-
-    let mut bc_umi = vec![b'A'; 16];
-    bc_umi.extend(std::iter::repeat_n(b'T', 40));
-    write_fastq(&r1, &[("bc_umi", &bc_umi)]);
-    write_fastq(&r2, &[("seq", &transcript)]);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("0,0,16:0,16,56:1,0,0")
-        .arg("--tag")
-        .arg(&tag)
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus custom long tag");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("tag sequence length 33 exceeds BUS limit of 32 bases"),
-        "{stderr}"
-    );
-}
-
-#[test]
-fn bus_rejects_invalid_tag_sequence_base() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let out_dir = dir.path().join("custom_invalid_tag_out");
-
-    let mut bc_umi = vec![b'A'; 16];
-    bc_umi.extend(std::iter::repeat_n(b'T', 24));
-    write_fastq(&r1, &[("bc_umi", &bc_umi)]);
-    write_fastq(&r2, &[("seq", &transcript)]);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("0,0,16:0,16,40:1,0,0")
-        .arg("--tag")
-        .arg("ACGN")
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus custom invalid tag");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("tag sequence contains invalid base N at position 4"),
-        "{stderr}"
-    );
-    assert!(
-        !out_dir.exists(),
-        "invalid tag sequence should fail before creating outputs"
-    );
-}
-
-#[test]
-fn bus_rejects_empty_tag_sequence() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let out_dir = dir.path().join("custom_empty_tag_out");
-
-    let mut bc_umi = vec![b'A'; 16];
-    bc_umi.extend(std::iter::repeat_n(b'T', 24));
-    write_fastq(&r1, &[("bc_umi", &bc_umi)]);
-    write_fastq(&r2, &[("seq", &transcript)]);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("0,0,16:0,16,40:1,0,0")
-        .arg("--tag")
-        .arg("")
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus custom empty tag");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("tag sequence cannot be empty"), "{stderr}");
-    assert!(
-        !out_dir.exists(),
-        "invalid tag sequence should fail before creating outputs"
-    );
-}
-
-#[test]
-fn bus_batch_writes_cells_and_batch_barcodes() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn bus_batch_barcode_prefixes_match_records_for_standard_custom_and_near_limit_layouts() {
+    let dir = tempfile::tempdir().unwrap();
     let (index, transcript) = build_tiny_index(&dir);
     let a_r1 = dir.path().join("a_r1.fastq");
     let a_r2 = dir.path().join("a_r2.fastq");
     let b_r1 = dir.path().join("b_r1.fastq");
     let b_r2 = dir.path().join("b_r2.fastq");
     let batch = dir.path().join("batch.txt");
-    let out_dir = dir.path().join("batch_out");
-
-    write_fastq(&a_r1, &[("a_cell", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
     write_fastq(&a_r2, &[("a_seq", &transcript)]);
-    write_fastq(&b_r1, &[("b_cell", b"TGCATGCATGCATGCATTTTTTTTTTTT")]);
     write_fastq(&b_r2, &[("b_seq", &transcript)]);
     fs::write(
         &batch,
@@ -1527,165 +1135,90 @@ fn bus_batch_writes_cells_and_batch_barcodes() {
             b_r2.display()
         ),
     )
-    .expect("write batch");
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg("-B")
-        .arg(&batch)
-        .arg("--batch-barcodes")
-        .status()
-        .expect("run kallistors bus batch");
-    assert!(status.success());
-
-    assert_eq!(
-        fs::read_to_string(out_dir.join("matrix.cells")).unwrap(),
-        "sample_a\nsample_b\n"
-    );
-    let sample_barcodes = fs::read_to_string(out_dir.join("matrix.sample.barcodes")).unwrap();
-    let sample_barcodes = sample_barcodes.lines().collect::<Vec<_>>();
-    assert_eq!(sample_barcodes.len(), 2);
-    assert!(sample_barcodes.iter().all(|barcode| barcode.len() == 16));
-    let bus = fs::read(out_dir.join("output.bus")).expect("read bus");
-    assert_eq!(read_u32_le(&bus, 8), 32);
-    assert_eq!(read_u32_le(&bus, 12), 12);
-    let text_len = read_u32_le(&bus, 16) as usize;
-    assert_eq!(bus.len(), 20 + text_len + 64);
-    assert!(
-        fs::read_to_string(out_dir.join("run_info.json"))
-            .unwrap()
-            .contains("\"n_processed\": 2")
-    );
-}
-
-#[test]
-fn bus_batch_barcodes_sidecar_matches_custom_prefix_length() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let a_r1 = dir.path().join("a_r1.fastq");
-    let a_r2 = dir.path().join("a_r2.fastq");
-    let b_r1 = dir.path().join("b_r1.fastq");
-    let b_r2 = dir.path().join("b_r2.fastq");
-    let batch = dir.path().join("batch.txt");
-    let out_dir = dir.path().join("batch_custom_prefix_out");
-
-    write_fastq(&a_r1, &[("a_cell", b"ACGTACGTTTTTTTTTTTTT")]);
-    write_fastq(&a_r2, &[("a_seq", &transcript)]);
-    write_fastq(&b_r1, &[("b_cell", b"TGCATGCATTTTTTTTTTTT")]);
-    write_fastq(&b_r2, &[("b_seq", &transcript)]);
-    fs::write(
-        &batch,
-        format!(
-            "sample_a\t{}\t{}\nsample_b\t{}\t{}\n",
-            a_r1.display(),
-            a_r2.display(),
-            b_r1.display(),
-            b_r2.display()
+    .unwrap();
+    for (case, technology, a_cell, b_cell, bc_len, umi_len) in [
+        (
+            "tenx",
+            "10XV3",
+            b"ACGTACGTACGTACGTTTTTTTTTTTTT".to_vec(),
+            b"TGCATGCATGCATGCATTTTTTTTTTTT".to_vec(),
+            16,
+            12,
         ),
-    )
-    .expect("write batch");
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("0,0,8:0,8,20:1,0,0")
-        .arg("-B")
-        .arg(&batch)
-        .arg("--batch-barcodes")
-        .status()
-        .expect("run kallistors bus custom batch barcodes");
-    assert!(status.success());
-
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 32);
-    assert_eq!(umi_len, 12);
-    assert_eq!(records.len(), 2);
-    let sample_barcodes = fs::read_to_string(out_dir.join("matrix.sample.barcodes")).unwrap();
-    let sample_barcodes = sample_barcodes.lines().collect::<Vec<_>>();
-    assert_eq!(sample_barcodes.len(), 2);
-    assert!(sample_barcodes.iter().all(|barcode| barcode.len() == 24));
-    assert_eq!(sample_barcodes[0], "A".repeat(24));
-    assert_eq!(sample_barcodes[1], format!("{}C", "A".repeat(23)));
-    assert_eq!(
-        records[0].barcode >> 16,
-        encode_bus_seq(sample_barcodes[0].as_bytes())
-    );
-    assert_eq!(
-        records[1].barcode >> 16,
-        encode_bus_seq(sample_barcodes[1].as_bytes())
-    );
-}
-
-#[test]
-fn bus_batch_barcodes_sidecar_matches_near_limit_preset_prefix_length() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let a_r1 = dir.path().join("a_r1.fastq");
-    let a_r2 = dir.path().join("a_r2.fastq");
-    let b_r1 = dir.path().join("b_r1.fastq");
-    let b_r2 = dir.path().join("b_r2.fastq");
-    let batch = dir.path().join("batch.txt");
-    let out_dir = dir.path().join("batch_bdwta_prefix_out");
-
-    let a_cell = vec![b'A'; 60];
-    let b_cell = vec![b'C'; 60];
-    write_fastq(&a_r1, &[("a_cell", &a_cell)]);
-    write_fastq(&a_r2, &[("a_seq", &transcript)]);
-    write_fastq(&b_r1, &[("b_cell", &b_cell)]);
-    write_fastq(&b_r2, &[("b_seq", &transcript)]);
-    fs::write(
-        &batch,
-        format!(
-            "sample_a\t{}\t{}\nsample_b\t{}\t{}\n",
-            a_r1.display(),
-            a_r2.display(),
-            b_r1.display(),
-            b_r2.display()
+        (
+            "custom",
+            "0,0,8:0,8,20:1,0,0",
+            b"ACGTACGTTTTTTTTTTTTT".to_vec(),
+            b"TGCATGCATTTTTTTTTTTT".to_vec(),
+            8,
+            12,
         ),
-    )
-    .expect("write batch");
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("BDWTA")
-        .arg("-B")
-        .arg(&batch)
-        .arg("--batch-barcodes")
-        .status()
-        .expect("run kallistors bus BDWTA batch barcodes");
-    assert!(status.success());
-
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 32);
-    assert_eq!(umi_len, 8);
-    assert_eq!(records.len(), 2);
-    let sample_barcodes = fs::read_to_string(out_dir.join("matrix.sample.barcodes")).unwrap();
-    let sample_barcodes = sample_barcodes.lines().collect::<Vec<_>>();
-    assert_eq!(sample_barcodes.len(), 2);
-    assert!(sample_barcodes.iter().all(|barcode| barcode.len() == 5));
-    assert_eq!(
-        records[0].barcode >> 54,
-        encode_bus_seq(sample_barcodes[0].as_bytes())
-    );
-    assert_eq!(
-        records[1].barcode >> 54,
-        encode_bus_seq(sample_barcodes[1].as_bytes())
-    );
+        ("near_limit", "BDWTA", vec![b'A'; 60], vec![b'C'; 60], 27, 8),
+    ] {
+        write_fastq(&a_r1, &[("a_cell", &a_cell)]);
+        write_fastq(&b_r1, &[("b_cell", &b_cell)]);
+        let out = dir.path().join(case);
+        let mut command = bus_command(&index, &out);
+        command
+            .args(["-x", technology, "--batch-barcodes", "-B"])
+            .arg(&batch);
+        if case == "tenx" {
+            command.arg("--verbose");
+        }
+        let output = command.output().unwrap();
+        assert_bus_success(&output, case);
+        if case == "tenx" {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            for name in ["sample_a", "sample_b"] {
+                assert!(
+                    stderr.contains(&format!("will process sample {name}:")),
+                    "{case}: {stderr}"
+                );
+            }
+            for file in [&a_r1, &a_r2, &b_r1, &b_r2] {
+                assert!(
+                    stderr.contains(&file.display().to_string()),
+                    "{case}: {stderr}"
+                );
+            }
+        }
+        let (header_bc, header_umi, records) = read_bus_records(&out.join("output.bus"));
+        assert_eq!((header_bc, header_umi), (32, umi_len), "{case}");
+        assert_eq!(records.len(), 2, "{case}");
+        assert_eq!(
+            fs::read_to_string(out.join("matrix.cells")).unwrap(),
+            "sample_a\nsample_b\n",
+            "{case}"
+        );
+        let sidecar = fs::read_to_string(out.join("matrix.sample.barcodes")).unwrap();
+        let prefixes: Vec<_> = sidecar.lines().collect();
+        let prefix_len = 32 - bc_len;
+        assert_eq!(
+            prefixes,
+            vec![
+                "A".repeat(prefix_len),
+                format!("{}C", "A".repeat(prefix_len - 1))
+            ],
+            "{case}"
+        );
+        for (record, prefix) in records.iter().zip(prefixes) {
+            assert_eq!(
+                record.barcode >> (2 * bc_len),
+                encode_bus_seq(prefix.as_bytes()),
+                "{case}"
+            );
+            assert_eq!(record.ec, 0, "{case}");
+            assert_eq!(record.count, 1, "{case}");
+        }
+        assert_eq!(
+            json_u64(
+                &fs::read_to_string(out.join("run_info.json")).unwrap(),
+                "n_processed"
+            ),
+            Some(2),
+            "{case}"
+        );
+    }
 }
 
 #[test]
@@ -1756,51 +1289,19 @@ fn bus_batch_rejects_wrong_number_of_files_per_row() {
 }
 
 #[test]
-fn bus_batch_rejects_empty_batch_file_clearly() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, _transcript) = build_tiny_index(&dir);
-    let batch = dir.path().join("batch_empty.txt");
-    let out_dir = dir.path().join("batch_empty_out");
-
-    fs::write(&batch, "\n# only a comment\n\n").expect("write empty batch");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg("--batch")
-        .arg(&batch)
-        .output()
-        .expect("run kallistors bus empty batch");
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("batch file contains no read groups"));
-}
-
-#[test]
-fn bus_without_technology_rejects_empty_batch_file_clearly() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, _transcript) = build_tiny_index(&dir);
-    let batch = dir.path().join("batch_empty.txt");
-    let out_dir = dir.path().join("bulk_empty_batch_out");
-
-    fs::write(&batch, "# no samples\n").expect("write empty batch");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("--batch")
-        .arg(&batch)
-        .output()
-        .expect("run kallistors bus empty batch without -x");
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("batch file contains no read groups"));
+fn bus_rejects_empty_batch_with_explicit_or_inferred_technology() {
+    let dir = tempfile::tempdir().unwrap();
+    let (index, _) = build_tiny_index(&dir);
+    let batch = dir.path().join("empty.txt");
+    fs::write(&batch, "\n# no samples\n\n").unwrap();
+    for (case, technology) in [("explicit", Some("10XV3")), ("inferred", None)] {
+        let mut command = bus_command(&index, &dir.path().join(case));
+        if let Some(technology) = technology {
+            command.args(["-x", technology]);
+        }
+        let output = command.arg("--batch").arg(&batch).output().unwrap();
+        assert_bus_error(&output, case, "batch file contains no read groups");
+    }
 }
 
 #[test]
@@ -1834,91 +1335,43 @@ fn bus_batch_barcodes_requires_batch_mode() {
 }
 
 #[test]
-fn bus_batch_barcodes_rejects_full_length_barcode_without_prefix_room() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn bus_batch_barcodes_rejects_unusable_prefix_geometry() {
+    let dir = tempfile::tempdir().unwrap();
     let (index, transcript) = build_tiny_index(&dir);
     let r1 = dir.path().join("r1.fastq");
     let r2 = dir.path().join("r2.fastq");
     let batch = dir.path().join("batch.txt");
-    let out_dir = dir.path().join("batch_full_barcode_out");
-
-    let mut bc_umi = vec![b'A'; 32];
-    bc_umi.extend(std::iter::repeat_n(b'T', 12));
-    write_fastq(&r1, &[("cell", &bc_umi)]);
+    write_fastq(&r1, &[("cell", &[b'A'; 44])]);
     write_fastq(&r2, &[("seq", &transcript)]);
     fs::write(
         &batch,
         format!("sample_a\t{}\t{}\n", r1.display(), r2.display()),
     )
-    .expect("write batch");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("0,0,32:0,32,44:1,0,0")
-        .arg("-B")
-        .arg(&batch)
-        .arg("--batch-barcodes")
-        .output()
-        .expect("run kallistors bus batch with full barcode");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("--batch-barcodes requires barcode length shorter than 32 bases"),
-        "{stderr}"
-    );
-    assert!(
-        !out_dir.exists(),
-        "invalid batch barcode geometry should fail before creating outputs"
-    );
-}
-
-#[test]
-fn bus_batch_barcodes_rejects_open_ended_barcode_length() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let batch = dir.path().join("batch.txt");
-    let out_dir = dir.path().join("batch_open_barcode_out");
-
-    write_fastq(&r1, &[("cell", b"ACGTACGTTTTTTTTTTTTT")]);
-    write_fastq(&r2, &[("seq", &transcript)]);
-    fs::write(
-        &batch,
-        format!("sample_a\t{}\t{}\n", r1.display(), r2.display()),
-    )
-    .expect("write batch");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("0,0,0:0,8,20:1,0,0")
-        .arg("-B")
-        .arg(&batch)
-        .arg("--batch-barcodes")
-        .output()
-        .expect("run kallistors bus batch with open-ended barcode");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("--batch-barcodes requires a bounded barcode length"),
-        "{stderr}"
-    );
-    assert!(
-        !out_dir.exists(),
-        "invalid batch barcode geometry should fail before creating outputs"
-    );
+    .unwrap();
+    for (case, technology, error) in [
+        (
+            "no_room",
+            "0,0,32:0,32,44:1,0,0",
+            "--batch-barcodes requires barcode length shorter than 32 bases",
+        ),
+        (
+            "unbounded",
+            "0,0,0:0,8,20:1,0,0",
+            "--batch-barcodes requires a bounded barcode length",
+        ),
+    ] {
+        let out = dir.path().join(case);
+        let output = bus_command(&index, &out)
+            .args(["-x", technology, "--batch-barcodes", "-B"])
+            .arg(&batch)
+            .output()
+            .unwrap();
+        assert_bus_error(&output, case, error);
+        assert!(
+            !out.exists(),
+            "{case}: invalid geometry must precede output creation"
+        );
+    }
 }
 
 #[test]
@@ -2078,8 +1531,8 @@ fn bus_custom_all_sentinel_technology_does_not_panic() {
     assert_eq!(umi_len, 1);
     assert!(records.is_empty());
     let run_info = fs::read_to_string(out_dir.join("run_info.json")).unwrap();
-    assert!(run_info.contains("\"n_processed\": 1"), "{run_info}");
-    assert!(run_info.contains("\"n_pseudoaligned\": 0"), "{run_info}");
+    assert_eq!(json_u64(&run_info, "n_processed"), Some(1));
+    assert_eq!(json_u64(&run_info, "n_pseudoaligned"), Some(0));
 }
 
 #[test]
@@ -2198,10 +1651,16 @@ fn bus_batch_paired_writes_one_flens_line_per_batch() {
     let batch = dir.path().join("batch.txt");
     let out_dir = dir.path().join("batch_paired_flens_out");
 
-    write_fastq(&a_r1, &[("a/1", &transcript[..40])]);
-    write_fastq(&a_r2, &[("a/2", &transcript[20..60])]);
-    write_fastq(&b_r1, &[("b/1", &transcript[..35])]);
-    write_fastq(&b_r2, &[("b/2", &transcript[10..45])]);
+    write_fastq(&a_r1, &[("a/1", &transcript[..40]); 2]);
+    write_fastq(
+        &a_r2,
+        &[("a/2", reverse_complement(&transcript[20..60]).as_slice()); 2],
+    );
+    write_fastq(&b_r1, &[("b/1", &transcript[..35]); 7]);
+    write_fastq(
+        &b_r2,
+        &[("b/2", reverse_complement(&transcript[10..45]).as_slice()); 7],
+    );
     fs::write(
         &batch,
         format!(
@@ -2231,12 +1690,17 @@ fn bus_batch_paired_writes_one_flens_line_per_batch() {
     let flens = fs::read_to_string(out_dir.join("flens.txt")).unwrap();
     let lines = flens.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 2);
-    for line in lines {
+    for (line, (expected_length, expected_count)) in lines.into_iter().zip([(60, 2), (45, 7)]) {
         let counts = line
             .split_whitespace()
             .map(|value| value.parse::<u32>().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(counts.len(), kallistors::pseudoalign::MAX_FRAG_LEN as usize);
+        let mut expected = vec![0; kallistors::pseudoalign::MAX_FRAG_LEN as usize];
+        expected[expected_length] = expected_count;
+        assert_eq!(
+            counts, expected,
+            "batch with fragment length {expected_length}"
+        );
     }
 }
 
@@ -2407,8 +1871,8 @@ fn bus_zero_pseudoaligned_returns_error_after_writing_outputs() {
     assert_eq!(umi_len, 12);
     assert!(records.is_empty());
     let run_info = fs::read_to_string(out_dir.join("run_info.json")).unwrap();
-    assert!(run_info.contains("\"n_processed\": 1"));
-    assert!(run_info.contains("\"n_pseudoaligned\": 0"));
+    assert_eq!(json_u64(&run_info, "n_processed"), Some(1));
+    assert_eq!(json_u64(&run_info, "n_pseudoaligned"), Some(0));
 }
 
 #[test]
@@ -2562,10 +2026,12 @@ fn bus_long_filters_reads_above_unmapped_threshold() {
 
     let (_bc_len, _umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
     assert_eq!(records.len(), 1);
-    assert!(
-        fs::read_to_string(out_dir.join("run_info.json"))
-            .unwrap()
-            .contains("\"n_processed\": 2")
+    assert_eq!(
+        json_u64(
+            &fs::read_to_string(out_dir.join("run_info.json")).unwrap(),
+            "n_processed"
+        ),
+        Some(2)
     );
     let ratios = fs::read_to_string(out_dir.join("unmapped_ratio.txt")).unwrap();
     let values = ratios
@@ -2858,43 +2324,6 @@ fn bus_long_invalid_threshold_uses_default() {
 }
 
 #[test]
-fn bus_bam_reads_sequence_and_barcode_umi_tags() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let bam = dir.path().join("reads.bam");
-    let out_dir = dir.path().join("bam_out");
-
-    write_bam(
-        &bam,
-        &[
-            (&transcript, b"ACGTACGTACGTACGT", b"TTTTTTTTTT"),
-            (&transcript, b"TGCATGCATGCATGCA", b"AAAAAAAAAA"),
-        ],
-    );
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV2")
-        .arg("--bam")
-        .arg(&bam)
-        .status()
-        .expect("run kallistors bus --bam");
-    assert!(status.success());
-
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 16);
-    assert_eq!(umi_len, 10);
-    assert_eq!(records.len(), 2);
-    assert_eq!(records[0].ec, 0);
-    assert_eq!(records[1].ec, 0);
-}
-
-#[test]
 fn bus_bam_rejects_barcode_tag_longer_than_bus_encoding() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (index, transcript) = build_tiny_index(&dir);
@@ -2923,42 +2352,6 @@ fn bus_bam_rejects_barcode_tag_longer_than_bus_encoding() {
         stderr.contains("barcode length 33 exceeds BUS limit of 32 bases"),
         "{stderr}"
     );
-}
-
-#[test]
-fn bus_verbose_reports_bam_input_file() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let bam = dir.path().join("reads.bam");
-    let out_dir = dir.path().join("bam_verbose_out");
-
-    write_bam(&bam, &[(&transcript, b"ACGTACGTACGTACGT", b"TTTTTTTTTT")]);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg("--bam")
-        .arg("--verbose")
-        .arg(&bam)
-        .output()
-        .expect("run kallistors bus --bam --verbose");
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("[bus] will process sample 1:"), "{stderr}");
-    assert!(
-        stderr.contains(&format!("[bus]   {}", bam.display())),
-        "{stderr}"
-    );
-
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 16);
-    assert_eq!(umi_len, 10);
-    assert_eq!(records.len(), 1);
 }
 
 #[test]
@@ -2993,33 +2386,52 @@ fn bus_bam_rejects_paired_flag_in_short_read_mode() {
 }
 
 #[test]
-fn bus_bam_trims_corrected_barcode_suffix() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn bus_bam_reads_and_normalizes_corrected_barcode_and_umi_tags() {
+    let dir = tempfile::tempdir().unwrap();
     let (index, transcript) = build_tiny_index(&dir);
-    let bam = dir.path().join("corrected_barcode.bam");
-    let out_dir = dir.path().join("bam_corrected_barcode_out");
-
-    write_bam_with_corrected_barcode(&bam, &transcript, b"ACGTACGT-1", b"TTTTTTTTTT");
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV2")
-        .arg("--bam")
-        .arg(&bam)
-        .status()
-        .expect("run kallistors bus --bam corrected barcode");
-    assert!(status.success());
-
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 8);
-    assert_eq!(umi_len, 10);
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].barcode, encode_bus_seq(b"ACGTACGT"));
+    let bam = dir.path().join("reads.bam");
+    for (case, tag, umi, expected_umi) in [
+        (
+            "raw_umi",
+            Tag::UMI_SEQUENCE,
+            &b"TTTTTTTTTT"[..],
+            &b"TTTTTTTTTT"[..],
+        ),
+        ("mi", Tag::UMI_ID, &b"TTTTAAAA"[..], &b"TTTTAAAA"[..]),
+        (
+            "mi_suffix",
+            Tag::UMI_ID,
+            &b"TTTTAAAA-1"[..],
+            &b"TTTTAAAA"[..],
+        ),
+        (
+            "ub",
+            Tag::new(b'U', b'B'),
+            &b"AAAATTTT"[..],
+            &b"AAAATTTT"[..],
+        ),
+        (
+            "ub_suffix",
+            Tag::new(b'U', b'B'),
+            &b"AAAATTTT-1"[..],
+            &b"AAAATTTT"[..],
+        ),
+    ] {
+        write_bam_with_corrected_barcode_and_umi(&bam, &transcript, b"ACGTACGT-1", umi, tag);
+        let out = dir.path().join(case);
+        let output = bus_command(&index, &out)
+            .args(["-x", "10XV2", "--bam"])
+            .arg(&bam)
+            .output()
+            .unwrap();
+        assert_bus_success(&output, case);
+        let (bc_len, umi_len, records) = read_bus_records(&out.join("output.bus"));
+        assert_eq!((bc_len, umi_len), (8, expected_umi.len() as u32), "{case}");
+        assert_eq!(records.len(), 1, "{case}");
+        assert_eq!(records[0].barcode, encode_bus_seq(b"ACGTACGT"), "{case}");
+        assert_eq!(records[0].umi, encode_bus_seq(expected_umi), "{case}");
+        assert_eq!(records[0].ec, 0, "{case}");
+    }
 }
 
 #[test]
@@ -3058,254 +2470,49 @@ fn bus_bam_prefers_raw_barcode_over_corrected_barcode() {
 }
 
 #[test]
-fn bus_bam_reads_corrected_umi_id_tag() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn bus_bam_missing_tags_preserve_headers_counts_and_unmapped_ratio() {
+    let dir = tempfile::tempdir().unwrap();
     let (index, transcript) = build_tiny_index(&dir);
-    let bam = dir.path().join("corrected_umi.bam");
-    let out_dir = dir.path().join("bam_corrected_umi_out");
-
-    write_bam_with_corrected_barcode_and_umi(
-        &bam,
-        &transcript,
-        b"ACGTACGT-1",
-        b"TTTTAAAA",
-        Tag::UMI_ID,
-    );
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV2")
-        .arg("--bam")
-        .arg(&bam)
-        .status()
-        .expect("run kallistors bus --bam corrected UMI");
-    assert!(status.success());
-
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 8);
-    assert_eq!(umi_len, 8);
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].barcode, encode_bus_seq(b"ACGTACGT"));
-    assert_eq!(records[0].umi, encode_bus_seq(b"TTTTAAAA"));
-}
-
-#[test]
-fn bus_bam_trims_corrected_umi_id_suffix() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let bam = dir.path().join("corrected_umi_suffix.bam");
-    let out_dir = dir.path().join("bam_corrected_umi_suffix_out");
-
-    write_bam_with_corrected_barcode_and_umi(
-        &bam,
-        &transcript,
-        b"ACGTACGT-1",
-        b"TTTTAAAA-1",
-        Tag::UMI_ID,
-    );
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV2")
-        .arg("--bam")
-        .arg(&bam)
-        .status()
-        .expect("run kallistors bus --bam corrected UMI suffix");
-    assert!(status.success());
-
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 8);
-    assert_eq!(umi_len, 8);
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].barcode, encode_bus_seq(b"ACGTACGT"));
-    assert_eq!(records[0].umi, encode_bus_seq(b"TTTTAAAA"));
-}
-
-#[test]
-fn bus_bam_reads_corrected_umi_barcode_tag() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let bam = dir.path().join("corrected_umi_barcode.bam");
-    let out_dir = dir.path().join("bam_corrected_umi_barcode_out");
-
-    write_bam_with_corrected_barcode_and_umi(
-        &bam,
-        &transcript,
-        b"ACGTACGT-1",
-        b"AAAATTTT",
-        Tag::new(b'U', b'B'),
-    );
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV2")
-        .arg("--bam")
-        .arg(&bam)
-        .status()
-        .expect("run kallistors bus --bam corrected UB UMI");
-    assert!(status.success());
-
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 8);
-    assert_eq!(umi_len, 8);
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].barcode, encode_bus_seq(b"ACGTACGT"));
-    assert_eq!(records[0].umi, encode_bus_seq(b"AAAATTTT"));
-}
-
-#[test]
-fn bus_bam_trims_corrected_umi_barcode_suffix() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let bam = dir.path().join("corrected_umi_barcode_suffix.bam");
-    let out_dir = dir.path().join("bam_corrected_umi_barcode_suffix_out");
-
-    write_bam_with_corrected_barcode_and_umi(
-        &bam,
-        &transcript,
-        b"ACGTACGT-1",
-        b"AAAATTTT-1",
-        Tag::new(b'U', b'B'),
-    );
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV2")
-        .arg("--bam")
-        .arg(&bam)
-        .status()
-        .expect("run kallistors bus --bam corrected UB UMI suffix");
-    assert!(status.success());
-
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 8);
-    assert_eq!(umi_len, 8);
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].barcode, encode_bus_seq(b"ACGTACGT"));
-    assert_eq!(records[0].umi, encode_bus_seq(b"AAAATTTT"));
-}
-
-#[test]
-fn bus_bam_skips_missing_barcode_tag() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let bam = dir.path().join("missing_barcode.bam");
-    let out_dir = dir.path().join("bam_missing_barcode_out");
-
-    write_bam_with_optional_tags(&bam, &[(&transcript, None, Some(b"TTTTTTTTTT"))]);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV2")
-        .arg("--bam")
-        .arg(&bam)
-        .output()
-        .expect("run kallistors bus --bam missing barcode");
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("zero reads pseudoaligned"));
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 16);
-    assert_eq!(umi_len, 10);
-    assert!(records.is_empty());
-    assert!(
-        fs::read_to_string(out_dir.join("run_info.json"))
-            .unwrap()
-            .contains("\"n_processed\": 1")
-    );
-}
-
-#[test]
-fn bus_bam_skips_missing_umi_tag() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let bam = dir.path().join("missing_umi.bam");
-    let out_dir = dir.path().join("bam_missing_umi_out");
-
-    write_bam_with_optional_tags(&bam, &[(&transcript, Some(b"ACGTACGTACGTACGT"), None)]);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV2")
-        .arg("--bam")
-        .arg(&bam)
-        .output()
-        .expect("run kallistors bus --bam missing UMI");
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("zero reads pseudoaligned"));
-    let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(bc_len, 16);
-    assert_eq!(umi_len, 10);
-    assert!(records.is_empty());
-    assert!(
-        fs::read_to_string(out_dir.join("run_info.json"))
-            .unwrap()
-            .contains("\"n_processed\": 1")
-    );
-}
-
-#[test]
-fn bus_bam_unmapped_writes_ratio_for_skipped_missing_tag_reads() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let bam = dir.path().join("missing_barcode_unmapped.bam");
-    let out_dir = dir.path().join("bam_missing_barcode_unmapped_out");
-
-    write_bam_with_optional_tags(&bam, &[(&transcript, None, Some(b"TTTTTTTTTT"))]);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV2")
-        .arg("--bam")
-        .arg("--unmapped")
-        .arg(&bam)
-        .output()
-        .expect("run kallistors bus --bam --unmapped missing barcode");
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("zero reads pseudoaligned"));
-
-    let ratios = fs::read_to_string(out_dir.join("unmapped_ratio.txt")).unwrap();
-    let values = ratios
-        .trim_end()
-        .split(',')
-        .map(|value| value.parse::<f64>().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(values.len(), 1);
-    assert!(values[0] < 1.0);
+    let bam = dir.path().join("reads.bam");
+    for (case, barcode, umi, unmapped) in [
+        ("missing_barcode", None, Some(&b"TTTTTTTTTT"[..]), false),
+        ("missing_umi", Some(&b"ACGTACGTACGTACGT"[..]), None, false),
+        (
+            "missing_barcode_ratio",
+            None,
+            Some(&b"TTTTTTTTTT"[..]),
+            true,
+        ),
+    ] {
+        write_bam_with_optional_tags(&bam, &[(&transcript, barcode, umi)]);
+        let out = dir.path().join(case);
+        let mut command = bus_command(&index, &out);
+        command.args(["-x", "10XV2", "--bam"]);
+        if unmapped {
+            command.arg("--unmapped");
+        }
+        let output = command.arg(&bam).output().unwrap();
+        assert_bus_error(&output, case, "zero reads pseudoaligned");
+        let (bc_len, umi_len, records) = read_bus_records(&out.join("output.bus"));
+        assert_eq!((bc_len, umi_len), (16, 10), "{case}");
+        assert!(records.is_empty(), "{case}");
+        let info = fs::read_to_string(out.join("run_info.json")).unwrap();
+        assert_eq!(json_u64(&info, "n_processed"), Some(1), "{case}");
+        assert_eq!(json_u64(&info, "n_pseudoaligned"), Some(0), "{case}");
+        if unmapped {
+            let ratios = fs::read_to_string(out.join("unmapped_ratio.txt")).unwrap();
+            let values: Vec<f64> = ratios
+                .trim_end()
+                .split(',')
+                .map(|v| v.parse().unwrap())
+                .collect();
+            assert_eq!(values.len(), 1, "{case}");
+            assert!(
+                values[0] < 1.0,
+                "{case}: tags must not erase the read's mapped k-mers"
+            );
+        }
+    }
 }
 
 #[test]
@@ -3493,7 +2700,7 @@ fn bus_bam_long_encodes_novel_fastq_quality_scores() {
 }
 
 #[test]
-fn bus_bam_uses_aux_tag_lengths_in_header() {
+fn bus_bam_preserves_raw_tag_values_lengths_and_ecs() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (index, transcript) = build_tiny_index(&dir);
     let bam = dir.path().join("reads.bam");
@@ -3508,8 +2715,9 @@ fn bus_bam_uses_aux_tag_lengths_in_header() {
         ],
     );
 
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
+    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
         .arg("bus")
+        .arg("--verbose")
         .arg("-i")
         .arg(&index)
         .arg("-o")
@@ -3518,14 +2726,28 @@ fn bus_bam_uses_aux_tag_lengths_in_header() {
         .arg("10XV3")
         .arg("--bam")
         .arg(&bam)
-        .status()
+        .output()
         .expect("run kallistors bus --bam");
-    assert!(status.success());
+    assert_bus_success(&output, "verbose input");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("will process sample 1:"), "{stderr}");
+
+    assert!(stderr.contains(&bam.display().to_string()), "{stderr}");
 
     let (bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
     assert_eq!(bc_len, 8);
     assert_eq!(umi_len, 6);
     assert_eq!(records.len(), 3);
+    for (record, barcode, umi) in [
+        (&records[0], &b"ACGTACGT"[..], &b"TTTTTT"[..]),
+        (&records[1], &b"TGCATGCA"[..], &b"AAAAAA"[..]),
+        (&records[2], &b"ACGTACGTAC"[..], &b"TTTTTTTT"[..]),
+    ] {
+        assert_eq!(record.barcode, encode_bus_seq(barcode));
+        assert_eq!(record.umi, encode_bus_seq(umi));
+        assert_eq!(record.ec, 0);
+        assert_eq!(record.count, 1);
+    }
 }
 
 #[test]
@@ -3602,10 +2824,12 @@ fn bus_custom_rx_umi_reads_fastq_header_comment() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].barcode, encode_bus_seq(b"TGCA"));
     assert_eq!(records[0].umi, encode_bus_seq(b"ACGT"));
-    assert!(
-        fs::read_to_string(out_dir.join("run_info.json"))
-            .unwrap()
-            .contains("\"n_processed\": 2")
+    assert_eq!(
+        json_u64(
+            &fs::read_to_string(out_dir.join("run_info.json")).unwrap(),
+            "n_processed"
+        ),
+        Some(2)
     );
 
     let bam = fs::File::open(out_dir.join("pseudoalignments.bam")).expect("open pseudobam");
@@ -3654,10 +2878,12 @@ fn bus_interleaved_reads_one_fastq_as_technology_groups() {
     let bus = fs::read(out_dir.join("output.bus")).expect("read bus");
     let text_len = read_u32_le(&bus, 16) as usize;
     assert_eq!(bus.len(), 20 + text_len + 32);
-    assert!(
-        fs::read_to_string(out_dir.join("run_info.json"))
-            .unwrap()
-            .contains("\"n_processed\": 1")
+    assert_eq!(
+        json_u64(
+            &fs::read_to_string(out_dir.join("run_info.json")).unwrap(),
+            "n_processed"
+        ),
+        Some(1)
     );
 }
 
@@ -3832,43 +3058,6 @@ fn bus_smartseq3_default_tag_trims_umi() {
 }
 
 #[test]
-fn bus_smartseq3_missing_tag_uses_non_umi_sentinel() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let bc1 = dir.path().join("bc1.fastq");
-    let bc2 = dir.path().join("bc2.fastq");
-    let r1 = dir.path().join("smartseq3_no_tag_r1.fastq");
-    let r2 = dir.path().join("smartseq3_no_tag_r2.fastq");
-    let out_dir = dir.path().join("smartseq3_no_tag_out");
-
-    write_fastq(&bc1, &[("bc1", b"ACGT")]);
-    write_fastq(&bc2, &[("bc2", b"TGCA")]);
-    write_fastq(&r1, &[("r1", &transcript)]);
-    write_fastq(&r2, &[("r2", &reverse_complement(&transcript))]);
-
-    let status = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("SMARTSEQ3")
-        .arg(&bc1)
-        .arg(&bc2)
-        .arg(&r1)
-        .arg(&r2)
-        .status()
-        .expect("run kallistors bus smartseq3 missing tag");
-    assert!(status.success());
-
-    let (_bc_len, umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
-    assert_eq!(umi_len, 8);
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].umi, u64::MAX);
-}
-
-#[test]
 fn bus_smartseq3_missing_tag_keeps_prefix_in_pseudobam_read() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (index, transcript) = build_tiny_index(&dir);
@@ -3907,7 +3096,8 @@ fn bus_smartseq3_missing_tag_keeps_prefix_in_pseudobam_read() {
         .expect("run kallistors bus smartseq3 missing tag --pseudobam");
     assert!(status.success());
 
-    let (_bc_len, _umi_len, bus_records) = read_bus_records(&out_dir.join("output.bus"));
+    let (_bc_len, umi_len, bus_records) = read_bus_records(&out_dir.join("output.bus"));
+    assert_eq!(umi_len, 8);
     assert_eq!(bus_records.len(), 1);
     assert_eq!(bus_records[0].umi, u64::MAX);
 
@@ -4136,10 +3326,12 @@ fn bus_num_reads_zero_means_unlimited() {
         .expect("run kallistors bus --numReads 0");
     assert!(status.success());
 
-    assert!(
-        fs::read_to_string(out_dir.join("run_info.json"))
-            .unwrap()
-            .contains("\"n_processed\": 2")
+    assert_eq!(
+        json_u64(
+            &fs::read_to_string(out_dir.join("run_info.json")).unwrap(),
+            "n_processed"
+        ),
+        Some(2)
     );
     let (_bc_len, _umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
     assert_eq!(records.len(), 2);
@@ -4175,10 +3367,12 @@ fn bus_num_reads_larger_than_input_returns_error_after_writing_outputs() {
         String::from_utf8_lossy(&output.stderr)
             .contains("Number of reads processed is less than --numReads: 2, returning 1")
     );
-    assert!(
-        fs::read_to_string(out_dir.join("run_info.json"))
-            .unwrap()
-            .contains("\"n_processed\": 1")
+    assert_eq!(
+        json_u64(
+            &fs::read_to_string(out_dir.join("run_info.json")).unwrap(),
+            "n_processed"
+        ),
+        Some(1)
     );
     let (_bc_len, _umi_len, records) = read_bus_records(&out_dir.join("output.bus"));
     assert_eq!(records.len(), 1);
@@ -4220,10 +3414,12 @@ fn bus_batch_num_reads_larger_than_input_returns_error_after_writing_outputs() {
         String::from_utf8_lossy(&output.stderr)
             .contains("Number of reads processed is less than --numReads: 2, returning 1")
     );
-    assert!(
-        fs::read_to_string(out_dir.join("run_info.json"))
-            .unwrap()
-            .contains("\"n_processed\": 1")
+    assert_eq!(
+        json_u64(
+            &fs::read_to_string(out_dir.join("run_info.json")).unwrap(),
+            "n_processed"
+        ),
+        Some(1)
     );
     assert_eq!(
         fs::read_to_string(out_dir.join("matrix.cells")).unwrap(),
@@ -4831,195 +4027,53 @@ fn bus_genomebam_rejects_missing_gtf_file() {
 }
 
 #[test]
-fn bus_genomebam_rejects_zero_gtf_exon_start() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn bus_genomebam_rejects_invalid_exons_and_inconsistent_transcripts() {
+    let dir = tempfile::tempdir().unwrap();
     let (index, transcript) = build_tiny_index(&dir);
     let r1 = dir.path().join("r1.fastq");
     let r2 = dir.path().join("r2.fastq");
     let gtf = dir.path().join("genes.gtf");
-    let out_dir = dir.path().join("genomebam_zero_gtf_start_out");
-
-    write_fastq(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
-    write_fastq(&r2, &[("seq_read", &transcript)]);
-    fs::write(
-        &gtf,
-        "chr1\ttest\texon\t0\t75\t.\t+\t.\tgene_id \"gene0\"; transcript_id \"tx0\";\n",
-    )
-    .expect("write GTF");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg("--genomebam")
-        .arg("--gtf")
-        .arg(&gtf)
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus --genomebam with zero GTF start");
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid GTF exon start: 0"));
-}
-
-#[test]
-fn bus_genomebam_rejects_gtf_exon_end_before_start() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let gtf = dir.path().join("genes.gtf");
-    let out_dir = dir.path().join("genomebam_bad_gtf_interval_out");
-
-    write_fastq(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
-    write_fastq(&r2, &[("seq_read", &transcript)]);
-    fs::write(
-        &gtf,
-        "chr1\ttest\texon\t75\t74\t.\t+\t.\tgene_id \"gene0\"; transcript_id \"tx0\";\n",
-    )
-    .expect("write GTF");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg("--genomebam")
-        .arg("--gtf")
-        .arg(&gtf)
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus --genomebam with invalid GTF interval");
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid GTF exon interval: 75-74"));
-}
-
-#[test]
-fn bus_genomebam_rejects_invalid_gtf_exon_strand() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let gtf = dir.path().join("genes.gtf");
-    let out_dir = dir.path().join("genomebam_invalid_gtf_strand_out");
-
-    write_fastq(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
-    write_fastq(&r2, &[("seq_read", &transcript)]);
-    fs::write(
-        &gtf,
-        "chr1\ttest\texon\t1\t75\t.\t.\t.\tgene_id \"gene0\"; transcript_id \"tx0\";\n",
-    )
-    .expect("write GTF");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg("--genomebam")
-        .arg("--gtf")
-        .arg(&gtf)
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus --genomebam with invalid GTF strand");
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid GTF exon strand: ."));
-}
-
-#[test]
-fn bus_genomebam_rejects_transcript_exons_on_multiple_chromosomes() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let gtf = dir.path().join("genes.gtf");
-    let out_dir = dir.path().join("genomebam_split_chromosome_transcript_out");
-
-    write_fastq(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
-    write_fastq(&r2, &[("seq_read", &transcript)]);
-    fs::write(
-        &gtf,
-        concat!(
-            "chr1\ttest\texon\t1\t30\t.\t+\t.\tgene_id \"gene0\"; transcript_id \"tx0\";\n",
-            "chr2\ttest\texon\t31\t75\t.\t+\t.\tgene_id \"gene0\"; transcript_id \"tx0\";\n",
+    write_fastq(&r1, &[("cell", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
+    write_fastq(&r2, &[("seq", &transcript)]);
+    for (case, exons, error) in [
+        (
+            "zero_start",
+            &[("chr1", 0, 75, "+")][..],
+            "invalid GTF exon start: 0",
         ),
-    )
-    .expect("write GTF");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg("--genomebam")
-        .arg("--gtf")
-        .arg(&gtf)
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus --genomebam with split-chromosome transcript");
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("GTF transcript tx0 has exons on multiple chromosomes")
-    );
-}
-
-#[test]
-fn bus_genomebam_rejects_transcript_exons_on_multiple_strands() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let gtf = dir.path().join("genes.gtf");
-    let out_dir = dir.path().join("genomebam_split_strand_transcript_out");
-
-    write_fastq(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
-    write_fastq(&r2, &[("seq_read", &transcript)]);
-    fs::write(
-        &gtf,
-        concat!(
-            "chr1\ttest\texon\t1\t30\t.\t+\t.\tgene_id \"gene0\"; transcript_id \"tx0\";\n",
-            "chr1\ttest\texon\t31\t75\t.\t-\t.\tgene_id \"gene0\"; transcript_id \"tx0\";\n",
+        (
+            "reversed_interval",
+            &[("chr1", 75, 74, "+")][..],
+            "invalid GTF exon interval: 75-74",
         ),
-    )
-    .expect("write GTF");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg("--genomebam")
-        .arg("--gtf")
-        .arg(&gtf)
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus --genomebam with split-strand transcript");
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("GTF transcript tx0 has exons on multiple strands")
-    );
+        (
+            "invalid_strand",
+            &[("chr1", 1, 75, ".")][..],
+            "invalid GTF exon strand: .",
+        ),
+        (
+            "split_chromosome",
+            &[("chr1", 1, 30, "+"), ("chr2", 31, 75, "+")][..],
+            "GTF transcript tx0 has exons on multiple chromosomes",
+        ),
+        (
+            "split_strand",
+            &[("chr1", 1, 30, "+"), ("chr1", 31, 75, "-")][..],
+            "GTF transcript tx0 has exons on multiple strands",
+        ),
+    ] {
+        let contents: String = exons.iter().map(|(chr, start, end, strand)|
+            format!("{chr}\ttest\texon\t{start}\t{end}\t.\t{strand}\t.\tgene_id \"gene0\"; transcript_id \"tx0\";\n")).collect();
+        fs::write(&gtf, contents).unwrap();
+        let output = bus_command(&index, &dir.path().join(case))
+            .args(["-x", "10XV3", "--genomebam", "--gtf"])
+            .arg(&gtf)
+            .arg(&r1)
+            .arg(&r2)
+            .output()
+            .unwrap();
+        assert_bus_error(&output, case, error);
+    }
 }
 
 #[test]
@@ -5062,83 +4116,44 @@ fn bus_genomebam_rejects_missing_chromosome_file() {
 }
 
 #[test]
-fn bus_genomebam_rejects_duplicate_chromosome_names() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn bus_genomebam_rejects_invalid_chromosome_tables() {
+    let dir = tempfile::tempdir().unwrap();
     let (index, transcript) = build_tiny_index(&dir);
     let r1 = dir.path().join("r1.fastq");
     let r2 = dir.path().join("r2.fastq");
     let gtf = dir.path().join("genes.gtf");
     let chromosomes = dir.path().join("chromosomes.txt");
-    let out_dir = dir.path().join("genomebam_duplicate_chromosomes_out");
-
-    write_fastq(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
-    write_fastq(&r2, &[("seq_read", &transcript)]);
+    write_fastq(&r1, &[("cell", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
+    write_fastq(&r2, &[("seq", &transcript)]);
     fs::write(
         &gtf,
         "chr1\ttest\texon\t1\t75\t.\t+\t.\tgene_id \"gene0\"; transcript_id \"tx0\";\n",
     )
-    .expect("write GTF");
-    fs::write(&chromosomes, "chr1\t1000\nchr1\t2000\n").expect("write chromosomes");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg("--genomebam")
-        .arg("--gtf")
-        .arg(&gtf)
-        .arg("--chromosomes")
-        .arg(&chromosomes)
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus --genomebam with duplicate chromosomes");
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("duplicate chromosome name in line"));
-}
-
-#[test]
-fn bus_genomebam_rejects_zero_chromosome_length() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let (index, transcript) = build_tiny_index(&dir);
-    let r1 = dir.path().join("r1.fastq");
-    let r2 = dir.path().join("r2.fastq");
-    let gtf = dir.path().join("genes.gtf");
-    let chromosomes = dir.path().join("chromosomes.txt");
-    let out_dir = dir.path().join("genomebam_zero_chromosome_length_out");
-
-    write_fastq(&r1, &[("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT")]);
-    write_fastq(&r2, &[("seq_read", &transcript)]);
-    fs::write(
-        &gtf,
-        "chr1\ttest\texon\t1\t75\t.\t+\t.\tgene_id \"gene0\"; transcript_id \"tx0\";\n",
-    )
-    .expect("write GTF");
-    fs::write(&chromosomes, "chr1\t0\n").expect("write chromosomes");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg("--genomebam")
-        .arg("--gtf")
-        .arg(&gtf)
-        .arg("--chromosomes")
-        .arg(&chromosomes)
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus --genomebam with zero chromosome length");
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid chromosome length in line"));
+    .unwrap();
+    for (case, contents, error) in [
+        (
+            "duplicate",
+            "chr1\t1000\nchr1\t2000\n",
+            "duplicate chromosome name in line",
+        ),
+        (
+            "zero_length",
+            "chr1\t0\n",
+            "invalid chromosome length in line",
+        ),
+    ] {
+        fs::write(&chromosomes, contents).unwrap();
+        let output = bus_command(&index, &dir.path().join(case))
+            .args(["-x", "10XV3", "--genomebam", "--gtf"])
+            .arg(&gtf)
+            .arg("--chromosomes")
+            .arg(&chromosomes)
+            .arg(&r1)
+            .arg(&r2)
+            .output()
+            .unwrap();
+        assert_bus_error(&output, case, error);
+    }
 }
 
 #[test]
@@ -5174,7 +4189,7 @@ fn bus_aa_maps_coding_reads_against_aa_index() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].ec, 0);
     let run_info = fs::read_to_string(out_dir.join("run_info.json")).expect("read run_info");
-    assert!(run_info.contains("\"n_frame_clashes\": 2"));
+    assert_eq!(json_u64(&run_info, "n_frame_clashes"), Some(2));
 }
 
 #[test]

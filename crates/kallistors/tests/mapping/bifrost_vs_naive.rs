@@ -7,7 +7,7 @@ use kallistors::pseudoalign::{
     pseudoalign_single_end_bifrost,
 };
 
-mod helpers;
+use crate::helpers::{self, synthesize_reads, to_fastq};
 
 fn normalize_ec(counts: &EcCounts) -> HashMap<Vec<u32>, u32> {
     let mut map = HashMap::new();
@@ -21,10 +21,7 @@ fn normalize_ec(counts: &EcCounts) -> HashMap<Vec<u32>, u32> {
 
 #[test]
 fn bifrost_matches_naive_ecs() {
-    let dataset = match helpers::build_synthetic_index() {
-        Some(dataset) => dataset,
-        None => return,
-    };
+    let dataset = helpers::build_synthetic_index();
 
     let reads = synthesize_reads(&dataset.transcripts, 60, 24);
     let fastq = to_fastq(&reads);
@@ -39,35 +36,11 @@ fn bifrost_matches_naive_ecs() {
     let bifrost_counts =
         pseudoalign_single_end_bifrost(&bifrost_index, &mut reader).expect("bifrost counts");
 
+    assert_eq!(naive_counts.reads_processed, 24);
+    assert_eq!(naive_counts.reads_aligned, 24);
+    assert!(naive_counts.ec_list.iter().any(|ec| ec.len() == 1));
+    assert!(naive_counts.ec_list.iter().any(|ec| ec.len() > 1));
     assert_eq!(naive_counts.reads_processed, bifrost_counts.reads_processed);
     assert_eq!(naive_counts.reads_aligned, bifrost_counts.reads_aligned);
     assert_eq!(normalize_ec(&naive_counts), normalize_ec(&bifrost_counts));
-}
-
-fn synthesize_reads(transcripts: &[Vec<u8>], read_len: usize, count: usize) -> Vec<Vec<u8>> {
-    let mut out = Vec::with_capacity(count);
-    let mut idx = 0usize;
-    for _ in 0..count {
-        let seq = &transcripts[idx % transcripts.len()];
-        idx += 1;
-        if seq.len() <= read_len {
-            out.push(seq.clone());
-            continue;
-        }
-        let start = (idx * 11) % (seq.len() - read_len);
-        out.push(seq[start..start + read_len].to_vec());
-    }
-    out
-}
-
-fn to_fastq(reads: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for (i, seq) in reads.iter().enumerate() {
-        out.extend_from_slice(format!("@r{}\n", i + 1).as_bytes());
-        out.extend_from_slice(seq);
-        out.extend_from_slice(b"\n+\n");
-        out.extend_from_slice(vec![b'I'; seq.len()].as_slice());
-        out.extend_from_slice(b"\n");
-    }
-    out
 }

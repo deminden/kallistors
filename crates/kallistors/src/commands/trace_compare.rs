@@ -240,6 +240,7 @@ pub fn run(
         kallisto_sparse_hits,
         bias: false,
         max_bias: 0,
+        fragment_length_samples: 10_000,
         investigation: kallistors::pseudoalign::InvestigationOptions::default(),
     };
     let mut fast_investigation = super::investigation_options_from_env();

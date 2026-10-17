@@ -11,6 +11,33 @@ use super::{
     PairedTraceResult, PseudoalignOptions, ReadDebugState, Strand,
 };
 
+/// Upstream-style observation goal shared by paired workers. Each batch snapshots
+/// the remaining quota, then publishes its observations when that batch finishes.
+/// Concurrent batches can overshoot the goal, as in original kallisto.
+pub(crate) struct FragmentLengthSampler {
+    goal: usize,
+    observations: std::sync::atomic::AtomicUsize,
+}
+
+impl FragmentLengthSampler {
+    pub(crate) fn new(goal: usize) -> Self {
+        Self {
+            goal,
+            observations: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn remaining(&self) -> usize {
+        self.goal
+            .saturating_sub(self.observations.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub(crate) fn submit(&self, count: usize) {
+        self.observations
+            .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub fn pseudoalign_paired_naive<R1: ReadSource, R2: ReadSource>(
     index: &KmerEcIndex,
     reader1: &mut R1,
@@ -294,17 +321,25 @@ pub fn trace_read_pair_bifrost(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pseudoalign_paired_bifrost_batch_into(
     index: &BifrostIndex,
-    left_batch: PackedSeqBatch,
-    right_batch: PackedSeqBatch,
+    left_batch: &PackedSeqBatch,
+    right_batch: &PackedSeqBatch,
+    read_range: std::ops::Range<usize>,
     strand: Strand,
     options: PseudoalignOptions,
     counts: &mut EcCounts,
     ec_map: &mut EcCountMap,
+    sampling: Option<&FragmentLengthSampler>,
 ) -> Result<()> {
     if left_batch.len() != right_batch.len() {
         return Err(Error::InvalidFormat("paired FASTQ length mismatch".into()));
+    }
+    if read_range.start > read_range.end || read_range.end > left_batch.len() {
+        return Err(Error::InvalidFormat(
+            "paired FASTQ batch range out of bounds".into(),
+        ));
     }
     let mut frag_stats = counts.fragment_length_stats.take().unwrap_or_default();
     let mut frag_hist = counts
@@ -312,7 +347,9 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
         .take()
         .unwrap_or_else(|| vec![0u32; super::MAX_FRAG_LEN as usize]);
 
-    for idx in 0..left_batch.len() {
+    let fragment_budget = sampling.map_or(usize::MAX, FragmentLengthSampler::remaining);
+    let mut sampled = 0usize;
+    for idx in read_range {
         let a_seq = unsafe { left_batch.seq_unchecked(idx) };
         let b_seq = unsafe { right_batch.seq_unchecked(idx) };
         if super::reset_all_caches_per_read() {
@@ -424,7 +461,7 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
             }
         }
 
-        if merged.len() == 1 {
+        if sampled < fragment_budget && merged.len() == 1 {
             let tr = merged[0];
             let is_shade = index
                 .shade_sequences
@@ -445,6 +482,7 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
                 if idx < frag_hist.len() {
                     frag_hist[idx] = frag_hist[idx].saturating_add(1);
                     frag_stats.add(frag_len as f64);
+                    sampled += 1;
                 }
             }
         }
@@ -462,6 +500,9 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
 
         counts.reads_aligned = counts.reads_aligned.saturating_add(1);
         super::add_ec_count(counts, ec_map, merged);
+    }
+    if let Some(sampler) = sampling {
+        sampler.submit(sampled);
     }
     counts.fragment_length_stats = (frag_stats.count() > 0).then_some(frag_stats);
     counts.fragment_length_hist = counts.fragment_length_stats.as_ref().map(|_| frag_hist);
@@ -714,7 +755,10 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                     }
                 }
 
-                if merged.len() == 1 {
+                if (options.fragment_length_samples == 0
+                    || frag_stats.count() < options.fragment_length_samples as u64)
+                    && merged.len() == 1
+                {
                     let tr = merged[0];
                     let is_shade = index
                         .shade_sequences
@@ -953,5 +997,39 @@ fn ec_for_read_naive(index: &KmerEcIndex, seq: &[u8]) -> Option<Vec<u32>> {
         None
     } else {
         Some(current)
+    }
+}
+
+#[cfg(test)]
+mod fragment_sampling_tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_batches_use_remaining_goal_and_may_overshoot() {
+        let sampler = FragmentLengthSampler::new(10_000);
+        sampler.submit(9_700);
+        let first = sampler.remaining();
+        let concurrent = sampler.remaining();
+        assert_eq!(first, 300);
+        assert_eq!(concurrent, 300);
+        sampler.submit(first);
+        assert_eq!(sampler.remaining(), 0);
+        sampler.submit(concurrent);
+        assert_eq!(
+            sampler
+                .observations
+                .load(std::sync::atomic::Ordering::Relaxed),
+            10_300
+        );
+        assert_eq!(sampler.remaining(), 0);
+    }
+
+    #[test]
+    fn short_batches_preserve_unused_quota() {
+        let sampler = FragmentLengthSampler::new(10_000);
+        sampler.submit(12);
+        assert_eq!(sampler.remaining(), 9_988);
+        sampler.submit(0);
+        assert_eq!(sampler.remaining(), 9_988);
     }
 }

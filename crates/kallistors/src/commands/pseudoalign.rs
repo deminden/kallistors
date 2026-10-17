@@ -15,6 +15,7 @@ pub fn run(
     debug_max: usize,
     strand: kallistors::pseudoalign::Strand,
     fragment_length: Option<f64>,
+    fragment_length_samples: usize,
     single_overhang: bool,
     min_range: usize,
     do_union: bool,
@@ -79,6 +80,7 @@ pub fn run(
         kallisto_sparse_hits,
         bias,
         max_bias: 1_000_000,
+        fragment_length_samples,
         investigation: super::investigation_options_from_env(),
     };
     let filter =

@@ -87,30 +87,50 @@ pub(crate) fn match_unitig_candidate_encoded(
 
     let rel = rel_pos as isize;
     let start_fwd = rel - min_pos_fwd as isize;
-    if allow_forward && start_fwd >= 0 {
-        let start = start_fwd as usize;
-        if start + index.k <= unitig_len
-            && index
-                .encoded_unitigs
-                .unitig_bases
-                .encode_kmer_at(unitig_id, start, index.k)
-                == Some(read_fwd)
-        {
-            return Some((start, false, false, true));
-        }
-    }
-
     let start_rev = rel - diff as isize + min_pos_rev as isize;
-    if allow_rev && start_rev >= 0 {
-        let start = start_rev as usize;
-        if start + index.k <= unitig_len
-            && index
-                .encoded_unitigs
-                .unitig_bases
-                .encode_kmer_at(unitig_id, start, index.k)
-                == Some(read_rev)
-        {
-            return Some((start, true, false, false));
+    if start_fwd == start_rev {
+        // Complementary minimizer offsets address one reference word for both
+        // strand checks. Preserve forward priority while decoding it only once.
+        if (allow_forward || allow_rev) && start_fwd >= 0 {
+            let start = start_fwd as usize;
+            if start + index.k <= unitig_len {
+                let code = index
+                    .encoded_unitigs
+                    .unitig_bases
+                    .encode_kmer_at(unitig_id, start, index.k);
+                if allow_forward && code == Some(read_fwd) {
+                    return Some((start, false, false, true));
+                }
+                if allow_rev && code == Some(read_rev) {
+                    return Some((start, true, false, false));
+                }
+            }
+        }
+    } else {
+        if allow_forward && start_fwd >= 0 {
+            let start = start_fwd as usize;
+            if start + index.k <= unitig_len
+                && index
+                    .encoded_unitigs
+                    .unitig_bases
+                    .encode_kmer_at(unitig_id, start, index.k)
+                    == Some(read_fwd)
+            {
+                return Some((start, false, false, true));
+            }
+        }
+
+        if allow_rev && start_rev >= 0 {
+            let start = start_rev as usize;
+            if start + index.k <= unitig_len
+                && index
+                    .encoded_unitigs
+                    .unitig_bases
+                    .encode_kmer_at(unitig_id, start, index.k)
+                    == Some(read_rev)
+            {
+                return Some((start, true, false, false));
+            }
         }
     }
     if !allow_relaxed {
@@ -120,6 +140,21 @@ pub(crate) fn match_unitig_candidate_encoded(
     let start_lo = rel_pos.saturating_sub(diff).min(max_start);
     let start_hi = rel_pos.min(max_start);
     if start_lo > start_hi {
+        return None;
+    }
+    if let Some(windows) = index
+        .encoded_unitigs
+        .unitig_bases
+        .kmer_range(unitig_id, start_lo, start_hi, index.k)
+    {
+        for (start, code) in windows {
+            if allow_forward && code == read_fwd {
+                return Some((start, false, true, true));
+            }
+            if allow_rev && code == read_rev {
+                return Some((start, true, true, false));
+            }
+        }
         return None;
     }
     for start in start_lo..=start_hi {
@@ -424,4 +459,82 @@ pub(crate) fn jump_distance_for_match(
         start - contig_start
     };
     if dist >= 2 { Some(dist as usize) } else { None }
+}
+
+#[cfg(test)]
+mod encoded_probe_tests {
+    use super::*;
+
+    #[test]
+    fn shared_and_distinct_strict_words_match_byte_oracle() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let fasta = temp.path().join("transcripts.fa");
+        let path = temp.path().join("index.idx");
+        let mut state = 17u64;
+        let sequence: String = (0..500)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                b"ACGT"[((state >> 32) & 3) as usize] as char
+            })
+            .collect();
+        std::fs::write(&fasta, format!(">tx\n{sequence}\n")).unwrap();
+        crate::index::build_index(&path, &[fasta], crate::index::IndexBuildOptions::default())
+            .unwrap();
+        let index = crate::pseudoalign::build_bifrost_index(&path).unwrap();
+        for (uid, unitig) in index.unitigs.iter().enumerate() {
+            if unitig.len() < index.k {
+                continue;
+            }
+            for query in unitig.windows(index.k).step_by(41) {
+                for alter in [false, true] {
+                    let mut read = query.to_vec();
+                    if alter {
+                        read[13] = if read[13] == b'A' { b'C' } else { b'A' };
+                    }
+                    let (fwd, rev) = encode_kmer_pair(&read).unwrap();
+                    let mut reverse = Vec::new();
+                    assert!(fill_revcomp(&read, &mut reverse));
+                    for rel in [0, 3, 8, unitig.len() - index.k, unitig.len() - 1] {
+                        for (min_fwd, min_rev) in [(0, 8), (2, 6), (8, 0), (1, 1)] {
+                            for flags in 0..8 {
+                                let forward = flags & 1 != 0;
+                                let reverse_allowed = flags & 2 != 0;
+                                let relaxed = flags & 4 != 0;
+                                let expected = match_unitig_candidate(
+                                    unitig,
+                                    index.k,
+                                    rel,
+                                    8,
+                                    min_fwd,
+                                    min_rev,
+                                    &read,
+                                    &reverse,
+                                    forward,
+                                    reverse_allowed,
+                                    relaxed,
+                                );
+                                let actual = match_unitig_candidate_encoded(
+                                    &index,
+                                    uid,
+                                    rel,
+                                    8,
+                                    min_fwd,
+                                    min_rev,
+                                    fwd,
+                                    rev,
+                                    forward,
+                                    reverse_allowed,
+                                    relaxed,
+                                );
+                                assert_eq!(
+                                    actual, expected,
+                                    "uid={uid} rel={rel} min={min_fwd}/{min_rev} flags={flags}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

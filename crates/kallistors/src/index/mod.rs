@@ -631,10 +631,14 @@ pub(crate) fn read_sparse_vector_ec<R: Read>(reader: &mut R) -> Result<Vec<u32>>
         .ok_or_else(|| Error::InvalidFormat("failed to deserialize roaring bitmap".into()))?;
 
     let v_size = read_u64_le(reader)? as usize;
+    let mut skip = [0u8; 1024];
     for _ in 0..v_size {
-        let p_size = read_u64_le(reader)? as usize;
-        let mut skip = vec![0u8; p_size];
-        reader.read_exact(&mut skip)?;
+        let mut remaining = read_u64_le(reader)? as usize;
+        while remaining != 0 {
+            let chunk = remaining.min(skip.len());
+            reader.read_exact(&mut skip[..chunk])?;
+            remaining -= chunk;
+        }
     }
 
     if ids.len() != v_size {
@@ -693,15 +697,216 @@ pub(crate) fn read_sparse_vector_with_positions<R: Read>(
 }
 
 unsafe fn deserialize_roaring_to_vec(buf: &[u8]) -> Option<Vec<u32>> {
+    let mut out = Vec::new();
+    unsafe { append_roaring_to_vec(buf, &mut out) }?;
+    Some(out)
+}
+
+pub(crate) unsafe fn append_roaring_to_vec(buf: &[u8], out: &mut Vec<u32>) -> Option<()> {
+    if buf.first() == Some(&1) {
+        let count = u32::from_le_bytes(buf.get(1..5)?.try_into().ok()?) as usize;
+        let end = count.checked_mul(4)?.checked_add(5)?;
+        let payload = buf.get(5..end)?;
+        let start = out.len();
+        out.extend(
+            payload
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| u32::from_le_bytes(*word)),
+        );
+        if out[start..].windows(2).any(|pair| pair[0] >= pair[1]) {
+            out[start..].sort_unstable();
+            let mut write = start;
+            for read in start..out.len() {
+                let value = out[read];
+                if write == start || out[write - 1] != value {
+                    out[write] = value;
+                    write += 1;
+                }
+            }
+            out.truncate(write);
+        }
+        return Some(());
+    }
+    if buf.is_empty() {
+        return None;
+    }
     let ptr = unsafe { roaring_bitmap_deserialize(buf.as_ptr().cast()) };
     if ptr.is_null() {
         return None;
     }
-    let card = unsafe { roaring_bitmap_get_cardinality(ptr) };
-    let mut out = vec![0u32; card as usize];
+    let card = unsafe { roaring_bitmap_get_cardinality(ptr) } as usize;
+    let start = out.len();
+    out.resize(start + card, 0);
     unsafe {
-        roaring_bitmap_to_uint32_array(ptr, out.as_mut_ptr());
+        roaring_bitmap_to_uint32_array(ptr, out.as_mut_ptr().add(start));
         roaring_bitmap_free(ptr);
     }
-    Some(out)
+    Some(())
+}
+
+fn node_eof() -> Error {
+    std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        "failed to fill whole buffer",
+    )
+    .into()
+}
+
+pub(crate) fn read_block_array_slice(
+    bytes: &[u8],
+    mut block: impl FnMut(u32, u32, &[u8]) -> Result<()>,
+) -> Result<()> {
+    let mut reader = Cursor::new(bytes);
+    let count = match read_u8(&mut reader)? {
+        0 => 0,
+        1 => 1,
+        2 => read_u64_le(&mut reader)?,
+        _ => return Err(Error::InvalidFormat("invalid block array flag".into())),
+    };
+    for _ in 0..count {
+        let lb = read_u32_le(&mut reader)?;
+        let ub = read_u32_le(&mut reader)?;
+        let size = read_u64_le(&mut reader)? as usize;
+        let start = reader.position() as usize;
+        let end = start.checked_add(size).ok_or_else(node_eof)?;
+        let bitmap = bytes.get(start..end).ok_or_else(node_eof)?;
+        block(lb, ub, bitmap)?;
+        reader.set_position(end as u64);
+        let positions = read_u64_le(&mut reader)?;
+        for _ in 0..positions {
+            let size = read_u64_le(&mut reader)? as usize;
+            let start = reader.position() as usize;
+            let end = start.checked_add(size).ok_or_else(node_eof)?;
+            bytes.get(start..end).ok_or_else(node_eof)?;
+            reader.set_position(end as u64);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod skipped_position_tests {
+    use super::*;
+
+    #[test]
+    fn direct_array_decode_equals_c_bitmap_set_semantics() {
+        for ids in [
+            vec![],
+            vec![7u32],
+            vec![7, 7],
+            vec![9, 3, 9, 1],
+            vec![0, u32::MAX, 100_000, 65_535, 65_536],
+        ] {
+            let mut bytes = vec![1u8];
+            bytes.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+            for id in ids {
+                bytes.extend_from_slice(&id.to_le_bytes());
+            }
+            let expected = unsafe {
+                let bitmap = roaring_bitmap_deserialize(bytes.as_ptr().cast());
+                assert!(!bitmap.is_null());
+                let mut expected = vec![0; roaring_bitmap_get_cardinality(bitmap) as usize];
+                roaring_bitmap_to_uint32_array(bitmap, expected.as_mut_ptr());
+                roaring_bitmap_free(bitmap);
+                expected
+            };
+            assert_eq!(
+                unsafe { deserialize_roaring_to_vec(&bytes) }.unwrap(),
+                expected
+            );
+            bytes.extend_from_slice(&[19, 7, 3]);
+            assert_eq!(
+                unsafe { deserialize_roaring_to_vec(&bytes) }.unwrap(),
+                expected
+            );
+        }
+        for bytes in [
+            vec![],
+            vec![1],
+            vec![1, 1, 0, 0, 0],
+            vec![1, 2, 0, 0, 0, 5, 0, 0, 0],
+        ] {
+            assert!(unsafe { deserialize_roaring_to_vec(&bytes) }.is_none());
+        }
+    }
+
+    fn sparse_bytes(sizes: &[usize]) -> Vec<u8> {
+        let mut bitmap = vec![1u8];
+        bitmap.extend_from_slice(&3u32.to_le_bytes());
+        for id in [1u32, 7, 33] {
+            bitmap.extend_from_slice(&id.to_le_bytes());
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(bitmap.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&bitmap);
+        bytes.extend_from_slice(&(sizes.len() as u64).to_le_bytes());
+        for &size in sizes {
+            bytes.extend_from_slice(&(size as u64).to_le_bytes());
+            bytes.extend(std::iter::repeat_n(91u8, size));
+        }
+        bytes
+    }
+
+    #[test]
+    fn slice_blocks_match_generic_blocks_and_preserve_existing_prefix() {
+        for count in 0..=3u64 {
+            let mut bytes = if count == 0 {
+                vec![0]
+            } else if count == 1 {
+                vec![1]
+            } else {
+                let mut bytes = vec![2];
+                bytes.extend_from_slice(&count.to_le_bytes());
+                bytes
+            };
+            for i in 0..count {
+                bytes.extend_from_slice(&(i as u32).to_le_bytes());
+                bytes.extend_from_slice(&((i + 1) as u32).to_le_bytes());
+                bytes.extend_from_slice(&sparse_bytes(&[1, 1025, 7]));
+            }
+            let expected: Vec<_> = read_block_array_blocks(&mut Cursor::new(&bytes))
+                .unwrap()
+                .into_iter()
+                .map(|b| (b.lb, b.ub, b.ec))
+                .collect();
+            let mut actual = Vec::new();
+            read_block_array_slice(&bytes, |lb, ub, bitmap| {
+                let mut ids = vec![9, 9];
+                unsafe { append_roaring_to_vec(bitmap, &mut ids) }.unwrap();
+                assert_eq!(&ids[..2], &[9, 9]);
+                actual.push((lb, ub, ids[2..].to_vec()));
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(actual, expected);
+            for cut in [0, bytes.len() - 1] {
+                let old = read_block_array_blocks(&mut Cursor::new(&bytes[..cut]));
+                let new = read_block_array_slice(&bytes[..cut], |_, _, bitmap| {
+                    unsafe { deserialize_roaring_to_vec(bitmap) }.ok_or_else(|| {
+                        Error::InvalidFormat("failed to deserialize roaring bitmap".into())
+                    })?;
+                    Ok(())
+                });
+                assert_eq!(old.is_err(), new.is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn skipped_positions_consume_exact_bytes_and_reject_truncated_payloads() {
+        for sizes in [[0usize, 0, 0], [1, 1024, 1025], [4099, 3, 5]] {
+            let bytes = sparse_bytes(&sizes);
+            let mut input = bytes.clone();
+            input.push(173);
+            let mut reader = std::io::Cursor::new(input);
+            assert_eq!(read_sparse_vector_ec(&mut reader).unwrap(), [1, 7, 33]);
+            assert_eq!(reader.position() as usize, bytes.len());
+            assert_eq!(read_u8(&mut reader).unwrap(), 173);
+            for cut in [0, 7, bytes.len() - 1] {
+                assert!(read_sparse_vector_ec(&mut std::io::Cursor::new(&bytes[..cut])).is_err());
+            }
+        }
+    }
 }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::Read;
+use strength_reduce::StrengthReducedU64;
 
 use croaring_sys::{
     roaring_bitmap_deserialize, roaring_bitmap_free, roaring_bitmap_get_cardinality,
@@ -68,6 +69,7 @@ pub struct MphfDebugInfo {
 struct BooLevel {
     bitset: BitVector,
     hash_domain: u64,
+    reduced_domain: Option<StrengthReducedU64>,
 }
 
 #[derive(Clone)]
@@ -139,6 +141,7 @@ impl BooPhf {
             levels.push(BooLevel {
                 bitset,
                 hash_domain,
+                reduced_domain: (hash_domain != 0).then(|| StrengthReducedU64::new(hash_domain)),
             });
         }
         let final_hash_size = read_u64_le(reader)? as usize;
@@ -160,39 +163,28 @@ impl BooPhf {
     }
 
     pub fn lookup(&self, key: &[u8; 8]) -> Option<u64> {
-        let mut s0 = 0u64;
-        let mut s1 = 0u64;
-        let mut level = 0;
-        let mut hash_raw = 0u64;
+        // Both seeded levels use the same wyhash value. Later levels depend only
+        // on the existing xorshift recurrence, so no lookup order changes.
+        let base_hash = minimizer_hash(key, 0);
+        let mut s0 = base_hash ^ 0xAAAAAAAA55555555;
+        let mut s1 = base_hash ^ 0x33333333CCCCCCCC;
         let max_level = self.nb_levels.saturating_sub(1);
         for i in 0..max_level {
-            if i == 0 {
-                s0 = minimizer_hash(key, 0xAAAAAAAA55555555);
-                hash_raw = s0;
-            } else if i == 1 {
-                s1 = minimizer_hash(key, 0x33333333CCCCCCCC);
-                hash_raw = s1;
-            } else {
-                let next = xorshift_next(&mut s0, &mut s1);
-                hash_raw = next;
+            let hash_raw = match i {
+                0 => s0,
+                1 => s1,
+                _ => xorshift_next(&mut s0, &mut s1),
+            };
+            let level = &self.levels[i as usize];
+            let bucket = match level.reduced_domain {
+                Some(domain) => hash_raw % domain,
+                None => hash_raw % level.hash_domain,
+            };
+            if level.bitset.get(bucket) {
+                return Some(level.bitset.rank(bucket));
             }
-            if self.levels[i as usize]
-                .bitset
-                .get(hash_raw % self.levels[i as usize].hash_domain)
-            {
-                break;
-            }
-            level += 1;
         }
-
-        if level == (self.nb_levels - 1) {
-            let v = self.final_hash.get(key)?;
-            return Some(v + self.lastbitsetrank);
-        }
-
-        let level = level as usize;
-        let non_min = hash_raw % self.levels[level].hash_domain;
-        Some(self.levels[level].bitset.rank(non_min))
+        self.final_hash.get(key).map(|v| v + self.lastbitsetrank)
     }
 
     pub fn debug_lookup(&self, key: &[u8; 8]) -> (Option<u64>, MphfDebugInfo) {
@@ -518,4 +510,70 @@ pub fn decode_pos_id(pos_id: u64) -> (u32, u32, bool) {
     let is_km = (low & MASK_CONTIG_TYPE) != 0;
     let pos = (low & MASK_CONTIG_POS) as u32;
     (unitig, pos, is_km)
+}
+
+#[cfg(test)]
+mod mphf_lookup_tests {
+    use super::*;
+
+    #[test]
+    fn reduced_domains_preserve_exact_u64_remainders_at_boundaries() {
+        let mut state = 17u64;
+        for domain in [
+            1,
+            2,
+            3,
+            7,
+            64,
+            65,
+            50_102_171,
+            u32::MAX as u64,
+            1u64 << 63,
+            u64::MAX,
+        ] {
+            let reduced = StrengthReducedU64::new(domain);
+            for value in [0, 1, domain - 1, domain, domain.saturating_add(1), u64::MAX] {
+                assert_eq!(value % reduced, value % domain);
+            }
+            for _ in 0..20_000 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                assert_eq!(state % reduced, state % domain);
+            }
+        }
+    }
+
+    #[test]
+    fn lookup_matches_diagnostic_oracle_across_hash_levels() {
+        let temp = tempfile::tempdir().unwrap();
+        let fasta = temp.path().join("transcripts.fa");
+        let mut state = 137u64;
+        let mut text = String::from(">tx\n");
+        for _ in 0..5000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            text.push(b"ACGT"[(state & 3) as usize] as char);
+        }
+        text.push('\n');
+        std::fs::write(&fasta, text).unwrap();
+        let path = temp.path().join("index.idx");
+        crate::index::build_index(&path, &[fasta], crate::index::IndexBuildOptions::default())
+            .unwrap();
+        let data = std::fs::read(path).unwrap();
+        let mut reader = std::io::Cursor::new(data.as_slice());
+        let _version = read_u64_le(&mut reader).unwrap();
+        let graph_bytes = read_u64_le(&mut reader).unwrap();
+        reader.set_position(16 + graph_bytes);
+        let _mphf_bytes = read_u64_le(&mut reader).unwrap();
+        let mphf = BooPhf::load(&mut reader).unwrap();
+        for _ in 0..20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let key = state.to_le_bytes();
+            assert_eq!(mphf.lookup(&key), mphf.debug_lookup(&key).0);
+        }
+    }
 }

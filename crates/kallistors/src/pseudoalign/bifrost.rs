@@ -36,13 +36,139 @@ const BASE_CODES: [u8; 256] = {
     codes
 };
 
+const DECODED_BYTE_BASES: [[u8; 4]; 256] = {
+    let mut table = [[0; 4]; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut pos = 0;
+        while pos < 4 {
+            table[byte][pos] = b"ACGT"[(byte >> (pos * 2)) & 3];
+            pos += 1;
+        }
+        byte += 1;
+    }
+    table
+};
+
+enum SequenceMetadata {
+    Compact(Vec<(u32, u32)>),
+    Wide(Vec<(usize, usize)>),
+}
+
+impl SequenceMetadata {
+    fn new(offsets: Vec<usize>, lengths: Vec<usize>) -> Self {
+        if offsets.last().copied().unwrap_or(0) <= u32::MAX as usize
+            && lengths.iter().all(|&len| len <= u32::MAX as usize)
+        {
+            Self::Compact(
+                offsets
+                    .into_iter()
+                    .zip(lengths)
+                    .map(|(start, len)| (start as u32, len as u32))
+                    .collect(),
+            )
+        } else {
+            Self::Wide(offsets.into_iter().zip(lengths).collect())
+        }
+    }
+
+    #[inline]
+    fn get(&self, index: usize) -> Option<(usize, usize)> {
+        match self {
+            Self::Compact(values) => values
+                .get(index)
+                .map(|&(start, len)| (start as usize, len as usize)),
+            Self::Wide(values) => values.get(index).copied(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Compact(v) => v.is_empty(),
+            Self::Wide(v) => v.is_empty(),
+        }
+    }
+}
+
 pub(crate) struct EncodedBaseStore {
-    offsets: Vec<usize>,
-    lengths: Vec<usize>,
+    metadata: SequenceMetadata,
     values: Vec<u64>,
 }
 
+pub(crate) struct PackedKmerRange {
+    high: u64,
+    low: u64,
+    right_shift: u32,
+    next: usize,
+    end: usize,
+}
+
+impl Iterator for PackedKmerRange {
+    type Item = (usize, u64);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next > self.end {
+            return None;
+        }
+        let result = (self.next, self.high >> self.right_shift);
+        self.next += 1;
+        self.high = (self.high << 2) | (self.low >> 62);
+        self.low <<= 2;
+        Some(result)
+    }
+}
+
 impl EncodedBaseStore {
+    pub(crate) fn kmer_range(
+        &self,
+        seq_idx: usize,
+        first: usize,
+        last: usize,
+        k: usize,
+    ) -> Option<PackedKmerRange> {
+        if !(1..=32).contains(&k) || first > last {
+            return None;
+        }
+        let span = last.checked_sub(first)?.checked_add(k)?;
+        if span > 64 {
+            return None;
+        }
+        let (seq_start, seq_len) = self.metadata.get(seq_idx)?;
+        if last.checked_add(k)? > seq_len {
+            return None;
+        }
+        let word_idx = seq_start + first / 32;
+        let within = first % 32;
+        let first_word = *self.values.get(word_idx)?;
+        let second = if within + span > 32 {
+            *self.values.get(word_idx + 1)?
+        } else {
+            0
+        };
+        let third = if within + span > 64 {
+            *self.values.get(word_idx + 2)?
+        } else {
+            0
+        };
+        let shift = within * 2;
+        let (high, low) = if shift == 0 {
+            (first_word, second)
+        } else {
+            (
+                (first_word << shift) | (second >> (64 - shift)),
+                (second << shift) | (third >> (64 - shift)),
+            )
+        };
+        Some(PackedKmerRange {
+            high,
+            low,
+            right_shift: (64 - 2 * k) as u32,
+            next: first,
+            end: last,
+        })
+    }
+
     fn from_sequences(seqs: &[Vec<u8>], pool: Option<&ThreadPool>) -> Self {
         let mut offsets = Vec::with_capacity(seqs.len() + 1);
         offsets.push(0);
@@ -95,8 +221,7 @@ impl EncodedBaseStore {
         };
 
         Self {
-            offsets,
-            lengths,
+            metadata: SequenceMetadata::new(offsets, lengths),
             values,
         }
     }
@@ -120,7 +245,7 @@ impl EncodedBaseStore {
 
     #[inline]
     pub(crate) fn len(&self, seq_idx: usize) -> Option<usize> {
-        self.lengths.get(seq_idx).copied()
+        self.metadata.get(seq_idx).map(|(_, len)| len)
     }
 
     #[inline]
@@ -128,8 +253,7 @@ impl EncodedBaseStore {
         if k > 32 {
             return None;
         }
-        let seq_start = *self.offsets.get(seq_idx)?;
-        let seq_len = *self.lengths.get(seq_idx)?;
+        let (seq_start, seq_len) = self.metadata.get(seq_idx)?;
         if start.checked_add(k)? > seq_len {
             return None;
         }
@@ -156,7 +280,10 @@ pub(crate) struct EncodedUnitigs {
 impl EncodedUnitigs {
     #[inline]
     fn unitig_minimizer_count(&self, seq_idx: usize) -> usize {
-        minimizer_count(self.unitig_bases.lengths[seq_idx], self.g)
+        minimizer_count(
+            self.unitig_bases.len(seq_idx).expect("valid unitig"),
+            self.g,
+        )
     }
 
     #[inline]
@@ -165,55 +292,147 @@ impl EncodedUnitigs {
     }
 }
 
+#[derive(Clone, Copy)]
+struct CompactEcBlock {
+    lb: u32,
+    ub: u32,
+    ec_start: u32,
+    ec_end: u32,
+}
+
+#[derive(Clone, Copy)]
+struct WideEcBlock {
+    lb: u32,
+    ub: u32,
+    ec_start: usize,
+    ec_end: usize,
+}
+
+enum FlatEcBlocks {
+    Compact(Vec<CompactEcBlock>),
+    Wide(Vec<WideEcBlock>),
+}
+
+impl FlatEcBlocks {
+    fn new() -> Self {
+        Self::Compact(Vec::new())
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Compact(v) => v.len(),
+            Self::Wide(v) => v.len(),
+        }
+    }
+
+    fn push(&mut self, lb: u32, ub: u32, ec_start: usize, ec_end: usize) {
+        if let Self::Compact(values) = self {
+            if ec_end <= u32::MAX as usize {
+                values.push(CompactEcBlock {
+                    lb,
+                    ub,
+                    ec_start: ec_start as u32,
+                    ec_end: ec_end as u32,
+                });
+                return;
+            }
+            *self = Self::Wide(
+                values
+                    .iter()
+                    .map(|b| WideEcBlock {
+                        lb: b.lb,
+                        ub: b.ub,
+                        ec_start: b.ec_start as usize,
+                        ec_end: b.ec_end as usize,
+                    })
+                    .collect(),
+            );
+        }
+        if let Self::Wide(values) = self {
+            values.push(WideEcBlock {
+                lb,
+                ub,
+                ec_start,
+                ec_end,
+            });
+        }
+    }
+
+    #[inline]
+    fn get(&self, index: usize) -> Option<WideEcBlock> {
+        match self {
+            Self::Compact(values) => values.get(index).map(|b| WideEcBlock {
+                lb: b.lb,
+                ub: b.ub,
+                ec_start: b.ec_start as usize,
+                ec_end: b.ec_end as usize,
+            }),
+            Self::Wide(values) => values.get(index).copied(),
+        }
+    }
+}
+
 pub(crate) struct FlatEcIndex {
-    unitig_block_offsets: Vec<usize>,
-    block_lbs: Vec<u32>,
-    block_ubs: Vec<u32>,
-    block_ec_offsets: Vec<usize>,
+    unitig_block_offsets: MinzOffsets,
+    blocks: FlatEcBlocks,
     ec_values: Vec<u32>,
 }
 
 impl FlatEcIndex {
     fn new(unitig_capacity: usize) -> Self {
-        let mut unitig_block_offsets = Vec::with_capacity(unitig_capacity + 1);
-        unitig_block_offsets.push(0);
-        let block_ec_offsets = vec![0];
+        let mut offsets = Vec::with_capacity(unitig_capacity + 1);
+        offsets.push(0);
         Self {
-            unitig_block_offsets,
-            block_lbs: Vec::new(),
-            block_ubs: Vec::new(),
-            block_ec_offsets,
+            unitig_block_offsets: MinzOffsets::Compact(offsets),
+            blocks: FlatEcBlocks::new(),
             ec_values: Vec::new(),
         }
     }
 
+    fn push_serialized_node(&mut self, node: &[u8]) -> Result<()> {
+        let blocks = node.get(4..).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "failed to fill whole buffer",
+            )
+        })?;
+        crate::index::read_block_array_slice(blocks, |lb, ub, bitmap| {
+            let start = self.ec_values.len();
+            unsafe { crate::index::append_roaring_to_vec(bitmap, &mut self.ec_values) }
+                .ok_or_else(|| {
+                    Error::InvalidFormat("failed to deserialize roaring bitmap".into())
+                })?;
+            self.blocks.push(lb, ub, start, self.ec_values.len());
+            Ok(())
+        })?;
+        self.unitig_block_offsets.push(self.blocks.len());
+        Ok(())
+    }
+
     fn push_unitig_blocks(&mut self, blocks: &[crate::index::EcBlock]) {
         for block in blocks {
-            self.block_lbs.push(block.lb);
-            self.block_ubs.push(block.ub);
+            let start = self.ec_values.len();
             self.ec_values.extend_from_slice(&block.ec);
-            self.block_ec_offsets.push(self.ec_values.len());
+            self.blocks
+                .push(block.lb, block.ub, start, self.ec_values.len());
         }
-        self.unitig_block_offsets.push(self.block_lbs.len());
+        self.unitig_block_offsets.push(self.blocks.len());
     }
 
     pub(crate) fn block_index_for_position(&self, unitig_id: usize, pos: usize) -> Option<usize> {
-        let start = *self.unitig_block_offsets.get(unitig_id)?;
-        let end = *self.unitig_block_offsets.get(unitig_id + 1)?;
-        if start == end {
-            return None;
-        }
-
+        let start = self.unitig_block_offsets.value_at(unitig_id)?;
+        let end = self
+            .unitig_block_offsets
+            .value_at(unitig_id.checked_add(1)?)?;
         let pos = pos as u32;
         let mut lo = start;
         let mut hi = end;
         while lo < hi {
             let mid = (lo + hi) / 2;
-            let lb = self.block_lbs[mid];
-            let ub = self.block_ubs[mid];
-            if pos < lb {
+            let block = self.blocks.get(mid)?;
+            if pos < block.lb {
                 hi = mid;
-            } else if pos >= ub {
+            } else if pos >= block.ub {
                 lo = mid + 1;
             } else {
                 return Some(mid - start);
@@ -223,21 +442,26 @@ impl FlatEcIndex {
     }
 
     pub(crate) fn ec(&self, unitig_id: usize, block_idx: usize) -> &[u32] {
-        let global_idx = self.unitig_block_offsets[unitig_id] + block_idx;
-        &self.ec_values[self.block_ec_offsets[global_idx]..self.block_ec_offsets[global_idx + 1]]
+        let global_idx = self
+            .unitig_block_offsets
+            .value_at(unitig_id)
+            .expect("valid unitig")
+            + block_idx;
+        let block = self.blocks.get(global_idx).expect("valid EC block");
+        &self.ec_values[block.ec_start..block.ec_end]
     }
 
     pub(crate) fn block_bounds(&self, unitig_id: usize, block_idx: usize) -> Option<(u32, u32)> {
-        let start = *self.unitig_block_offsets.get(unitig_id)?;
-        let end = *self.unitig_block_offsets.get(unitig_id.checked_add(1)?)?;
+        let start = self.unitig_block_offsets.value_at(unitig_id)?;
+        let end = self
+            .unitig_block_offsets
+            .value_at(unitig_id.checked_add(1)?)?;
         let global_idx = start.checked_add(block_idx)?;
         if global_idx >= end {
             return None;
         }
-        Some((
-            *self.block_lbs.get(global_idx)?,
-            *self.block_ubs.get(global_idx)?,
-        ))
+        let block = self.blocks.get(global_idx)?;
+        Some((block.lb, block.ub))
     }
 }
 
@@ -273,15 +497,36 @@ impl SelectiveFallbackKmerIndex {
     }
 }
 
-pub struct MinzPositionIndex {
-    offsets: Vec<usize>,
-    values: Vec<u64>,
+#[derive(Debug, PartialEq, Eq)]
+enum MinzOffsets {
+    Compact(Vec<u32>),
+    Wide(Vec<usize>),
 }
 
-impl MinzPositionIndex {
-    fn from_counts(mut counts: Vec<usize>) -> Self {
-        // Reuse the count buffer for exclusive prefix offsets. The loader reserves
-        // the final sentinel in advance, avoiding another reference-sized allocation.
+impl MinzOffsets {
+    #[inline]
+    fn value_at(&self, index: usize) -> Option<usize> {
+        match self {
+            Self::Compact(v) => v.get(index).map(|&x| x as usize),
+            Self::Wide(v) => v.get(index).copied(),
+        }
+    }
+
+    fn push(&mut self, value: usize) {
+        if let Self::Compact(values) = self {
+            if value <= u32::MAX as usize {
+                values.push(value as u32);
+                return;
+            }
+            *self = Self::Wide(values.iter().map(|&x| x as usize).collect());
+        }
+        if let Self::Wide(values) = self {
+            values.push(value);
+        }
+    }
+
+    fn from_counts(mut counts: Vec<usize>) -> (Self, usize) {
+        // Compute prefixes in the original buffer before choosing a narrower layout.
         let mut total = 0usize;
         for count in &mut counts {
             let next = total + *count;
@@ -289,28 +534,172 @@ impl MinzPositionIndex {
             total = next;
         }
         counts.push(total);
+        let offsets = if total <= u32::MAX as usize {
+            let mut compact = vec![0u32; counts.len()];
+            for (slot, offset) in compact.iter_mut().zip(counts) {
+                *slot = offset as u32;
+            }
+            Self::Compact(compact)
+        } else {
+            Self::Wide(counts)
+        };
+        (offsets, total)
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Compact(v) => v.len(),
+            Self::Wide(v) => v.len(),
+        }
+    }
+
+    #[inline]
+    fn bounds(&self, idx: usize) -> (usize, usize) {
+        match self {
+            Self::Compact(v) => (v[idx] as usize, v[idx + 1] as usize),
+            Self::Wide(v) => (v[idx], v[idx + 1]),
+        }
+    }
+
+    fn cursors(&self, buckets: usize) -> Vec<usize> {
+        match self {
+            Self::Compact(v) => v[..buckets].iter().map(|&p| p as usize).collect(),
+            Self::Wide(v) => v[..buckets].to_vec(),
+        }
+    }
+}
+
+pub struct MinzPositionIndex {
+    offsets: MinzOffsets,
+    values: Vec<u64>,
+    inline: Option<Vec<u64>>,
+    inline_building: bool,
+}
+
+impl MinzPositionIndex {
+    fn from_counts(counts: Vec<usize>) -> Self {
+        let (offsets, total) = MinzOffsets::from_counts(counts);
         Self {
-            offsets: counts,
+            offsets,
             values: vec![0; total],
+            inline: None,
+            inline_building: false,
+        }
+    }
+
+    fn from_counts_inline(mut counts: Vec<usize>, escapes: &[usize], enabled: bool) -> Self {
+        if !enabled || usize::BITS != 64 {
+            return Self::from_counts(counts);
+        }
+        let total: usize = counts.iter().sum();
+        if total > 0x3fff_ffff {
+            return Self::from_counts(counts);
+        }
+        let mut overflow = 0usize;
+        let mut next_escape = 0usize;
+        for (bucket, count) in counts.iter_mut().enumerate() {
+            while next_escape < escapes.len() && escapes[next_escape] < bucket {
+                next_escape += 1;
+            }
+            let escaped = escapes.get(next_escape) == Some(&bucket);
+            let n = *count;
+            if n == 1 && !escaped {
+                *count = 0;
+            } else {
+                *count = ((1u64 << 63) | ((n as u64) << 32) | overflow as u64) as usize;
+                overflow += n;
+            }
+        }
+        let entries = counts.into_iter().map(|x| x as u64).collect();
+        Self {
+            offsets: MinzOffsets::Compact(Vec::new()),
+            values: vec![0; overflow],
+            inline: Some(entries),
+            inline_building: true,
         }
     }
 
     fn len(&self) -> usize {
-        self.offsets.len().saturating_sub(1)
+        self.inline
+            .as_ref()
+            .map_or_else(|| self.offsets.len().saturating_sub(1), Vec::len)
     }
 
     fn cursors(&self) -> Vec<usize> {
-        self.offsets[..self.len()].to_vec()
+        if self.inline.is_some() {
+            Vec::new()
+        } else {
+            self.offsets.cursors(self.len())
+        }
     }
 
     pub fn get(&self, idx: usize) -> &[u64] {
-        &self.values[self.offsets[idx]..self.offsets[idx + 1]]
+        if let Some(entries) = &self.inline {
+            debug_assert!(!self.inline_building);
+            let entry = entries[idx];
+            if entry >> 63 == 0 {
+                &entries[idx..idx + 1]
+            } else {
+                let start = entry as u32 as usize;
+                let len = ((entry >> 32) & 0x3fff_ffff) as usize;
+                &self.values[start..start + len]
+            }
+        } else {
+            let (start, end) = self.offsets.bounds(idx);
+            &self.values[start..end]
+        }
+    }
+
+    /// Return the existing positions and their precomputed special-marker flag.
+    /// The flag occupies an unused descriptor bit; CSR indexes retain the scan.
+    #[inline]
+    pub(crate) fn get_with_overcrowded(&self, idx: usize) -> (&[u64], bool) {
+        let positions = self.get(idx);
+        let overcrowded = if let Some(entries) = &self.inline {
+            let entry = entries[idx];
+            entry >> 63 != 0 && entry & (1u64 << 62) != 0
+        } else {
+            positions
+                .iter()
+                .any(|&pos_id| (pos_id >> 32) as u32 == u32::MAX && (pos_id & 0x8000_0000) != 0)
+        };
+        (positions, overcrowded)
     }
 
     fn push_at(&mut self, cursors: &mut [usize], idx: usize, pos_id: u64) {
-        let cursor = &mut cursors[idx];
-        self.values[*cursor] = pos_id;
-        *cursor += 1;
+        if let Some(entries) = &mut self.inline {
+            debug_assert!(self.inline_building);
+            let entry = &mut entries[idx];
+            if *entry >> 63 == 0 {
+                debug_assert_eq!(
+                    pos_id >> 63,
+                    0,
+                    "top-bit singleton requires overflow storage"
+                );
+                *entry = pos_id;
+            } else {
+                self.values[*entry as u32 as usize] = pos_id;
+                *entry += 1;
+                if (pos_id >> 32) as u32 == u32::MAX && (pos_id & 0x8000_0000) != 0 {
+                    *entry |= 1u64 << 62;
+                }
+            }
+        } else {
+            let cursor = &mut cursors[idx];
+            self.values[*cursor] = pos_id;
+            *cursor += 1;
+        }
+    }
+
+    fn finish_inline(&mut self) {
+        if let Some(entries) = &mut self.inline {
+            for entry in entries {
+                if *entry >> 63 != 0 {
+                    *entry -= (*entry >> 32) & 0x3fff_ffff;
+                }
+            }
+            self.inline_building = false;
+        }
     }
 }
 
@@ -364,6 +753,27 @@ impl BifrostIndex {
 
 pub fn build_bifrost_index(path: &Path) -> Result<BifrostIndex> {
     build_bifrost_index_with_positions_threaded(path, false, 1)
+}
+
+fn associate_abundant_node(
+    kmers: &mut [Vec<u8>],
+    map: &mut HashMap<u64, usize>,
+    base: usize,
+    node_row: usize,
+    node_kmer: &[u8],
+) -> Result<()> {
+    let (forward, reverse) = encode_kmer_pair(node_kmer)
+        .ok_or_else(|| Error::InvalidFormat("invalid abundant node k-mer".into()))?;
+    let id = map
+        .get_mut(&forward.min(reverse))
+        .ok_or_else(|| Error::InvalidFormat("abundant node k-mer absent from graph".into()))?;
+    let slot = node_row
+        .checked_sub(base)
+        .and_then(|offset| kmers.get_mut(offset))
+        .ok_or_else(|| Error::InvalidFormat("abundant node out of range".into()))?;
+    slot.copy_from_slice(node_kmer);
+    *id = node_row;
+    Ok(())
 }
 
 /// Load a flat counting index without duplicate EC blocks. Positional loading retains
@@ -429,7 +839,7 @@ fn build_bifrost_index_with_positions_threaded_impl(
 ) -> Result<BifrostIndex> {
     let _header_timing = timing::scoped(Stage::IndexHeaderParse);
     let file = File::open(path).map_err(|_| Error::MissingFile(path.to_path_buf()))?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::with_capacity(1 << 20, file);
 
     let index_version = read_u64_le(&mut reader)?;
     let dbg_size = read_u64_le(&mut reader)?;
@@ -452,22 +862,23 @@ fn build_bifrost_index_with_positions_threaded_impl(
             "k/g > 32 not supported in Bifrost path".into(),
         ));
     }
-    let kmer_bytes = 8usize;
 
     let v_unitigs_sz = read_u64_le(&mut reader)? as usize;
     let mut unitigs = Vec::with_capacity(v_unitigs_sz);
+    let mut compressed_scratch = Vec::new();
     for _ in 0..v_unitigs_sz {
         let len = read_u64_le(&mut reader)? as usize;
         let data_sz = len.div_ceil(4);
-        let mut data = vec![0u8; data_sz];
-        reader.read_exact(&mut data)?;
-        unitigs.push(decode_compressed_sequence(&data, len));
+        compressed_scratch.resize(data_sz, 0);
+        reader.read_exact(&mut compressed_scratch)?;
+        unitigs.push(decode_compressed_sequence(&compressed_scratch, len));
     }
 
+    drop(compressed_scratch);
     let km_unitigs_sz = read_u64_le(&mut reader)? as usize;
     let mut km_unitigs = Vec::with_capacity(km_unitigs_sz);
     for _ in 0..km_unitigs_sz {
-        let mut buf = vec![0u8; kmer_bytes];
+        let mut buf = [0u8; 8];
         reader.read_exact(&mut buf)?;
         km_unitigs.push(decode_kmer(&buf, k));
     }
@@ -475,11 +886,11 @@ fn build_bifrost_index_with_positions_threaded_impl(
     let h_kmers_ccov_sz = read_u64_le(&mut reader)? as usize;
     let mut h_kmers = Vec::with_capacity(h_kmers_ccov_sz);
     for _ in 0..h_kmers_ccov_sz {
-        let mut buf = vec![0u8; kmer_bytes];
+        let mut buf = [0u8; 8];
         reader.read_exact(&mut buf)?;
         h_kmers.push(decode_kmer(&buf, k));
     }
-    let h_kmer_map = if h_kmers.is_empty() {
+    let mut h_kmer_map = if h_kmers.is_empty() {
         None
     } else {
         let mut map = HashMap::with_capacity(h_kmers.len());
@@ -564,7 +975,7 @@ fn build_bifrost_index_with_positions_threaded_impl(
         HashSet::new()
     };
     for _ in 0..dlist_size {
-        let mut buf = vec![0u8; kmer_bytes];
+        let mut buf = [0u8; 8];
         reader.read_exact(&mut buf)?;
         let seq = decode_kmer(&buf, k);
         if let Some((fwd, rev)) = encode_kmer_pair(&seq) {
@@ -581,12 +992,37 @@ fn build_bifrost_index_with_positions_threaded_impl(
     };
     let mut flat_ec = FlatEcIndex::new(node_count);
     let mut node_buf = Vec::new();
-    for _ in 0..node_count {
-        // Skip the stored node k-mer without discarding unread buffered bytes.
-        reader.seek_relative(k as i64)?;
+    let abundant_base = unitigs.len() + km_unitigs.len();
+    if node_count != abundant_base + h_kmers.len() {
+        return Err(Error::InvalidFormat(
+            "unitig and node counts mismatch".into(),
+        ));
+    }
+    let mut node_kmer = vec![0; k];
+    for node_row in 0..node_count {
+        if node_row < abundant_base {
+            // Vector-backed graph entries retain their serialized order.
+            reader.seek_relative(k as i64)?;
+        } else {
+            // Bifrost reinserts abundant k-mers into a hash table when loading
+            // the graph. Its iteration order can differ from the graph file's
+            // order. Node records carry the authoritative k-mer/EC association.
+            reader.read_exact(&mut node_kmer)?;
+            associate_abundant_node(
+                &mut h_kmers,
+                h_kmer_map.as_mut().expect("nonempty abundant k-mers"),
+                abundant_base,
+                node_row,
+                &node_kmer,
+            )?;
+        }
         let node_size = read_u32_le(&mut reader)? as usize;
         node_buf.resize(node_size, 0);
         reader.read_exact(&mut node_buf)?;
+        if !store_ec_blocks && !load_positional_info {
+            flat_ec.push_serialized_node(&node_buf)?;
+            continue;
+        }
         let mut cur = std::io::Cursor::new(node_buf.as_slice());
         let _node_id = read_u32_le(&mut cur)?;
         let blocks = if load_positional_info {
@@ -619,12 +1055,18 @@ fn build_bifrost_index_with_positions_threaded_impl(
     minz_counts.resize(hmap_min_unitigs_sz, 0);
     drop(_graph_timing);
     let _count_timing = timing::scoped(Stage::MinimizerCountPass);
+    let mut unitig_bucket_cache = (bmp_unitigs.len() == 1
+        && hmap_min_unitigs_sz < u32::MAX as usize
+        && !store_ec_blocks
+        && !load_positional_info)
+        .then(|| Vec::with_capacity(bmp_unitigs[0].len()));
     populate_unitig_minimizer_counts(
         &mut minz_counts,
         &bmp_unitigs,
         &encoded_unitigs,
         &mphf,
         rayon_pool.as_ref(),
+        unitig_bucket_cache.as_mut(),
     );
 
     let km_glen = k.saturating_sub(g) + 1;
@@ -641,14 +1083,28 @@ fn build_bifrost_index_with_positions_threaded_impl(
         rayon_pool.as_ref(),
     );
 
-    for (minz, _pos_id) in special_minz.iter().copied() {
+    let mut inline_escapes = Vec::new();
+    for (minz, pos_id) in special_minz.iter().copied() {
         let bytes = minz.to_le_bytes();
         if let Some(idx) = mphf.lookup(&bytes) {
             minz_counts[idx as usize] += 1;
+            if pos_id >> 63 != 0 {
+                inline_escapes.push(idx as usize);
+            }
         }
     }
-
-    let mut minz_positions = MinzPositionIndex::from_counts(minz_counts);
+    inline_escapes.sort_unstable();
+    inline_escapes.dedup();
+    let inline_enabled = !store_ec_blocks
+        && !load_positional_info
+        && bmp_unitigs.len() <= 1
+        && bmp_km.len() <= 1
+        && unitigs.len() < (1usize << 31)
+        && km_unitigs.len() < (1usize << 31)
+        && hmap_min_unitigs_sz < u32::MAX as usize
+        && (bmp_unitigs.is_empty() || unitig_bucket_cache.is_some() || rayon_pool.is_none());
+    let mut minz_positions =
+        MinzPositionIndex::from_counts_inline(minz_counts, &inline_escapes, inline_enabled);
     let mut minz_cursors = minz_positions.cursors();
     drop(_count_timing);
     let _fill_timing = timing::scoped(Stage::MinimizerFillPass);
@@ -659,7 +1115,9 @@ fn build_bifrost_index_with_positions_threaded_impl(
         &encoded_unitigs,
         &mphf,
         rayon_pool.as_ref(),
+        unitig_bucket_cache.as_deref(),
     );
+    drop(unitig_bucket_cache);
     drop(bmp_unitigs);
     populate_kmer_minimizer_storage(
         &mut minz_positions,
@@ -678,6 +1136,7 @@ fn build_bifrost_index_with_positions_threaded_impl(
     }
 
     drop(minz_cursors);
+    minz_positions.finish_inline();
     let onlist = read_onlist_with_lengths(&mut reader)?;
 
     let cache_id = loop {
@@ -807,7 +1266,46 @@ fn pack_bases_into(seq: &[u8], out: &mut [u64]) {
 
 #[cfg(test)]
 mod packed_base_tests {
+    use super::SequenceMetadata;
     use super::{BASE_CODES, EncodedBaseStore, compute_minimizer_reps_into, minimizer_count};
+
+    #[test]
+    fn rolling_packed_windows_match_independent_windows() {
+        let seqs = vec![
+            (0..193)
+                .map(|i| b"ACGT"[(i * i + i / 7) % 4])
+                .collect::<Vec<_>>(),
+        ];
+        let store = EncodedBaseStore::from_sequences(&seqs, None);
+        for k in 1..=32 {
+            for first in 0..=193 - k {
+                let last = (first + 64 - k).min(193 - k);
+                let got: Vec<_> = store.kmer_range(0, first, last, k).unwrap().collect();
+                let expected: Vec<_> = (first..=last)
+                    .map(|pos| (pos, store.encode_kmer_at(0, pos, k).unwrap()))
+                    .collect();
+                assert_eq!(got, expected, "k={k} first={first}");
+            }
+        }
+        assert!(store.kmer_range(0, 0, 64, 1).is_none());
+        assert!(store.kmer_range(0, 4, 3, 31).is_none());
+        assert!(store.kmer_range(0, 180, 190, 31).is_none());
+        assert!(store.kmer_range(0, usize::MAX, usize::MAX, 31).is_none());
+    }
+
+    #[test]
+    fn packed_metadata_preserves_wide_boundaries() {
+        let compact = SequenceMetadata::new(vec![0, 2], vec![63]);
+        assert!(matches!(compact, SequenceMetadata::Compact(_)));
+        assert_eq!(compact.get(0), Some((0, 63)));
+        assert_eq!(compact.get(1), None);
+        let Some(big) = (u32::MAX as usize).checked_add(1) else {
+            return;
+        };
+        let wide = SequenceMetadata::new(vec![0, big, big + 1], vec![big, 1]);
+        assert!(matches!(wide, SequenceMetadata::Wide(_)));
+        assert_eq!(wide.get(1), Some((big, 1)));
+    }
 
     #[test]
     fn packed_minimizers_equal_byte_reference_for_all_g_and_word_boundaries() {
@@ -925,7 +1423,7 @@ fn precompute_unitig_block_states(
     encoded_unitigs: &EncodedUnitigs,
 ) -> Vec<UnitigBlockState> {
     let mut out = Vec::with_capacity(bmp_unitigs.len());
-    if encoded_unitigs.unitig_bases.lengths.is_empty() {
+    if encoded_unitigs.unitig_bases.metadata.is_empty() {
         return out;
     }
 
@@ -951,8 +1449,9 @@ fn populate_unitig_minimizer_counts(
     encoded_unitigs: &EncodedUnitigs,
     mphf: &BooPhf,
     pool: Option<&ThreadPool>,
+    mut bucket_cache: Option<&mut Vec<u32>>,
 ) {
-    if bmp_unitigs.is_empty() || encoded_unitigs.unitig_bases.lengths.is_empty() {
+    if bmp_unitigs.is_empty() || encoded_unitigs.unitig_bases.metadata.is_empty() {
         return;
     }
 
@@ -968,10 +1467,14 @@ fn populate_unitig_minimizer_counts(
                 let pos = base + pos_bmp as u64;
                 advance_unitig_state(&mut state, encoded_unitigs, pos);
                 let rel = (pos - state.total_unitig_len) as usize;
-                if let Some(bytes) = encoded_unitigs.unitig_minimizer_at(state.unitig_id, rel)
-                    && let Some(idx) = mphf.lookup(&bytes)
-                {
-                    minz_counts[idx as usize] += 1;
+                let bucket = encoded_unitigs
+                    .unitig_minimizer_at(state.unitig_id, rel)
+                    .and_then(|bytes| mphf.lookup(&bytes));
+                if let Some(cache) = bucket_cache.as_mut() {
+                    cache.push(bucket.map_or(u32::MAX, |bucket| bucket as u32));
+                }
+                if let Some(bucket) = bucket {
+                    minz_counts[bucket as usize] += 1;
                 }
             }
         }
@@ -984,8 +1487,57 @@ fn populate_unitig_minimizer_counts(
         if batch_pos_ids.is_empty() {
             return;
         }
-        let grouped = collect_unitig_batch_counts(batch_pos_ids, encoded_unitigs, mphf, pool);
-        merge_count_batches(minz_counts, grouped);
+        if let Some(cache) = bucket_cache.as_mut() {
+            let chunk_len = (batch_pos_ids.len() / (pool.current_num_threads() * 4).max(1))
+                .max(LOAD_MIN_PAR_CHUNK);
+            let old_len = cache.len();
+            cache.reserve(batch_pos_ids.len());
+            let destinations = &mut cache.spare_capacity_mut()[..batch_pos_ids.len()];
+            let chunks: Vec<Vec<u32>> = pool.install(|| {
+                destinations
+                    .par_chunks_mut(chunk_len)
+                    .zip(batch_pos_ids.par_chunks(chunk_len))
+                    .map(|(destinations, positions)| {
+                        let mut indices = Vec::with_capacity(positions.len());
+                        for (destination, &pos_id) in destinations.iter_mut().zip(positions) {
+                            let bucket = encoded_unitigs
+                                .unitig_minimizer_at(
+                                    (pos_id >> 32) as usize,
+                                    pos_id as u32 as usize,
+                                )
+                                .and_then(|bytes| mphf.lookup(&bytes))
+                                .map_or(u32::MAX, |bucket| bucket as u32);
+                            destination.write(bucket);
+                            if bucket != u32::MAX {
+                                indices.push(bucket);
+                            }
+                        }
+                        indices.sort_unstable();
+                        indices
+                    })
+                    .collect()
+            });
+            // SAFETY: the indexed parallel zip writes every destination exactly once.
+            // A panic unwinds before this publication and leaves the old length intact.
+            unsafe {
+                cache.set_len(old_len + batch_pos_ids.len());
+            }
+            for chunk in chunks {
+                let mut at = 0;
+                while at < chunk.len() && chunk[at] != u32::MAX {
+                    let bucket = chunk[at];
+                    let mut end = at + 1;
+                    while end < chunk.len() && chunk[end] == bucket {
+                        end += 1;
+                    }
+                    minz_counts[bucket as usize] += end - at;
+                    at = end;
+                }
+            }
+        } else {
+            let grouped = collect_unitig_batch_counts(batch_pos_ids, encoded_unitigs, mphf, pool);
+            merge_count_batches(minz_counts, grouped);
+        }
         batch_pos_ids.clear();
     };
 
@@ -1012,11 +1564,34 @@ fn populate_unitig_minimizer_storage(
     encoded_unitigs: &EncodedUnitigs,
     mphf: &BooPhf,
     pool: Option<&ThreadPool>,
+    bucket_cache: Option<&[u32]>,
 ) {
-    if bmp_unitigs.is_empty() || encoded_unitigs.unitig_bases.lengths.is_empty() {
+    if bmp_unitigs.is_empty() || encoded_unitigs.unitig_bases.metadata.is_empty() {
         return;
     }
 
+    if let Some(cache) = bucket_cache {
+        debug_assert_eq!(bmp_unitigs.len(), 1);
+        debug_assert_eq!(cache.len(), bmp_unitigs[0].len());
+        let mut state = UnitigBlockState {
+            unitig_id: 0,
+            total_unitig_len: 0,
+            current_unitig_len: encoded_unitigs.unitig_minimizer_count(0) as u64,
+        };
+        for (&pos, &bucket) in bmp_unitigs[0].iter().zip(cache) {
+            let pos = u64::from(pos);
+            advance_unitig_state(&mut state, encoded_unitigs, pos);
+            if bucket != u32::MAX {
+                let rel = pos - state.total_unitig_len;
+                minz_positions.push_at(
+                    minz_cursors,
+                    bucket as usize,
+                    ((state.unitig_id as u64) << 32) | rel,
+                );
+            }
+        }
+        return;
+    }
     let Some(pool) = pool else {
         let mut state = UnitigBlockState {
             unitig_id: 0,
@@ -1178,7 +1753,9 @@ fn populate_kmer_minimizer_storage(
     ctx: &KmerLoadContext<'_>,
     pool: Option<&ThreadPool>,
 ) {
-    let Some(pool) = pool else {
+    // A single bitmap supplies only one outer Rayon task, so atomics do not
+    // provide parallelism and duplicate the entire reference-sized cursor table.
+    let Some(pool) = pool.filter(|_| bmp_km.len() > 1) else {
         for (i, bitmap) in bmp_km.iter().enumerate() {
             let base = (i as u64) << 32;
             for &pos_bmp in bitmap {
@@ -1356,7 +1933,7 @@ pub(super) fn read_unitig_sequences<R: Read + Seek>(
     dbg_size: u64,
     k: u32,
     kmer_bytes: usize,
-) -> Result<Vec<Vec<u8>>> {
+) -> Result<(Vec<Vec<u8>>, usize)> {
     reader.seek(SeekFrom::Start(dbg_start))?;
     let _file_format_version = read_u64_le(reader)?;
     let _k = read_i32_le(reader)?;
@@ -1379,6 +1956,7 @@ pub(super) fn read_unitig_sequences<R: Read + Seek>(
         seqs.push(decode_kmer(&buf, k as usize));
     }
 
+    let abundant_base = seqs.len();
     let h_kmers_ccov_sz = read_u64_le(reader)?;
     for _ in 0..h_kmers_ccov_sz {
         let mut buf = vec![0u8; kmer_bytes];
@@ -1387,27 +1965,33 @@ pub(super) fn read_unitig_sequences<R: Read + Seek>(
     }
 
     reader.seek(SeekFrom::Start(dbg_start + dbg_size))?;
-    Ok(seqs)
+    Ok((seqs, abundant_base))
 }
 
 fn decode_compressed_sequence(data: &[u8], len: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(len);
-    for i in 0..len {
-        let byte = data[i >> 2];
-        let shift = (i & 0x3) << 1;
-        let v = (byte >> shift) & 0x03;
-        out.push(match v {
-            0 => b'A',
-            1 => b'C',
-            2 => b'G',
-            _ => b'T',
-        });
+    let full = len / 4;
+    for &byte in &data[..full] {
+        out.extend_from_slice(&DECODED_BYTE_BASES[byte as usize]);
+    }
+    let tail = len % 4;
+    if tail != 0 {
+        out.extend_from_slice(&DECODED_BYTE_BASES[data[full] as usize][..tail]);
     }
     out
 }
 
 fn decode_kmer(bytes: &[u8], k: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(k);
+    if k <= 32
+        && let Some(chunk) = bytes.first_chunk::<8>()
+    {
+        let word = u64::from_le_bytes(*chunk);
+        for i in 0..k {
+            out.push(b"ACGT"[((word >> (62 - 2 * i)) & 3) as usize]);
+        }
+        return out;
+    }
     let mut longs: Vec<u64> = Vec::with_capacity(bytes.len() / 8);
     for chunk in bytes.as_chunks::<8>().0 {
         let mut arr = [0u8; 8];
@@ -1433,17 +2017,161 @@ mod loader_order_tests {
     use super::*;
 
     #[test]
-    fn count_buffer_becomes_offsets_without_copying() {
+    fn abundant_nodes_use_node_keys_after_hash_table_reordering() {
+        let first = b"ACCTCAGCCTCCCAAAATGCTAGGATTACAG";
+        let second = b"CGGGTGTGGTGGCGGGCACCTGTAGTCCCAG";
+        let canonical = |seq: &[u8]| {
+            let (forward, reverse) = encode_kmer_pair(seq).unwrap();
+            forward.min(reverse)
+        };
+        let base = 19;
+        // The graph's hash-table serialization has the opposite order to
+        // the node records, each of which supplies its own EC and head k-mer.
+        let mut kmers = vec![second.to_vec(), first.to_vec()];
+        let mut map = HashMap::from([(canonical(second), base), (canonical(first), base + 1)]);
+        associate_abundant_node(&mut kmers, &mut map, base, base, first).unwrap();
+        associate_abundant_node(&mut kmers, &mut map, base, base + 1, second).unwrap();
+        assert_eq!(kmers, [first.to_vec(), second.to_vec()]);
+        assert_eq!(map[&canonical(first)], base);
+        assert_eq!(map[&canonical(second)], base + 1);
+        let fallback = SelectiveFallbackKmerIndex::build(base, &[], &kmers);
+        assert_eq!(fallback.lookup(canonical(first)).unwrap()[0].0, base);
+        assert_eq!(fallback.lookup(canonical(second)).unwrap()[0].0, base + 1);
+        assert!(
+            associate_abundant_node(
+                &mut kmers,
+                &mut map,
+                base,
+                base,
+                b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn singleton_bucket_storage_preserves_zero_specials_and_tie_order() {
+        if usize::BITS != 64 {
+            return;
+        }
+        let mut index = MinzPositionIndex::from_counts_inline(vec![0, 1, 2, 1, 0], &[3], true);
+        assert!(index.inline.is_some());
+        let mut cursors = index.cursors();
+        assert!(cursors.is_empty());
+        index.push_at(&mut cursors, 1, 0);
+        index.push_at(&mut cursors, 2, 10);
+        index.push_at(&mut cursors, 3, u64::MAX);
+        index.push_at(&mut cursors, 2, 20);
+        index.finish_inline();
+        assert_eq!(index.get(0), &[]);
+        assert_eq!(index.get(1), &[0]);
+        assert_eq!(index.get(2), &[10, 20]);
+        assert_eq!(index.get(3), &[u64::MAX]);
+        assert_eq!(index.get(4), &[]);
+        for bucket in 0..5 {
+            assert_eq!(index.get_with_overcrowded(bucket).1, bucket == 3);
+        }
+    }
+
+    #[test]
+    fn descriptor_marker_bit_preserves_specials_and_high_singleton_bits() {
+        if usize::BITS != 64 {
+            return;
+        }
+        let counts = vec![1, 3, 1, 1];
+        let mut inline = MinzPositionIndex::from_counts_inline(counts.clone(), &[2, 3], true);
+        let mut csr = MinzPositionIndex::from_counts(counts);
+        let mut inline_cursors = inline.cursors();
+        let mut csr_cursors = csr.cursors();
+        for (bucket, value) in [
+            (0, (1u64 << 62) | 123),
+            (1, 11),
+            (1, u64::MAX),
+            (1, 22),
+            (2, 0xffff_ffff_0000_0001),
+            (3, 0xffff_ffff_8000_0000),
+        ] {
+            inline.push_at(&mut inline_cursors, bucket, value);
+            csr.push_at(&mut csr_cursors, bucket, value);
+        }
+        inline.finish_inline();
+        for bucket in 0..4 {
+            assert_eq!(
+                inline.get_with_overcrowded(bucket),
+                csr.get_with_overcrowded(bucket)
+            );
+            assert_eq!(
+                inline.get_with_overcrowded(bucket).1,
+                bucket == 1 || bucket == 3
+            );
+        }
+    }
+
+    #[test]
+    fn ec_metadata_promotes_without_narrowing_large_ranges() {
+        let mut blocks = FlatEcBlocks::new();
+        blocks.push(1, 3, 0, 2);
+        let Some(high) = (u32::MAX as usize).checked_add(1) else {
+            return;
+        };
+        blocks.push(4, 9, high, high + 3);
+        assert!(matches!(blocks, FlatEcBlocks::Wide(_)));
+        assert_eq!(blocks.get(0).unwrap().ec_end, 2);
+        assert_eq!(blocks.get(1).unwrap().ec_start, high);
+        let mut offsets = MinzOffsets::Compact(vec![0, 2]);
+        offsets.push(high);
+        assert!(matches!(offsets, MinzOffsets::Wide(_)));
+        assert_eq!(offsets.value_at(1), Some(2));
+        assert_eq!(offsets.value_at(2), Some(high));
+    }
+
+    #[test]
+    fn grouped_sequence_decode_equals_byte_oracle_for_all_tail_lengths() {
+        let bytes: Vec<u8> = (0..=255).collect();
+        for len in 0..=bytes.len() * 4 {
+            let expected: Vec<u8> = (0..len)
+                .map(|i| b"ACGT"[((bytes[i / 4] >> (2 * (i % 4))) & 3) as usize])
+                .collect();
+            assert_eq!(decode_compressed_sequence(&bytes, len), expected);
+        }
+        let mut word = 91u64;
+        for _ in 0..1024 {
+            word ^= word << 13;
+            word ^= word >> 7;
+            word ^= word << 17;
+            for k in 0..=32 {
+                let expected: Vec<u8> = (0..k)
+                    .map(|i| b"ACGT"[((word >> (62 - 2 * i)) & 3) as usize])
+                    .collect();
+                assert_eq!(decode_kmer(&word.to_le_bytes(), k), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn compact_prefixes_and_wide_count_buffer_reuse_preserve_offsets() {
         for counts in [vec![], vec![0], vec![2, 0, 3, 1]] {
             let mut reserved = Vec::with_capacity(counts.len() + 1);
             reserved.extend_from_slice(&counts);
-            let ptr = reserved.as_ptr();
             let index = MinzPositionIndex::from_counts(reserved);
-            assert_eq!(index.offsets.as_ptr(), ptr);
+            assert!(matches!(index.offsets, MinzOffsets::Compact(_)));
             assert_eq!(index.len(), counts.len());
             assert_eq!(index.values.len(), counts.iter().sum());
             for (bucket, &count) in counts.iter().enumerate() {
                 assert_eq!(index.get(bucket).len(), count);
+            }
+        }
+        if let Some(total) = (u32::MAX as usize).checked_add(1) {
+            let mut counts = Vec::with_capacity(3);
+            counts.extend_from_slice(&[u32::MAX as usize, 1]);
+            let pointer = counts.as_ptr();
+            let (offsets, sum) = MinzOffsets::from_counts(counts);
+            assert_eq!(sum, total);
+            assert_eq!(offsets.bounds(0), (0, u32::MAX as usize));
+            assert_eq!(offsets.bounds(1), (u32::MAX as usize, total));
+            match offsets {
+                MinzOffsets::Wide(v) => assert_eq!(v.as_ptr(), pointer),
+                MinzOffsets::Compact(_) => panic!("large offsets must retain usize width"),
             }
         }
     }
@@ -1477,11 +2205,17 @@ mod loader_order_tests {
         assert_eq!(serial.minz_positions.values, parallel.minz_positions.values);
         let compact = build_bifrost_index_quant_threaded(&path, false, 4).unwrap();
         assert!(compact.ec_blocks.is_empty());
-        assert_eq!(
-            serial.minz_positions.offsets,
-            compact.minz_positions.offsets
-        );
-        assert_eq!(serial.minz_positions.values, compact.minz_positions.values);
+        assert_eq!(serial.minz_positions.len(), compact.minz_positions.len());
+        for bucket in 0..serial.minz_positions.len() {
+            assert_eq!(
+                serial.minz_positions.get(bucket),
+                compact.minz_positions.get(bucket)
+            );
+            assert_eq!(
+                serial.minz_positions.get_with_overcrowded(bucket),
+                compact.minz_positions.get_with_overcrowded(bucket)
+            );
+        }
         for (uid, blocks) in serial.ec_blocks.iter().enumerate() {
             for (bid, block) in blocks.iter().enumerate() {
                 assert_eq!(compact.flat_ec.ec(uid, bid), block.ec);
@@ -1502,6 +2236,26 @@ mod loader_order_tests {
                     super::super::Strand::Unstranded,
                     super::super::Strand::Reverse,
                 ] {
+                    let mut options = super::super::PseudoalignOptions::default();
+                    options.investigation.trace_fast_path = true;
+                    for mutate in [false, true] {
+                        let mut query = read.to_vec();
+                        if mutate {
+                            query[40] = b'N';
+                        }
+                        let live = super::super::ec_for_read_bifrost(
+                            &compact, &query, strand, None, options,
+                        );
+                        let mut debug = super::super::ReadDebugState::default();
+                        let traced = super::super::ec_for_read_bifrost(
+                            &compact,
+                            &query,
+                            strand,
+                            Some(&mut debug),
+                            options,
+                        );
+                        assert_eq!(format!("{live:?}"), format!("{traced:?}"));
+                    }
                     for general in [false, true] {
                         let mut debug_full = super::super::ReadDebugState::default();
                         let mut debug_compact = super::super::ReadDebugState::default();

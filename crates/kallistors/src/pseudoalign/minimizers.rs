@@ -8,6 +8,97 @@ const REP_HASH_VALS: [u64; 4] = [
     10060236952204337488,
     7783083932390163561,
 ];
+// Hash groups use the same A/C/T/G REP codes as the byte oracle, but the input
+// is the validated A/C/G/T two-bit word. XOR/rotation composition is exact.
+const REP_HASH_GROUPS: [[u64; 256]; 5] = {
+    let mut groups = [[0u64; 256]; 5];
+    let mut len = 1;
+    while len <= 4 {
+        let mut word = 0;
+        while word < 256 {
+            let mut hash = 0u64;
+            let mut i = 0;
+            while i < len {
+                let base = (word >> (2 * (len - i - 1))) & 3;
+                let rep_code = base ^ (base >> 1);
+                hash = hash.rotate_left(1) ^ REP_HASH_VALS[rep_code];
+                i += 1;
+            }
+            groups[len][word] = hash;
+            word += 1;
+        }
+        len += 1;
+    }
+    groups
+};
+// Grouped XOR/rotation composition for the common 23-base initializer.
+static REP_GROUP_SIX: [u64; 4096] = {
+    let mut groups = [0; 4096];
+    let mut word = 0;
+    while word < groups.len() {
+        groups[word] =
+            REP_HASH_GROUPS[4][word & 255] ^ REP_HASH_GROUPS[2][word >> 8].rotate_left(4);
+        word += 1;
+    }
+    groups
+};
+static REP_GROUP_FIVE: [u64; 1024] = {
+    let mut groups = [0; 1024];
+    let mut word = 0;
+    while word < groups.len() {
+        groups[word] =
+            REP_HASH_GROUPS[4][word & 255] ^ REP_HASH_GROUPS[1][word >> 8].rotate_left(4);
+        word += 1;
+    }
+    groups
+};
+
+#[inline]
+fn rep_grouped_23(word: u64) -> u64 {
+    REP_GROUP_SIX[(word & 4095) as usize]
+        ^ REP_GROUP_SIX[((word >> 12) & 4095) as usize].rotate_left(6)
+        ^ REP_GROUP_SIX[((word >> 24) & 4095) as usize].rotate_left(12)
+        ^ REP_GROUP_FIVE[((word >> 36) & 1023) as usize].rotate_left(18)
+}
+
+const REP_FORWARD: [u64; 4] = [
+    REP_HASH_VALS[0],
+    REP_HASH_VALS[1],
+    REP_HASH_VALS[3],
+    REP_HASH_VALS[2],
+];
+const REP_COMPLEMENT: [u64; 4] = [
+    REP_HASH_VALS[2],
+    REP_HASH_VALS[3],
+    REP_HASH_VALS[1],
+    REP_HASH_VALS[0],
+];
+const REP_REMOVE_FORWARD: [[u64; 4]; 33] = {
+    let mut table = [[0; 4]; 33];
+    let mut g = 0;
+    while g <= 32 {
+        let mut base = 0;
+        while base < 4 {
+            table[g][base] = REP_FORWARD[base].rotate_left(g as u32);
+            base += 1;
+        }
+        g += 1;
+    }
+    table
+};
+const REP_ADD_REVERSE: [[u64; 4]; 33] = {
+    let mut table = [[0; 4]; 33];
+    let mut g = 1;
+    while g <= 32 {
+        let mut base = 0;
+        while base < 4 {
+            table[g][base] = REP_COMPLEMENT[base].rotate_left((g - 1) as u32);
+            base += 1;
+        }
+        g += 1;
+    }
+    table
+};
 const INVALID_BASE_CODE: u8 = 4;
 const HASH_CODES: [u8; 256] = {
     let mut codes = [INVALID_BASE_CODE; 256];
@@ -154,22 +245,28 @@ pub(super) fn minimizers_for_encoded_kmer_into(
     if seq.len() > 32 {
         return minimizers_for_kmer_into(seq, g, out);
     }
+    if seq.len() == 31 && g == 23 {
+        return minimizers_31_23(forward, reverse, out);
+    }
     out.clear();
     let Some(bounds) = strict_bounds(seq.len(), g) else {
         return false;
     };
     let mask = if g == 0 { 0 } else { u64::MAX >> (64 - 2 * g) };
     let mut best_hash = None;
-    let mut rolling = RepHashWindow::new(&seq[bounds.start..bounds.start + g]);
+    let mut rolling = RepHashWindow::from_encoded(
+        (forward >> (2 * (seq.len() - g - bounds.start))) & mask,
+        (reverse >> (2 * bounds.start)) & mask,
+        g,
+    );
     let first = bounds.start;
     for pos in bounds {
         if pos > first {
-            rolling = rolling.and_then(|window| window.advance(seq[pos - 1], seq[pos + g - 1], g));
+            let old = ((forward >> (2 * (seq.len() - pos))) & 3) as usize;
+            let new = ((forward >> (2 * (seq.len() - pos - g))) & 3) as usize;
+            rolling = rolling.advance_encoded(old, new, g);
         }
-        let Some(hash) = rolling.map(RepHashWindow::finish) else {
-            out.clear();
-            return false;
-        };
+        let hash = rolling.finish();
         if best_hash.is_some_and(|best| hash > best) {
             continue;
         }
@@ -187,6 +284,33 @@ pub(super) fn minimizers_for_encoded_kmer_into(
         out.push((rep.to_le_bytes(), pos));
     }
     !out.is_empty()
+}
+
+fn minimizers_31_23(forward: u64, reverse: u64, out: &mut Vec<([u8; 8], usize)>) -> bool {
+    const MASK: u64 = (1u64 << 46) - 1;
+    let mut rolling =
+        RepHashWindow::from_encoded((forward >> 14) & MASK, (reverse >> 2) & MASK, 23);
+    let mut hashes = [0u64; 6];
+    for (offset, hash) in hashes.iter_mut().enumerate() {
+        let pos = offset + 1;
+        if offset != 0 {
+            let old = ((forward >> (2 * (31 - pos))) & 3) as usize;
+            let new = ((forward >> (2 * (31 - pos - 23))) & 3) as usize;
+            rolling = rolling.advance_encoded(old, new, 23);
+        }
+        *hash = rolling.finish();
+    }
+    let best = hashes.iter().copied().min().expect("six windows");
+    out.clear();
+    for (offset, hash) in hashes.into_iter().enumerate() {
+        if hash == best {
+            let pos = offset + 1;
+            let f = (forward >> (2 * (8 - pos))) & MASK;
+            let r = (reverse >> (2 * pos)) & MASK;
+            out.push(((f.min(r) << 18).to_le_bytes(), pos));
+        }
+    }
+    true
 }
 
 pub(super) fn minimizers_ranked_for_kmer(
@@ -372,6 +496,32 @@ struct RepHashWindow {
 }
 
 impl RepHashWindow {
+    #[inline]
+    fn from_encoded(mut fword: u64, mut rword: u64, g: usize) -> Self {
+        if g == 23 {
+            return Self {
+                forward: rep_grouped_23(fword),
+                reverse: rep_grouped_23(rword),
+            };
+        }
+        let mut forward = 0u64;
+        let mut reverse = 0u64;
+        for chunk in 0..g / 4 {
+            forward ^= REP_HASH_GROUPS[4][(fword & 255) as usize].rotate_left((chunk * 4) as u32);
+            reverse ^= REP_HASH_GROUPS[4][(rword & 255) as usize].rotate_left((chunk * 4) as u32);
+            fword >>= 8;
+            rword >>= 8;
+        }
+        let tail = g % 4;
+        if tail != 0 {
+            let rotation = (g - tail) as u32;
+            forward ^= REP_HASH_GROUPS[tail][fword as usize].rotate_left(rotation);
+            reverse ^= REP_HASH_GROUPS[tail][rword as usize].rotate_left(rotation);
+        }
+        Self { forward, reverse }
+    }
+
+    #[cfg(test)]
     fn new(seq: &[u8]) -> Option<Self> {
         let mut forward = 0u64;
         let mut reverse = 0u64;
@@ -387,6 +537,20 @@ impl RepHashWindow {
         Some(Self { forward, reverse })
     }
 
+    #[inline]
+    fn advance_encoded(self, old: usize, new: usize, g: usize) -> Self {
+        if g == 0 {
+            return self;
+        }
+        Self {
+            forward: self.forward.rotate_left(1) ^ REP_REMOVE_FORWARD[g][old] ^ REP_FORWARD[new],
+            reverse: self.reverse.rotate_right(1)
+                ^ REP_COMPLEMENT[old].rotate_right(1)
+                ^ REP_ADD_REVERSE[g][new],
+        }
+    }
+
+    #[cfg(test)]
     fn advance(self, old: u8, new: u8, g: usize) -> Option<Self> {
         if g == 0 {
             return Some(self);
@@ -447,6 +611,21 @@ fn rep_hash(seq: &[u8]) -> Option<u64> {
 #[cfg(test)]
 mod encoded_tests {
     use super::*;
+
+    #[test]
+    fn common_window_specialization_keeps_every_homopolymer_tie() {
+        let seq = [b'A'; 31];
+        let (forward, reverse) = crate::pseudoalign::ec::encode_kmer_pair(&seq).unwrap();
+        let mut got = Vec::new();
+        assert!(minimizers_for_encoded_kmer_into(
+            &seq, 23, forward, reverse, &mut got
+        ));
+        assert_eq!(got, minimizers_for_kmer(&seq, 23).unwrap());
+        assert_eq!(
+            got.iter().map(|entry| entry.1).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6]
+        );
+    }
 
     #[test]
     fn rolling_rep_hash_equals_byte_oracle_for_every_window() {

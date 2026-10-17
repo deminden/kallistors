@@ -10,6 +10,7 @@ pub struct QuantArgs {
     pub timings: bool,
     pub single: bool,
     pub fragment_length: Option<f64>,
+    pub fragment_length_samples: usize,
     pub fragment_length_sd: Option<f64>,
     pub single_overhang: bool,
     pub fr_stranded: bool,
@@ -55,6 +56,13 @@ pub fn run(args: QuantArgs) -> Result<()> {
     let timings_enabled = args.timings || std::env::var_os("KALLISTORS_TIMINGS").is_some();
     kallistors::timing::set_enabled(timings_enabled);
     kallistors::timing::reset();
+    // Whole-command boundaries complement the nested/overlapping diagnostic timers.
+    // The benchmark harness timestamps these flushed stderr markers externally.
+    let mark_phase = |phase: &str| {
+        if timings_enabled {
+            eprintln!("[quant-stage] {phase}");
+        }
+    };
 
     let start_time = format_start_time();
     let strand_specific = if args.fr_stranded {
@@ -113,9 +121,11 @@ pub fn run(args: QuantArgs) -> Result<()> {
         kallisto_sparse_hits: args.kallisto_sparse_hits,
         bias: args.bias,
         max_bias: 1_000_000,
+        fragment_length_samples: args.fragment_length_samples,
         investigation: super::investigation_options_from_env(),
     };
 
+    mark_phase("index_begin");
     let index = super::build_mapping_index(
         &args.index,
         load_positional_info,
@@ -124,6 +134,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
         false,
     )
     .map_err(|err| anyhow!("pseudoalign failed: {err}"))?;
+    mark_phase("index_end");
 
     let mut reader1 = kallistors::io::open_fastq_reader(reads1)?;
     let mut reader2 = if let Some(reads2) = reads2 {
@@ -134,6 +145,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
 
     let start = Instant::now();
     let threads = args.threads.max(1);
+    mark_phase("reads_begin");
     let ec_counts = if let Some(reader2) = reader2.as_mut() {
         kallistors::pseudoalign::pseudoalign_paired_bifrost_with_options_threaded(
             &index,
@@ -156,6 +168,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
         .map_err(|err| anyhow!("pseudoalign failed: {err}"))?
     };
 
+    mark_phase("reads_end");
     let transcript_seqs = if args.bias {
         Some(kallistors::quant::load_transcript_sequences(
             args.transcripts.as_ref().unwrap(),
@@ -170,6 +183,14 @@ pub fn run(args: QuantArgs) -> Result<()> {
     } else {
         estimate_paired_fragment_lengths(&ec_counts).unwrap_or((200.0, 20.0))
     };
+    if !single && let Some(stats) = ec_counts.fragment_length_stats.as_ref() {
+        eprintln!(
+            "[quant] fragment length estimate: {} observations, mean {:.3}, sd {:.3}",
+            stats.count(),
+            mean_fragment_length,
+            fragment_length_sd
+        );
+    }
     let unique = kallistors::pseudoalign::unique_pseudoaligned_reads(&ec_counts);
     let kallistors::pseudoalign::EcCounts {
         ec_list,
@@ -193,6 +214,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
         strand_specific,
         ..kallistors::quant::QuantOptions::default()
     };
+    mark_phase("em_begin");
     let result = {
         let _em_timing = kallistors::timing::scoped(kallistors::timing::Stage::Em);
         kallistors::quant::em_quantify_with_fragment_histogram_threaded(
@@ -209,7 +231,9 @@ pub fn run(args: QuantArgs) -> Result<()> {
             args.threads,
         )?
     };
+    mark_phase("em_end");
 
+    let output_timing = kallistors::timing::scoped(kallistors::timing::Stage::QuantOutput);
     fs::create_dir_all(&args.out_dir)?;
     let abundance_path = args.out_dir.join("abundance.tsv");
     let run_info_path = args.out_dir.join("run_info.json");
@@ -218,59 +242,77 @@ pub fn run(args: QuantArgs) -> Result<()> {
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    kallistors::quant::write_abundance_tsv_from_parts(
-        &abundance_path,
-        &target_names,
-        &index.transcript_lengths,
-        &result,
-    )?;
-
-    let bootstrap_results = if args.bootstrap_samples == 0 {
-        Vec::new()
-    } else {
-        kallistors::quant::bootstrap_quantify(
-            &ec_input,
-            &result.eff_lengths,
-            args.bootstrap_samples,
-            args.seed,
-            quant_options,
-        )?
+    let write_tsv = || {
+        kallistors::quant::write_abundance_tsv_from_parts(
+            &abundance_path,
+            &target_names,
+            &index.transcript_lengths,
+            &result,
+        )
     };
 
-    if args.bootstrap_samples > 0 && args.plaintext {
-        for (idx, bootstrap) in bootstrap_results.iter().enumerate() {
-            let path = args.out_dir.join(format!("bs_abundance_{idx}.tsv"));
-            kallistors::quant::write_abundance_tsv_from_parts(
-                &path,
-                &target_names,
-                &index.transcript_lengths,
-                bootstrap,
+    let write_other_outputs = || -> Result<()> {
+        let bootstrap_results = if args.bootstrap_samples == 0 {
+            Vec::new()
+        } else {
+            kallistors::quant::bootstrap_quantify(
+                &ec_input,
+                &result.eff_lengths,
+                args.bootstrap_samples,
+                args.seed,
+                quant_options,
+            )?
+        };
+
+        if args.bootstrap_samples > 0 && args.plaintext {
+            for (idx, bootstrap) in bootstrap_results.iter().enumerate() {
+                let path = args.out_dir.join(format!("bs_abundance_{idx}.tsv"));
+                kallistors::quant::write_abundance_tsv_from_parts(
+                    &path,
+                    &target_names,
+                    &index.transcript_lengths,
+                    bootstrap,
+                )?;
+            }
+        }
+
+        if !args.plaintext {
+            let h5_path = args.out_dir.join("abundance.h5");
+            let bootstrap_counts = bootstrap_results
+                .iter()
+                .map(|res| res.est_counts.as_slice())
+                .collect::<Vec<_>>();
+            kallistors::quant::write_abundance_h5(
+                &h5_path,
+                kallistors::quant::H5QuantOutput {
+                    target_names: &target_names,
+                    target_lengths: &index.transcript_lengths,
+                    result: &result,
+                    bootstrap_est_counts: &bootstrap_counts,
+                    reads_processed,
+                    fragment_length_hist: fragment_length_hist.as_deref(),
+                    bias_observed: bias.as_ref().map(|counts| counts.counts.as_slice()),
+                    index_version: index.index_version,
+                    kallisto_version: &format!("kallistors {}", env!("CARGO_PKG_VERSION")),
+                    call: &std::env::args().collect::<Vec<_>>().join(" "),
+                    start_time: &start_time,
+                },
             )?;
         }
-    }
 
-    if !args.plaintext {
-        let h5_path = args.out_dir.join("abundance.h5");
-        let bootstrap_counts = bootstrap_results
-            .iter()
-            .map(|res| res.est_counts.as_slice())
-            .collect::<Vec<_>>();
-        kallistors::quant::write_abundance_h5(
-            &h5_path,
-            kallistors::quant::H5QuantOutput {
-                target_names: &target_names,
-                target_lengths: &index.transcript_lengths,
-                result: &result,
-                bootstrap_est_counts: &bootstrap_counts,
-                reads_processed,
-                fragment_length_hist: fragment_length_hist.as_deref(),
-                bias_observed: bias.as_ref().map(|counts| counts.counts.as_slice()),
-                index_version: index.index_version,
-                kallisto_version: &format!("kallistors {}", env!("CARGO_PKG_VERSION")),
-                call: &std::env::args().collect::<Vec<_>>().join(" "),
-                start_time: &start_time,
-            },
-        )?;
+        Ok(())
+    };
+    if args.threads > 1 && !args.plaintext {
+        std::thread::scope(|scope| -> Result<()> {
+            let tsv = scope.spawn(write_tsv);
+            let other = write_other_outputs();
+            tsv.join()
+                .map_err(|_| anyhow!("abundance TSV writer panicked"))??;
+            other
+        })?;
+    } else {
+        write_tsv()?;
+        write_other_outputs()?;
     }
 
     let p_pseudoaligned = percent(reads_aligned, reads_processed);
@@ -290,6 +332,8 @@ pub fn run(args: QuantArgs) -> Result<()> {
         call: std::env::args().collect::<Vec<_>>().join(" "),
     };
     run_info.write_json(&run_info_path)?;
+    drop(output_timing);
+    mark_phase("output_end");
 
     println!(
         "processed: {}, aligned: {}, ecs: {}, time: {:.2?}",

@@ -26,13 +26,13 @@ struct MphfCacheEntry {
 }
 
 pub(crate) struct MphfLookupCache {
-    entries: [MphfCacheEntry; 128],
+    entries: Vec<MphfCacheEntry>,
 }
 
 impl Default for MphfLookupCache {
     fn default() -> Self {
         Self {
-            entries: [MphfCacheEntry::default(); 128],
+            entries: vec![MphfCacheEntry::default(); 2048],
         }
     }
 }
@@ -87,19 +87,22 @@ impl BlockLookupCache {
 #[derive(Clone, Copy, Default)]
 struct MinimizerCandidateCacheEntry {
     key: u64,
-    count: u8,
-    state: u8,
-    values: [([u8; 8], usize); 8],
+    // Singletons use the canonical word's eight zero padding bits for a tag
+    // and a seven-bit position. Other words/positions are recomputed exactly.
+    // Zero = invalid; one = empty; 2..=8 = complete sparse tie list.
+    value: u64,
 }
 
 struct MinimizerCandidateCache {
     entries: Vec<MinimizerCandidateCacheEntry>,
+    ties: std::collections::HashMap<usize, Vec<([u8; 8], usize)>>,
 }
 
 impl MinimizerCandidateCache {
     fn new() -> Self {
         Self {
             entries: vec![MinimizerCandidateCacheEntry::default(); 1 << 16],
+            ties: std::collections::HashMap::new(),
         }
     }
 
@@ -109,33 +112,62 @@ impl MinimizerCandidateCache {
     }
 
     #[inline]
-    fn get(&self, key: u64) -> Option<&[([u8; 8], usize)]> {
-        let entry = &self.entries[self.slot(key)];
-        if entry.state != 0 && entry.key == key {
-            return Some(&entry.values[..entry.count as usize]);
+    fn get_into(&self, key: u64, out: &mut Vec<([u8; 8], usize)>) -> bool {
+        let slot = self.slot(key);
+        let entry = &self.entries[slot];
+        if entry.value == 0 || entry.key != key {
+            return false;
         }
-        None
+        if entry.value & 128 != 0 {
+            out.clear();
+            out.push((
+                (entry.value & !255).to_le_bytes(),
+                (entry.value & 127) as usize,
+            ));
+            true
+        } else if entry.value == 1 {
+            out.clear();
+            true
+        } else if let Some(ties) = self.ties.get(&slot) {
+            out.clear();
+            out.extend_from_slice(ties);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    fn get(&self, key: u64) -> Option<Vec<([u8; 8], usize)>> {
+        let mut out = Vec::new();
+        self.get_into(key, &mut out).then_some(out)
     }
 
     #[inline]
     fn put(&mut self, key: u64, values: &[([u8; 8], usize)]) {
-        // More ties than the inline capacity must be recomputed in full.
-        if values.len() > 8 {
-            let slot = self.slot(key);
-            self.entries[slot].state = 0;
-            return;
-        }
-        let mut entry = MinimizerCandidateCacheEntry {
-            key,
-            count: values.len().min(8) as u8,
-            state: 1,
-            values: [([0u8; 8], 0usize); 8],
-        };
-        for (dst, src) in entry.values.iter_mut().zip(values.iter().copied()) {
-            *dst = src;
-        }
         let slot = self.slot(key);
-        self.entries[slot] = entry;
+        let value = match values {
+            [] => 1,
+            [(bytes, position)] => {
+                let word = u64::from_le_bytes(*bytes);
+                if word & 255 != 0 || *position > 127 {
+                    self.entries[slot].value = 0;
+                    return;
+                }
+                word | 128 | *position as u64
+            }
+            ties if ties.len() <= 8 => {
+                let cached = self.ties.entry(slot).or_default();
+                cached.clear();
+                cached.extend_from_slice(ties);
+                ties.len() as u64
+            }
+            _ => {
+                self.entries[slot].value = 0;
+                return;
+            }
+        };
+        self.entries[slot] = MinimizerCandidateCacheEntry { key, value };
     }
 }
 
@@ -152,9 +184,12 @@ pub(crate) struct FastKmerMatch {
 #[derive(Clone, Copy, Default)]
 struct FastKmerMatchCacheEntry {
     key: u64,
-    value: FastKmerMatch,
+    unitig_id: u32,
+    start: u32,
+    block_idx: u32,
     flags: u8,
     state: u8,
+    match_bits: u8,
 }
 
 struct FastKmerMatchCache {
@@ -177,20 +212,46 @@ impl FastKmerMatchCache {
     fn get(&self, key: u64, flags: u8) -> Option<Option<FastKmerMatch>> {
         let entry = &self.entries[self.slot(key)];
         if entry.state != 0 && entry.key == key && entry.flags == flags {
-            return Some((entry.state == 1).then_some(entry.value));
+            return Some(if entry.state == 1 {
+                Some(FastKmerMatch {
+                    unitig_id: entry.unitig_id as usize,
+                    start: entry.start as usize,
+                    block_idx: entry.block_idx as usize,
+                    used_revcomp: entry.match_bits & 1 != 0,
+                    forward_strand: entry.match_bits & 2 != 0,
+                    matched_relaxed: entry.match_bits & 4 != 0,
+                })
+            } else {
+                None
+            });
         }
         None
     }
 
     #[inline]
     fn put(&mut self, key: u64, flags: u8, value: Option<FastKmerMatch>) {
-        let state = if value.is_some() { 1 } else { 2 };
         let slot = self.slot(key);
         let entry = &mut self.entries[slot];
         entry.key = key;
         entry.flags = flags;
-        entry.state = state;
-        entry.value = value.unwrap_or_default();
+        entry.state = 2;
+        if let Some(value) = value {
+            let (Ok(unitig_id), Ok(start), Ok(block_idx)) = (
+                u32::try_from(value.unitig_id),
+                u32::try_from(value.start),
+                u32::try_from(value.block_idx),
+            ) else {
+                entry.state = 0;
+                return;
+            };
+            entry.unitig_id = unitig_id;
+            entry.start = start;
+            entry.block_idx = block_idx;
+            entry.match_bits = u8::from(value.used_revcomp)
+                | (u8::from(value.forward_strand) << 1)
+                | (u8::from(value.matched_relaxed) << 2);
+            entry.state = 1;
+        }
     }
 }
 
@@ -328,7 +389,9 @@ fn mphf_lookup_cached(
     cache: &mut MphfLookupCache,
     min_bytes: &[u8; 8],
 ) -> Option<usize> {
-    let slot = usize::from(min_bytes[0] ^ min_bytes[7]) & (cache.entries.len() - 1);
+    // Canonical minimizers are left-aligned, so their low padding bits carry no entropy.
+    let word = u64::from_le_bytes(*min_bytes);
+    let slot = (word.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 53) as usize;
     let entry = &cache.entries[slot];
     if entry.state != 0 && entry.key == *min_bytes {
         return (entry.state == 1).then_some(entry.idx as usize);
@@ -364,16 +427,7 @@ pub(crate) fn minimizer_candidates_cached_into_with_code(
     cache_disabled: bool,
 ) -> bool {
     if !cache_disabled {
-        let hit = MINIMIZER_CANDIDATE_CACHE.with(|tl| {
-            let cache = tl.borrow();
-            if let Some(cached) = cache.get(fwd_code) {
-                out.clear();
-                out.extend_from_slice(cached);
-                true
-            } else {
-                false
-            }
-        });
+        let hit = MINIMIZER_CANDIDATE_CACHE.with(|tl| tl.borrow().get_into(fwd_code, out));
         if hit {
             return true;
         }
@@ -396,16 +450,57 @@ pub(crate) fn minimizer_bucket_has_overcrowded_marker(
     let Some(bucket_idx) = minimizer_bucket_idx(index, cache, min_bytes) else {
         return false;
     };
-    index
-        .minz_positions
-        .get(bucket_idx)
-        .iter()
-        .any(|&pos_id| (pos_id >> 32) as u32 == u32::MAX && (pos_id & 0x8000_0000) != 0)
+    index.minz_positions.get_with_overcrowded(bucket_idx).1
 }
 
 #[cfg(test)]
 mod cache_context_tests {
     use super::*;
+
+    #[test]
+    fn compact_match_entries_keep_all_bits_and_reject_wide_coordinates() {
+        assert_eq!(std::mem::size_of::<FastKmerMatchCacheEntry>(), 24);
+        let mut cache = FastKmerMatchCache::new();
+        for bits in 0..8u8 {
+            let value = FastKmerMatch {
+                unitig_id: u32::MAX as usize,
+                start: 71,
+                block_idx: 19,
+                used_revcomp: bits & 1 != 0,
+                forward_strand: bits & 2 != 0,
+                matched_relaxed: bits & 4 != 0,
+            };
+            cache.put(123, 7, Some(value));
+            let got = cache.get(123, 7).unwrap().unwrap();
+            assert_eq!(
+                (got.unitig_id, got.start, got.block_idx),
+                (value.unitig_id, value.start, value.block_idx)
+            );
+            assert_eq!(
+                (got.used_revcomp, got.forward_strand, got.matched_relaxed),
+                (
+                    value.used_revcomp,
+                    value.forward_strand,
+                    value.matched_relaxed
+                )
+            );
+            assert!(cache.get(123, 6).is_none());
+        }
+        cache.put(123, 7, None);
+        assert!(matches!(cache.get(123, 7), Some(None)));
+        if let Some(wide) = (u32::MAX as usize).checked_add(1) {
+            for which in 0..3 {
+                let mut value = FastKmerMatch::default();
+                match which {
+                    0 => value.unitig_id = wide,
+                    1 => value.start = wide,
+                    _ => value.block_idx = wide,
+                }
+                cache.put(123, 7, Some(value));
+                assert!(cache.get(123, 7).is_none());
+            }
+        }
+    }
 
     #[test]
     fn cache_entries_never_cross_index_or_encoding_context() {
@@ -419,9 +514,13 @@ mod cache_context_tests {
                 ..FastKmerMatch::default()
             }),
         );
-        MINIMIZER_CANDIDATE_CACHE.with(|cache| cache.borrow_mut().put(42, &[([1; 8], 3)]));
+        MINIMIZER_CANDIDATE_CACHE.with(|cache| cache.borrow_mut().put(42, &[([0; 8], 3)]));
         BLOCK_LOOKUP_CACHE.with(|cache| cache.borrow_mut().put(7, 3, 0, 0, 10));
         ensure_cache_context_key((100, 31, 23));
+        assert_eq!(
+            MINIMIZER_CANDIDATE_CACHE.with(|cache| cache.borrow().get(42)),
+            Some(vec![([0; 8], 3)])
+        );
         assert_eq!(
             read_fast_match_cache(42, 15).flatten().unwrap().unitig_id,
             7
@@ -437,11 +536,34 @@ mod cache_context_tests {
 
     #[test]
     fn candidate_cache_never_truncates_a_tie_list() {
+        assert_eq!(std::mem::size_of::<MinimizerCandidateCacheEntry>(), 16);
         let mut cache = MinimizerCandidateCache::new();
-        cache.put(42, &[([1; 8], 3); 8]);
+        for word in [0, 0x8000_0000_0000_0000u64, 0xffff_ffff_ffff_ff00] {
+            for position in [0, 1, 31, 127] {
+                cache.put(40, &[(word.to_le_bytes(), position)]);
+                assert_eq!(cache.get(40), Some(vec![(word.to_le_bytes(), position)]));
+            }
+        }
+        for (word, position) in [(0u64, 128), (1, 31), (255, 127), (0, usize::MAX)] {
+            cache.put(40, &[(word.to_le_bytes(), position)]);
+            assert!(cache.get(40).is_none());
+        }
+        cache.put(41, &[]);
+        assert_eq!(cache.get(41), Some(vec![]));
+        cache.put(42, &[([1; 8], usize::MAX); 8]);
         cache.put(42, &[([1; 8], 3); 9]);
         assert!(cache.get(42).is_none());
-        cache.put(43, &[([1; 8], 3); 8]);
-        assert_eq!(cache.get(43).unwrap().len(), 8);
+        cache.put(43, &[([1; 8], usize::MAX); 8]);
+        assert_eq!(cache.get(43), Some(vec![([1; 8], usize::MAX); 8]));
+        let single = (0x1234_5600u64.to_le_bytes(), 5);
+        cache.put(43, &[single]);
+        assert_eq!(cache.get(43), Some(vec![single]));
+        let collision = 43 | (1 << 16);
+        cache.put(collision, &[(0x6789_ab00u64.to_le_bytes(), 7)]);
+        assert!(cache.get(43).is_none());
+        assert_eq!(
+            cache.get(collision),
+            Some(vec![(0x6789_ab00u64.to_le_bytes(), 7)])
+        );
     }
 }

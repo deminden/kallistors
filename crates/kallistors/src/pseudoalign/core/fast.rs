@@ -27,13 +27,14 @@ fn match_kmer_at_pos_fast_uncached_precomputed(
     allow_rev: bool,
     diff: usize,
     min_candidates: &[([u8; 8], usize)],
+    first_positions: Option<&[u64]>,
     next_min_candidate: Option<([u8; 8], usize)>,
     cache: &mut MphfLookupCache,
     allow_relaxed: bool,
 ) -> Option<FastKmerMatch> {
     let use_revcomp = read_rev < read_fwd;
     let mut saw_overcrowded = false;
-    for (min_bytes, min_pos) in min_candidates.iter().copied() {
+    for (candidate_idx, (min_bytes, min_pos)) in min_candidates.iter().copied().enumerate() {
         let min_pos_fwd = if use_revcomp {
             diff.saturating_sub(min_pos)
         } else {
@@ -44,10 +45,17 @@ fn match_kmer_at_pos_fast_uncached_precomputed(
         } else {
             diff.saturating_sub(min_pos)
         };
-        let Some(bucket_idx) = minimizer_bucket_idx(index, cache, &min_bytes) else {
-            continue;
+        let positions = if candidate_idx == 0
+            && let Some(positions) = first_positions
+        {
+            positions
+        } else {
+            let Some(bucket_idx) = minimizer_bucket_idx(index, cache, &min_bytes) else {
+                continue;
+            };
+            index.minz_positions.get(bucket_idx)
         };
-        for &pos_id in index.minz_positions.get(bucket_idx) {
+        for &pos_id in positions {
             let unitig_id_raw = (pos_id >> 32) as u32;
             if unitig_id_raw == u32::MAX {
                 if (pos_id & 0x8000_0000) != 0 {
@@ -299,9 +307,27 @@ fn match_kmer_at_pos_fast_uncached_with_candidates(
     if min_candidates.is_empty() {
         return None;
     }
-    let needs_slow_path = min_candidates.iter().any(|(min_bytes, _)| {
-        *min_bytes == [0u8; 8] || minimizer_bucket_has_overcrowded_marker(index, cache, min_bytes)
-    });
+    // Keep the first probe alive through matching instead of consulting the same
+    // hash cache and decoding the same bucket a second time.
+    let first_positions = if let [(min_bytes, _)] = min_candidates
+        && *min_bytes != [0u8; 8]
+    {
+        Some(
+            minimizer_bucket_idx(index, cache, min_bytes).map_or((&[][..], false), |bucket| {
+                index.minz_positions.get_with_overcrowded(bucket)
+            }),
+        )
+    } else {
+        None
+    };
+    let needs_slow_path = if let Some((_, overcrowded)) = first_positions {
+        overcrowded
+    } else {
+        min_candidates.iter().any(|(min_bytes, _)| {
+            *min_bytes == [0u8; 8]
+                || minimizer_bucket_has_overcrowded_marker(index, cache, min_bytes)
+        })
+    };
     if needs_slow_path {
         let mut rev_buf = Vec::new();
         return match_kmer_at_pos(
@@ -338,6 +364,7 @@ fn match_kmer_at_pos_fast_uncached_with_candidates(
         allow_rev,
         diff,
         min_candidates,
+        first_positions.map(|(positions, _)| positions),
         None,
         cache,
         allow_relaxed,
@@ -351,8 +378,16 @@ fn match_kmer_at_pos_fast_uncached_with_candidates(
             .iter()
             .any(|&(min_bytes, min_pos)| min_bytes == tail_bytes && min_pos == tail_pos)
     {
+        let tail_positions = if tail_bytes == [0u8; 8] {
+            &[][..]
+        } else {
+            minimizer_bucket_idx(index, cache, &tail_bytes)
+                .map_or(&[][..], |bucket| index.minz_positions.get(bucket))
+        };
         if tail_bytes == [0u8; 8]
-            || minimizer_bucket_has_overcrowded_marker(index, cache, &tail_bytes)
+            || tail_positions
+                .iter()
+                .any(|&pos_id| (pos_id >> 32) as u32 == u32::MAX && (pos_id & 0x8000_0000) != 0)
         {
             let mut rev_buf = Vec::new();
             return match_kmer_at_pos(
@@ -390,6 +425,7 @@ fn match_kmer_at_pos_fast_uncached_with_candidates(
             allow_rev,
             diff,
             &tail_candidate,
+            Some(tail_positions),
             None,
             cache,
             allow_relaxed,

@@ -1,14 +1,16 @@
-# kallisto index format notes (from kallisto_src)
+# kallisto v13 index format
 
-Sources consulted:
-- `kallisto_src/src/KmerIndex.cpp`
-- `kallisto_src/src/KmerIndex.h`
-- `kallisto_src/ext/bifrost/src/IO.tcc`
-- `kallisto_src/ext/bifrost/src/Kmer.hpp`
+Source files in original kallisto v0.52.0:
+
+- `src/KmerIndex.cpp`
+- `src/KmerIndex.h`
+- `ext/bifrost/src/IO.tcc`
+- `ext/bifrost/src/Kmer.hpp`
 
 ## High-level layout (index built via `kallisto index`)
 
 The index is written in two stages:
+
 1) `KmerIndex::BuildDeBruijnGraph(...)` writes the header + dBG + MPHFs.
 2) `KmerIndex::write(std::ofstream&)` appends node data and transcript metadata.
 
@@ -36,6 +38,7 @@ Observed binary layout (little-endian on x86_64):
 ## Extracting k-mer length
 
 `CompactedDBG::readBinaryGraph` reads a small graph header:
+
 - `size_t file_format_version`
 - `int rk` (k-mer length)
 - `int rg` (minimizer length)
@@ -45,6 +48,7 @@ This header is at the beginning of the `dbg_size` bytes.
 ## Kmer binary size
 
 `Kmer` uses `MAX_KMER_SIZE` (default 32). Storage is `MAX_K/4` bytes, so:
+
 - default `Kmer` binary size = 32/4 = 8 bytes
 
 If kallisto is compiled with a different `MAX_KMER_SIZE`, the d-list entry size and minimizer MPHF
@@ -64,5 +68,4 @@ supported.
 - Generated indexes are intended to be format-compatible and quant-equivalent, not byte-identical
   to upstream `kallisto index` output.
 - Amino-acid BUS indexes are supported with `index --aa`; distinguish mode, d-list-specific
-  indexes, H5/bootstrap concerns, and nonstandard upstream compile-time layouts remain outside the
-  current builder surface.
+  indexes and nonstandard upstream compile-time layouts remain outside the current builder surface.

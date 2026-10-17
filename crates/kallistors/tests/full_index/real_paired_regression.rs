@@ -8,19 +8,14 @@ use kallistors::pseudoalign::{
     unique_pseudoaligned_reads,
 };
 
-const READS1: &[u8] = include_bytes!("fixtures/paired_backoff_regression_1.fixture");
-const READS2: &[u8] = include_bytes!("fixtures/paired_backoff_regression_2.fixture");
-const RUN_ENV: &str = "KALLISTORS_RUN_REAL_PAIRED_REGRESSION";
+const READS1: &[u8] = include_bytes!("../fixtures/paired_backoff_regression_1.fixture");
+const READS2: &[u8] = include_bytes!("../fixtures/paired_backoff_regression_2.fixture");
 
 #[test]
+#[ignore = "requires the downloaded GENCODE v50 full index"]
 fn paired_backoff_regression_reads_keep_kallisto_counts() {
-    if std::env::var_os(RUN_ENV).is_none() {
-        return;
-    }
-    let index_path = workspace_root().join("data/gencode.v49_kallisto.idx");
-    if !index_path.exists() {
-        return;
-    }
+    let index_path = workspace_root().join("data/srr-small/gencode.v50.kallisto.idx");
+    assert!(index_path.is_file(), "prepare the GENCODE v50 index first");
     let index = build_bifrost_index_with_positions_threaded(&index_path, false, 2)
         .expect("load gencode index");
 
@@ -54,6 +49,16 @@ fn assert_regression_counts(counts: &kallistors::pseudoalign::EcCounts) {
     assert_eq!(counts.reads_processed, 2);
     assert_eq!(counts.reads_aligned, 1);
     assert_eq!(unique_pseudoaligned_reads(counts), 0);
+    assert_eq!(counts.counts, [1]);
+    assert_eq!(
+        counts.ec_list,
+        [vec![
+            240838, 240839, 240840, 240841, 240844, 240845, 240846, 240847, 240851, 240855, 240856,
+            240857, 240858, 240860, 240861, 240862, 240864, 240865, 240866, 240869, 240870, 240871,
+            240872, 240873, 240874, 240875, 240876, 240877, 240878, 240879, 240881, 240882, 240883,
+            240884, 240885, 240886, 240887, 240888, 240889, 240890, 240891
+        ]]
+    );
 }
 
 fn workspace_root() -> PathBuf {

@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const STAGE_COUNT: usize = 8;
+const STAGE_COUNT: usize = 9;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Stage {
@@ -14,6 +14,7 @@ pub enum Stage {
     Pseudoalign = 5,
     EcMerge = 6,
     Em = 7,
+    QuantOutput = 8,
 }
 
 impl Stage {
@@ -26,6 +27,7 @@ impl Stage {
         Stage::Pseudoalign,
         Stage::EcMerge,
         Stage::Em,
+        Stage::QuantOutput,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -38,6 +40,7 @@ impl Stage {
             Stage::Pseudoalign => "pseudoalign",
             Stage::EcMerge => "ec_merge",
             Stage::Em => "em",
+            Stage::QuantOutput => "quant_output",
         }
     }
 }

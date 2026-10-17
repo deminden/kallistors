@@ -1,26 +1,27 @@
 //! Quantification routines (EM over ECs with optional sequence bias).
 
 use core::range::Range;
-use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::bias::{BiasCounts, hexamer_to_int, update_hexamer};
 use crate::ec::EcList;
-use crate::index::Index;
 use crate::pseudoalign::StrandSpecific;
 use crate::{Error, Result};
-use hdf5_pure::{CharacterSet, DatasetBuilder, Datatype, FileBuilder, StringPadding};
 use rayon::prelude::*;
+
+mod output;
+pub use output::{
+    H5QuantOutput, RunInfo, write_abundance_h5, write_abundance_tsv, write_abundance_tsv_from_parts,
+};
 
 const MIN_ALPHA: f64 = 1e-8;
 const ALPHA_LIMIT: f64 = 1e-7;
 const ALPHA_CHANGE_LIMIT: f64 = 1e-2;
 const ALPHA_CHANGE: f64 = 1e-2;
 const TOLERANCE: f64 = f64::from_bits(1);
-const KALLISTO_BIAS_LEN: usize = 4096;
 
 struct EmMultiEc {
     transcript_range: Range<usize>,
@@ -35,17 +36,113 @@ struct EmWork {
     multi_weights: Vec<f64>,
 }
 
+impl EmWork {
+    fn compact_transcript_ids(&mut self) {
+        let mut dense_ids = vec![0usize; self.singleton_alpha.len()];
+        let mut singleton_alpha = Vec::with_capacity(self.active_transcripts.len());
+        for (dense, &original) in self.active_transcripts.iter().enumerate() {
+            dense_ids[original] = dense;
+            singleton_alpha.push(self.singleton_alpha[original]);
+        }
+        for tr in &mut self.multi_transcripts {
+            *tr = dense_ids[*tr];
+        }
+        self.singleton_alpha = singleton_alpha;
+    }
+}
+
+enum IncomingEcIds {
+    Compact(Vec<u32>),
+    Wide(Vec<usize>),
+}
+
+impl IncomingEcIds {
+    fn new(edges: usize, ecs: usize) -> Self {
+        if ecs <= u32::MAX as usize {
+            Self::Compact(vec![0; edges])
+        } else {
+            Self::Wide(vec![0; edges])
+        }
+    }
+
+    fn set(&mut self, slot: usize, ec: usize) {
+        match self {
+            Self::Compact(ids) => ids[slot] = ec as u32,
+            Self::Wide(ids) => ids[slot] = ec,
+        }
+    }
+}
+
+trait IncomingEcId: Copy {
+    fn as_usize(self) -> usize;
+}
+
+impl IncomingEcId for u32 {
+    #[inline]
+    fn as_usize(self) -> usize {
+        self as usize
+    }
+}
+
+impl IncomingEcId for usize {
+    #[inline]
+    fn as_usize(self) -> usize {
+        self
+    }
+}
+
+#[inline]
+fn weighted_alpha_sum<I: IncomingEcId>(ids: &[I], weights: &[f64], alpha: &[f64]) -> f64 {
+    let mut sum = 0.0;
+    for (&tr, &weight) in ids.iter().zip(weights) {
+        sum += alpha[tr.as_usize()] * weight;
+    }
+    sum
+}
+
+struct EcScales {
+    values: Vec<f64>,
+    present: Vec<u8>,
+}
+
+impl EcScales {
+    fn new(len: usize) -> Self {
+        Self {
+            values: vec![0.0; len],
+            present: vec![0; len],
+        }
+    }
+}
+
+#[inline]
+fn sum_scaled_edges<I: IncomingEcId>(
+    ids: &[I],
+    weights: &[f64],
+    scales: &EcScales,
+    singleton: f64,
+    alpha: f64,
+) -> f64 {
+    let mut sum = singleton;
+    for (&ec, &weight) in ids.iter().zip(weights) {
+        let ec = ec.as_usize();
+        if scales.present[ec] != 0 {
+            sum += weight * alpha * scales.values[ec];
+        }
+    }
+    sum
+}
+
 // Each transcript's incoming edges retain their original EC/edge order.
 // Independent transcript sums can then run concurrently without reordering f64 additions.
 struct EmIncoming {
     offsets: Vec<usize>,
     edge_indices: Vec<usize>,
-    ec_indices: Vec<usize>,
+    ec_indices: IncomingEcIds,
     weights: Vec<f64>,
 }
 
 impl EmIncoming {
-    fn new(work: &EmWork) -> Self {
+    fn new(work: &EmWork, track_edges: bool) -> Self {
         let mut offsets = vec![0; work.singleton_alpha.len() + 1];
         for &tr in &work.multi_transcripts {
             offsets[tr + 1] += 1;
@@ -57,8 +154,12 @@ impl EmIncoming {
         let edges = work.multi_transcripts.len();
         let mut incoming = Self {
             offsets,
-            edge_indices: vec![0; edges],
-            ec_indices: vec![0; edges],
+            edge_indices: if track_edges {
+                vec![0; edges]
+            } else {
+                Vec::new()
+            },
+            ec_indices: IncomingEcIds::new(edges, work.multi_ecs.len()),
             weights: vec![0.0; edges],
         };
         for (ec_id, ec) in work.multi_ecs.iter().enumerate() {
@@ -66,12 +167,28 @@ impl EmIncoming {
                 let tr = work.multi_transcripts[edge];
                 let slot = cursors[tr];
                 cursors[tr] += 1;
-                incoming.edge_indices[slot] = edge;
-                incoming.ec_indices[slot] = ec_id;
+                if track_edges {
+                    incoming.edge_indices[slot] = edge;
+                }
+                incoming.ec_indices.set(slot, ec_id);
                 incoming.weights[slot] = work.multi_weights[edge];
             }
         }
         incoming
+    }
+
+    #[inline]
+    fn transcript_sum(&self, tr: usize, singleton: f64, alpha: f64, scales: &EcScales) -> f64 {
+        let range = self.offsets[tr]..self.offsets[tr + 1];
+        let weights = &self.weights[range.clone()];
+        match &self.ec_indices {
+            IncomingEcIds::Compact(ids) => {
+                sum_scaled_edges(&ids[range], weights, scales, singleton, alpha)
+            }
+            IncomingEcIds::Wide(ids) => {
+                sum_scaled_edges(&ids[range], weights, scales, singleton, alpha)
+            }
+        }
     }
 
     fn refresh_weights(&mut self, work: &EmWork) {
@@ -109,248 +226,6 @@ pub struct QuantResult {
     pub tpm: Vec<f64>,
     pub eff_lengths: Vec<f64>,
     pub post_bias: Option<Vec<f64>>,
-}
-
-pub struct H5QuantOutput<'a> {
-    pub target_names: &'a [&'a str],
-    pub target_lengths: &'a [u32],
-    pub result: &'a QuantResult,
-    pub bootstrap_est_counts: &'a [&'a [f64]],
-    pub reads_processed: u64,
-    pub fragment_length_hist: Option<&'a [u32]>,
-    pub bias_observed: Option<&'a [u32]>,
-    pub index_version: u64,
-    pub kallisto_version: &'a str,
-    pub call: &'a str,
-    pub start_time: &'a str,
-}
-
-/// Run metadata matching kallisto's `run_info.json` fields.
-pub struct RunInfo {
-    pub n_targets: usize,
-    pub n_bootstraps: usize,
-    pub n_processed: u64,
-    pub n_pseudoaligned: u64,
-    pub n_unique: u64,
-    pub p_pseudoaligned: f64,
-    pub p_unique: f64,
-    pub kallisto_version: String,
-    pub index_version: u64,
-    pub kmer_length: u32,
-    pub start_time: String,
-    pub call: String,
-}
-
-impl RunInfo {
-    pub fn write_json(&self, path: &Path) -> Result<()> {
-        let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
-        let entries = vec![
-            ("n_targets", self.n_targets.to_json()),
-            ("n_bootstraps", self.n_bootstraps.to_json()),
-            ("n_processed", self.n_processed.to_json()),
-            ("n_pseudoaligned", self.n_pseudoaligned.to_json()),
-            ("n_unique", self.n_unique.to_json()),
-            ("p_pseudoaligned", format!("{:.1}", self.p_pseudoaligned)),
-            ("p_unique", format!("{:.1}", self.p_unique)),
-            ("kallisto_version", self.kallisto_version.to_json()),
-            ("index_version", self.index_version.to_json()),
-            ("k-mer length", self.kmer_length.to_json()),
-            ("start_time", self.start_time.to_json()),
-            ("call", self.call.to_json()),
-        ];
-        writeln!(writer, "{{")?;
-        for (idx, (key, value)) in entries.iter().enumerate() {
-            let sep = if idx + 1 == entries.len() { "" } else { "," };
-            writeln!(writer, "\"{}\": {}{}", escape_json(key), value, sep)?;
-        }
-        writeln!(writer, "}}")?;
-        Ok(())
-    }
-}
-
-/// Write kallisto-compatible `abundance.tsv`.
-pub fn write_abundance_tsv(path: &Path, index: &Index, result: &QuantResult) -> Result<()> {
-    let names = index
-        .transcripts
-        .iter()
-        .map(|tr| tr.name.as_str())
-        .collect::<Vec<_>>();
-    let lengths = index
-        .transcripts
-        .iter()
-        .map(|tr| tr.length)
-        .collect::<Vec<_>>();
-    write_abundance_tsv_from_parts(path, &names, &lengths, result)
-}
-
-/// Write kallisto-compatible `abundance.tsv` from already loaded transcript metadata.
-pub fn write_abundance_tsv_from_parts(
-    path: &Path,
-    target_names: &[&str],
-    target_lengths: &[u32],
-    result: &QuantResult,
-) -> Result<()> {
-    let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
-    writeln!(writer, "target_id\tlength\teff_length\test_counts\ttpm")?;
-    for (i, name) in target_names.iter().enumerate() {
-        let length = target_lengths.get(i).copied().unwrap_or(0);
-        let eff_len = result.eff_lengths.get(i).copied().unwrap_or(0.0);
-        let est = result.est_counts.get(i).copied().unwrap_or(0.0);
-        let tpm = result.tpm.get(i).copied().unwrap_or(0.0);
-        writeln!(
-            writer,
-            "{}\t{}\t{}\t{}\t{}",
-            name, length, eff_len, est, tpm
-        )?;
-    }
-    Ok(())
-}
-
-pub fn write_abundance_h5(path: &Path, output: H5QuantOutput<'_>) -> Result<()> {
-    let mut file = FileBuilder::new();
-    let mut aux = file.create_group("aux");
-
-    write_h5_f64(file.create_dataset("est_counts"), &output.result.est_counts);
-    write_h5_i32(
-        aux.create_dataset("num_bootstrap"),
-        &[
-            i32::try_from(output.bootstrap_est_counts.len()).map_err(|_| {
-                Error::InvalidFormat("too many bootstrap samples for HDF5 output".into())
-            })?,
-        ],
-    );
-    write_h5_i32(
-        aux.create_dataset("num_processed"),
-        &[i32::try_from(output.reads_processed).map_err(|_| {
-            Error::InvalidFormat("n_processed exceeds kallisto-compatible HDF5 range".into())
-        })?],
-    );
-    write_h5_i32(
-        aux.create_dataset("fld"),
-        &output
-            .fragment_length_hist
-            .map(u32_slice_to_i32)
-            .transpose()?
-            .unwrap_or_default(),
-    );
-    let bias_observed = match output.bias_observed {
-        Some(values) => Cow::Owned(u32_slice_to_i32(values)?),
-        None => Cow::Owned(vec![1; KALLISTO_BIAS_LEN]),
-    };
-    write_h5_i32(aux.create_dataset("bias_observed"), &bias_observed);
-
-    let bias_normalized = match output.result.post_bias.as_deref() {
-        Some(values) => Cow::Borrowed(values),
-        None => Cow::Owned(vec![1.0; KALLISTO_BIAS_LEN]),
-    };
-    write_h5_f64(aux.create_dataset("bias_normalized"), &bias_normalized);
-    write_h5_string_vec(
-        aux.create_dataset("kallisto_version"),
-        &[output.kallisto_version],
-    );
-    write_h5_i32(
-        aux.create_dataset("index_version"),
-        &[i32::try_from(output.index_version).map_err(|_| {
-            Error::InvalidFormat("index version exceeds kallisto-compatible HDF5 range".into())
-        })?],
-    );
-    write_h5_string_vec(aux.create_dataset("call"), &[output.call]);
-    write_h5_string_vec(aux.create_dataset("start_time"), &[output.start_time]);
-    write_h5_string_vec(aux.create_dataset("ids"), output.target_names);
-    write_h5_f64(
-        aux.create_dataset("eff_lengths"),
-        &output.result.eff_lengths,
-    );
-    write_h5_i32(
-        aux.create_dataset("lengths"),
-        &u32_slice_to_i32(output.target_lengths)?,
-    );
-    file.add_group(aux.finish());
-
-    if !output.bootstrap_est_counts.is_empty() {
-        let mut bootstrap = file.create_group("bootstrap");
-        for (idx, counts) in output.bootstrap_est_counts.iter().enumerate() {
-            write_h5_f64(bootstrap.create_dataset(&format!("bs{idx}")), counts);
-        }
-        file.add_group(bootstrap.finish());
-    }
-
-    let bytes = file.finish().map_err(h5_error)?;
-    fs::write(path, bytes)?;
-    Ok(())
-}
-
-fn write_h5_f64(dataset: &mut DatasetBuilder, values: &[f64]) {
-    dataset
-        .with_f64_data(values)
-        .with_shape(&[values.len() as u64]);
-    set_h5_chunking(dataset, values.len());
-}
-
-fn write_h5_i32(dataset: &mut DatasetBuilder, values: &[i32]) {
-    dataset
-        .with_i32_data(values)
-        .with_shape(&[values.len() as u64]);
-    set_h5_chunking(dataset, values.len());
-}
-
-fn write_h5_string_vec(dataset: &mut DatasetBuilder, values: &[&str]) {
-    let width = values
-        .iter()
-        .map(|value| value.len())
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1)
-        .max(1);
-    dataset
-        .with_compound_data(
-            fixed_ascii_type(width),
-            fixed_string_bytes(values, width),
-            values.len() as u64,
-        )
-        .with_shape(&[values.len() as u64]);
-    set_h5_chunking(dataset, values.len());
-}
-
-fn set_h5_chunking(dataset: &mut DatasetBuilder, len: usize) {
-    if len > 0 {
-        dataset.with_chunks(&[len as u64]).with_deflate(6);
-    }
-}
-
-fn fixed_ascii_type(width: usize) -> Datatype {
-    Datatype::String {
-        size: width as u32,
-        padding: StringPadding::NullTerminate,
-        charset: CharacterSet::Ascii,
-    }
-}
-
-fn fixed_string_bytes(values: &[&str], width: usize) -> Vec<u8> {
-    let mut out = vec![0u8; values.len() * width];
-    for (row, value) in values.iter().enumerate() {
-        let start = row * width;
-        let bytes = value.as_bytes();
-        out[start..start + bytes.len()].copy_from_slice(bytes);
-    }
-    out
-}
-
-fn u32_slice_to_i32(values: &[u32]) -> Result<Vec<i32>> {
-    values
-        .iter()
-        .map(|&value| {
-            i32::try_from(value).map_err(|_| {
-                Error::InvalidFormat("value exceeds kallisto-compatible HDF5 range".into())
-            })
-        })
-        .collect()
-}
-
-fn h5_error(err: hdf5_pure::Error) -> Error {
-    Error::InvalidFormat(format!("HDF5 output failed: {err}"))
 }
 
 pub struct EcCountsInput {
@@ -416,69 +291,6 @@ pub fn load_ec_counts(path: &Path) -> Result<EcCountsInput> {
         ec_list: EcList { classes },
         counts,
     })
-}
-
-trait JsonValue {
-    fn to_json(&self) -> String;
-}
-
-impl JsonValue for usize {
-    fn to_json(&self) -> String {
-        self.to_string()
-    }
-}
-
-impl JsonValue for u64 {
-    fn to_json(&self) -> String {
-        self.to_string()
-    }
-}
-
-impl JsonValue for u32 {
-    fn to_json(&self) -> String {
-        self.to_string()
-    }
-}
-
-impl JsonValue for f64 {
-    fn to_json(&self) -> String {
-        if self.is_finite() {
-            self.to_string()
-        } else {
-            "0".to_string()
-        }
-    }
-}
-
-impl JsonValue for bool {
-    fn to_json(&self) -> String {
-        self.to_string()
-    }
-}
-
-impl JsonValue for String {
-    fn to_json(&self) -> String {
-        format!("\"{}\"", escape_json(self))
-    }
-}
-
-fn escape_json(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => {
-                out.push_str("\\u");
-                out.push_str(&format!("{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 pub fn load_transcript_sequences(fasta: &Path, names: &[String]) -> Result<Vec<Vec<u8>>> {
@@ -601,13 +413,34 @@ pub fn em_quantify_with_fragment_histogram_threaded(
     } else {
         None
     };
-    let mut incoming = em_pool.as_ref().map(|_| EmIncoming::new(&em_work));
-    let mut scales = if em_pool.is_some() {
-        vec![None; em_work.multi_ecs.len()]
+    let compact = em_pool.is_some() && !options.bias && options.max_iter != 0;
+    if compact {
+        em_work.compact_transcript_ids();
+        alpha.truncate(em_work.active_transcripts.len());
+        // Compact updates use only their own previous alpha after the denominator barrier.
+        next_alpha = Vec::new();
+    }
+    let mut incoming = em_pool
+        .as_ref()
+        .map(|_| EmIncoming::new(&em_work, options.bias));
+    let compact_transcripts: Option<Vec<u32>> =
+        if compact && em_work.active_transcripts.len() <= u32::MAX as usize {
+            let ids = em_work
+                .multi_transcripts
+                .iter()
+                .map(|&tr| tr as u32)
+                .collect();
+            em_work.multi_transcripts = Vec::new();
+            Some(ids)
+        } else {
+            None
+        };
+    let mut scales = EcScales::new(if em_pool.is_some() {
+        em_work.multi_ecs.len()
     } else {
-        Vec::new()
-    };
-    let mut next_active = if em_pool.is_some() {
+        0
+    });
+    let mut next_active = if em_pool.is_some() && !compact {
         vec![0.0; em_work.active_transcripts.len()]
     } else {
         Vec::new()
@@ -635,46 +468,73 @@ pub fn em_quantify_with_fragment_histogram_threaded(
             }
         }
 
+        let mut parallel_changes = None;
         if let (Some(pool), Some(incoming)) = (&em_pool, &incoming) {
             pool.install(|| {
                 scales
+                    .values
                     .par_iter_mut()
+                    .zip(&mut scales.present)
                     .zip(&em_work.multi_ecs)
-                    .for_each(|(scale, ec)| {
-                        let transcripts = &em_work.multi_transcripts[ec.transcript_range];
+                    .for_each(|((scale, present), ec)| {
                         let weights = &em_work.multi_weights[ec.transcript_range];
-                        let mut denom = 0.0;
-                        for (&tr, &weight) in transcripts.iter().zip(weights) {
-                            denom += alpha[tr] * weight;
-                        }
-                        *scale = if denom < TOLERANCE {
-                            None
-                        } else {
-                            Some(ec.count / denom)
-                        };
-                    });
-            });
-            pool.install(|| {
-                next_active
-                    .par_iter_mut()
-                    .zip(&em_work.active_transcripts)
-                    .for_each(|(next, &tr)| {
-                        let mut sum = em_work.singleton_alpha[tr];
-                        let a = alpha[tr];
-                        let range = incoming.offsets[tr]..incoming.offsets[tr + 1];
-                        for (&ec, &weight) in incoming.ec_indices[range.clone()]
-                            .iter()
-                            .zip(&incoming.weights[range])
-                        {
-                            if let Some(scale) = scales[ec] {
-                                sum += weight * a * scale;
+                        let denom = match &compact_transcripts {
+                            Some(ids) => {
+                                weighted_alpha_sum(&ids[ec.transcript_range], weights, &alpha)
                             }
+                            None => weighted_alpha_sum(
+                                &em_work.multi_transcripts[ec.transcript_range],
+                                weights,
+                                &alpha,
+                            ),
+                        };
+                        if denom < TOLERANCE {
+                            *present = 0;
+                            *scale = 0.0;
+                        } else {
+                            *present = 1;
+                            *scale = ec.count / denom;
                         }
-                        *next = sum;
                     });
             });
-            for (&tr, &next) in em_work.active_transcripts.iter().zip(&next_active) {
-                next_alpha[tr] = next;
+            if compact {
+                parallel_changes = Some(pool.install(|| {
+                    alpha
+                        .par_iter_mut()
+                        .enumerate()
+                        .map(|(tr, value)| {
+                            let old = *value;
+                            let next = incoming.transcript_sum(
+                                tr,
+                                em_work.singleton_alpha[tr],
+                                old,
+                                &scales,
+                            );
+                            *value = next;
+                            usize::from(
+                                next > ALPHA_CHANGE_LIMIT
+                                    && (next - old).abs() / next > ALPHA_CHANGE,
+                            )
+                        })
+                        .sum::<usize>()
+                }));
+            } else {
+                pool.install(|| {
+                    next_active
+                        .par_iter_mut()
+                        .zip(&em_work.active_transcripts)
+                        .for_each(|(next, &tr)| {
+                            *next = incoming.transcript_sum(
+                                tr,
+                                em_work.singleton_alpha[tr],
+                                alpha[tr],
+                                &scales,
+                            );
+                        });
+                });
+                for (&tr, &next) in em_work.active_transcripts.iter().zip(&next_active) {
+                    next_alpha[tr] = next;
+                }
             }
         } else {
             for &tr in &em_work.active_transcripts {
@@ -697,21 +557,25 @@ pub fn em_quantify_with_fragment_histogram_threaded(
             }
         }
 
-        let mut chcount = 0;
-        for &i in &em_work.active_transcripts {
-            if next_alpha[i] > ALPHA_CHANGE_LIMIT {
-                let rel = (next_alpha[i] - alpha[i]).abs() / next_alpha[i];
-                if rel > ALPHA_CHANGE {
-                    chcount += 1;
+        let chcount = if let Some(changes) = parallel_changes {
+            changes
+        } else {
+            let mut changes = 0;
+            for &i in &em_work.active_transcripts {
+                if next_alpha[i] > ALPHA_CHANGE_LIMIT {
+                    let rel = (next_alpha[i] - alpha[i]).abs() / next_alpha[i];
+                    if rel > ALPHA_CHANGE {
+                        changes += 1;
+                    }
                 }
+                alpha[i] = next_alpha[i];
             }
-            alpha[i] = next_alpha[i];
-        }
-        if iter == 0 {
-            // Unobserved transcripts start with the same uniform prior, but become
-            // zero after the first update and need no further convergence work.
-            alpha.copy_from_slice(&next_alpha);
-        }
+            if iter == 0 {
+                // Unobserved targets become zero after their uniform initial prior.
+                alpha.copy_from_slice(&next_alpha);
+            }
+            changes
+        };
 
         let stop_em = chcount == 0 && iter > options.min_rounds;
         if final_round {
@@ -725,6 +589,14 @@ pub fn em_quantify_with_fragment_histogram_threaded(
                 }
             }
         }
+    }
+
+    if compact {
+        let mut full_alpha = vec![0.0; num_trans];
+        for (&original, &value) in em_work.active_transcripts.iter().zip(&alpha) {
+            full_alpha[original] = value;
+        }
+        alpha = full_alpha;
     }
 
     let mut rates = Vec::with_capacity(num_trans);
@@ -1205,4 +1077,76 @@ fn update_eff_lens(
     }
 
     (bias_lens, dbias5)
+}
+
+#[cfg(test)]
+mod incoming_id_tests {
+    use super::*;
+
+    #[test]
+    fn compact_and_wide_incoming_ids_preserve_skip_and_sum_order() {
+        let ids32 = [0u32, 1, 2];
+        let ids64 = [0usize, 1, 2];
+        let mut weights = [2.0, 4.0, 6.0];
+        let mut scales = EcScales {
+            values: vec![0.5, 0.0, 2.0],
+            present: vec![1, 0, 1],
+        };
+        assert_eq!(sum_scaled_edges(&ids32, &weights, &scales, 1.0, 2.0), 27.0);
+        assert_eq!(
+            sum_scaled_edges(&ids32, &weights, &scales, 1.0, 2.0),
+            sum_scaled_edges(&ids64, &weights, &scales, 1.0, 2.0)
+        );
+        weights[2] = f64::INFINITY;
+        scales.present[2] = 0;
+        assert_eq!(sum_scaled_edges(&ids32, &weights, &scales, 1.0, 0.0), 1.0);
+        assert_eq!(sum_scaled_edges(&ids64, &weights, &scales, 1.0, 0.0), 1.0);
+        scales.present[2] = 1;
+        scales.values[2] = 1.0;
+        assert!(sum_scaled_edges(&ids32, &weights, &scales, 1.0, 0.0).is_nan());
+        assert!(sum_scaled_edges(&ids64, &weights, &scales, 1.0, 0.0).is_nan());
+        assert!(matches!(
+            IncomingEcIds::new(3, 3),
+            IncomingEcIds::Compact(_)
+        ));
+        if let Some(wide_ecs) = (u32::MAX as usize).checked_add(1) {
+            assert!(matches!(
+                IncomingEcIds::new(3, wide_ecs),
+                IncomingEcIds::Wide(_)
+            ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod scale_presence_tests {
+    use super::*;
+
+    #[test]
+    fn split_scales_preserve_skip_and_exceptional_values() {
+        let options = [
+            None,
+            Some(0.0),
+            Some(2.0),
+            Some(f64::INFINITY),
+            Some(f64::NAN),
+        ];
+        for alpha in [0.0, 1.0, f64::INFINITY, f64::NAN] {
+            for selected in 0..options.len() {
+                let mut scales = EcScales::new(options.len());
+                for (i, value) in options.iter().enumerate() {
+                    scales.present[i] = u8::from(value.is_some());
+                    scales.values[i] = value.unwrap_or(f64::NAN);
+                }
+                let mut expected = 7.0;
+                if let Some(scale) = options[selected] {
+                    expected += 0.5 * alpha * scale;
+                }
+                let result = sum_scaled_edges(&[selected as u32], &[0.5], &scales, 7.0, alpha);
+                assert!(
+                    result.to_bits() == expected.to_bits() || result.is_nan() && expected.is_nan()
+                );
+            }
+        }
+    }
 }

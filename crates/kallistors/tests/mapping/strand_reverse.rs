@@ -1,3 +1,4 @@
+use crate::helpers::revcomp;
 use std::io::Cursor;
 
 use kallistors::io::FastqReader;
@@ -5,40 +6,34 @@ use kallistors::pseudoalign::{
     Strand, build_bifrost_index, pseudoalign_single_end_bifrost_with_strand,
 };
 
-mod helpers;
-
-fn revcomp(seq: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(seq.len());
-    for &b in seq.iter().rev() {
-        out.push(match b {
-            b'A' | b'a' => b'T',
-            b'C' | b'c' => b'G',
-            b'G' | b'g' => b'C',
-            b'T' | b't' => b'A',
-            _ => b'N',
-        });
-    }
-    out
-}
+use crate::helpers;
 
 #[test]
 fn reverse_strand_aligns_only_with_revcomp() {
-    let dataset = match helpers::build_synthetic_index() {
-        Some(dataset) => dataset,
-        None => return,
-    };
+    let dataset = helpers::build_synthetic_index();
     let index = build_bifrost_index(&dataset.index_path).expect("index");
-    let transcripts = dataset.transcripts;
+    assert_eq!(index.transcript_names.len(), dataset.transcripts.len());
+    // Strand restricts lookup relative to stored unitigs. Their orientation is
+    // chosen by graph construction and need not match the input transcript.
+    let unitigs = index
+        .unitigs
+        .iter()
+        .chain(&index.km_unitigs)
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
     let read_len = index.k + 10;
     let mut read = None;
-    'outer: for seq in &transcripts {
+    'outer: for seq in &unitigs {
         if seq.len() < read_len {
             continue;
         }
         for start in 0..=seq.len() - read_len {
             let slice = &seq[start..start + read_len];
             let rc = revcomp(slice);
-            if !transcripts.iter().any(|t| contains_subseq(t, &rc)) {
+            if rc
+                .windows(index.k)
+                .all(|kmer| !unitigs.iter().any(|unitig| contains_subseq(unitig, kmer)))
+            {
                 read = Some(slice.to_vec());
                 break 'outer;
             }

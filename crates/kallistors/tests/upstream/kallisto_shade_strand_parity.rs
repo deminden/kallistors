@@ -1,6 +1,8 @@
+use crate::helpers;
+use crate::helpers::revcomp;
 use std::fs::{self, File};
 use std::io::{BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use kallistors::io::FastqReader;
@@ -8,14 +10,6 @@ use kallistors::pseudoalign::{
     FragmentFilter, PseudoalignOptions, Strand, StrandSpecific, build_bifrost_index_with_positions,
     pseudoalign_single_end_bifrost_with_options,
 };
-
-fn kallisto_available() -> bool {
-    Command::new("kallisto")
-        .arg("version")
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
 
 fn run_kallisto_quant(index: &Path, reads: &Path, out_dir: &Path, strand: Option<&str>) -> u64 {
     let mut cmd = Command::new("kallisto");
@@ -36,35 +30,14 @@ fn run_kallisto_quant(index: &Path, reads: &Path, out_dir: &Path, strand: Option
     let status = cmd.status().expect("run kallisto quant");
     assert!(status.success(), "kallisto quant failed");
     let run_info = fs::read_to_string(out_dir.join("run_info.json")).expect("read run_info");
-    parse_n_pseudoaligned(&run_info).expect("parse n_pseudoaligned")
-}
-
-fn parse_n_pseudoaligned(run_info: &str) -> Option<u64> {
-    let key = "\"n_pseudoaligned\"";
-    let idx = run_info.find(key)?;
-    let after = &run_info[idx + key.len()..];
-    let colon = after.find(':')?;
-    let rest = after[colon + 1..].trim_start();
-    let mut digits = String::new();
-    for c in rest.chars() {
-        if c.is_ascii_digit() {
-            digits.push(c);
-        } else if !digits.is_empty() {
-            break;
-        }
-    }
-    digits.parse().ok()
+    helpers::json_u64(&run_info, "n_pseudoaligned").expect("parse n_pseudoaligned")
 }
 
 #[test]
+#[ignore = "requires original kallisto on PATH"]
 fn shade_strand_parity_with_kallisto() {
-    if !kallisto_available() {
-        return;
-    }
-
-    let tmp = temp_dir("kallistors-shade-parity");
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp).expect("create temp dir");
+    let directory = tempfile::tempdir().expect("shade parity directory");
+    let tmp = directory.path();
 
     let fasta = tmp.join("shade_transcripts.fa");
     let reads = tmp.join("shade_reads.fq");
@@ -131,8 +104,6 @@ fn shade_strand_parity_with_kallisto() {
     )
     .expect("pseudoalign rf");
     assert_eq!(ours.reads_aligned, k_rf);
-
-    let _ = fs::remove_dir_all(&tmp);
 }
 
 fn write_shade_fasta(path: &Path, transcripts: &[(String, Vec<u8>)]) -> std::io::Result<()> {
@@ -221,20 +192,6 @@ fn random_seq(rng: &mut SimpleRng, len: usize) -> Vec<u8> {
     out
 }
 
-fn revcomp(seq: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(seq.len());
-    for &b in seq.iter().rev() {
-        out.push(match b {
-            b'A' | b'a' => b'T',
-            b'C' | b'c' => b'G',
-            b'G' | b'g' => b'C',
-            b'T' | b't' => b'A',
-            _ => b'N',
-        });
-    }
-    out
-}
-
 struct SimpleRng {
     state: u64,
 }
@@ -264,13 +221,4 @@ impl SimpleRng {
         let val = self.next_u64() >> 11;
         (val as f64) / ((1u64 << 53) as f64)
     }
-}
-
-fn temp_dir(prefix: &str) -> PathBuf {
-    let pid = std::process::id();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("{}-{}-{}", prefix, pid, now))
 }

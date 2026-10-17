@@ -1,7 +1,7 @@
 use kallistors::ec::EcList;
 use kallistors::quant::{EcCountsInput, QuantOptions, bootstrap_quantify, em_quantify};
 
-// Preserve the dense pre-optimization update as a numerical regression oracle.
+// Independent dense reference for the EM equations.
 fn dense_counts(input: &EcCountsInput, lengths: &[f64], options: QuantOptions) -> Vec<f64> {
     let mut alpha = vec![1.0 / lengths.len() as f64; lengths.len()];
     let mut next = vec![0.0; lengths.len()];

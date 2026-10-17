@@ -114,6 +114,9 @@ enum Commands {
         strand: Strand,
         #[arg(long)]
         fragment_length: Option<f64>,
+        /// Qualifying paired fragments used to estimate length; 0 uses all.
+        #[arg(long, default_value_t = 10_000)]
+        fragment_length_samples: usize,
         #[arg(long)]
         single_overhang: bool,
         #[arg(long, default_value_t = 1)]
@@ -164,6 +167,9 @@ enum Commands {
         single: bool,
         #[arg(short = 'l', long = "fragment-length")]
         fragment_length: Option<f64>,
+        /// Qualifying paired fragments used to estimate length; 0 uses all.
+        #[arg(long, default_value_t = 10_000)]
+        fragment_length_samples: usize,
         #[arg(short = 's', long = "fragment-length-sd")]
         fragment_length_sd: Option<f64>,
         #[arg(long)]
@@ -522,6 +528,7 @@ fn main() -> Result<()> {
             debug_max,
             strand,
             fragment_length,
+            fragment_length_samples,
             single_overhang,
             min_range,
             union,
@@ -555,6 +562,7 @@ fn main() -> Result<()> {
                 Strand::Reverse => kallistors::pseudoalign::Strand::Reverse,
             },
             fragment_length,
+            fragment_length_samples,
             single_overhang,
             min_range,
             union,
@@ -584,6 +592,7 @@ fn main() -> Result<()> {
             transcripts,
             bootstrap_samples,
             fragment_length,
+            fragment_length_samples,
             fragment_length_sd,
             single_overhang,
             fr_stranded,
@@ -608,6 +617,7 @@ fn main() -> Result<()> {
             reads,
             single,
             fragment_length,
+            fragment_length_samples,
             fragment_length_sd,
             single_overhang,
             fr_stranded,

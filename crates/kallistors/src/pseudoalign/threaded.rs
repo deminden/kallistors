@@ -1,4 +1,6 @@
 use super::utils::EcCountMap;
+use std::ops::Range;
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
@@ -9,6 +11,95 @@ use crate::timing::{self, Stage};
 use crate::{Error, Result};
 
 use super::{BifrostIndex, EcCounts, FragmentFilter, PseudoalignOptions, Strand};
+
+// Original kallisto's paired FASTQ buffer holds both sequences and one trailing
+// byte per mate. Its sampling quota belongs to that buffer, not a parser chunk.
+const PAIRED_SAMPLING_BUFFER_BYTES: usize = 1 << 23;
+
+struct PairedChunk {
+    left: Arc<PackedSeqBatch>,
+    right: Arc<PackedSeqBatch>,
+    reads: Range<usize>,
+}
+
+#[derive(Default)]
+struct PairedBatchBuilder {
+    chunks: Vec<PairedChunk>,
+    bytes: usize,
+}
+
+impl PairedBatchBuilder {
+    fn finish(&mut self) -> Option<Vec<PairedChunk>> {
+        self.bytes = 0;
+        (!self.chunks.is_empty()).then(|| std::mem::take(&mut self.chunks))
+    }
+
+    fn push(
+        &mut self,
+        left: PackedSeqBatch,
+        right: PackedSeqBatch,
+        byte_limit: usize,
+    ) -> Result<Vec<Vec<PairedChunk>>> {
+        if left.len() != right.len() {
+            return Err(Error::InvalidFormat("paired FASTQ length mismatch".into()));
+        }
+        let left = Arc::new(left);
+        let right = Arc::new(right);
+        let mut ready = Vec::new();
+        if byte_limit == 0 {
+            if let Some(pending) = self.finish() {
+                ready.push(pending);
+            }
+            if !left.is_empty() {
+                ready.push(vec![PairedChunk {
+                    reads: 0..left.len(),
+                    left,
+                    right,
+                }]);
+            }
+            return Ok(ready);
+        }
+        let mut start = 0;
+        for i in 0..left.len() {
+            let pair_bytes = left.seq(i).len() + right.seq(i).len() + 2;
+            // Upstream uses strict '< limit', retaining a boundary pair for
+            // the next buffer. Keep parser batches shared when it splits one.
+            if self.bytes + pair_bytes >= byte_limit {
+                if start < i {
+                    self.chunks.push(PairedChunk {
+                        left: left.clone(),
+                        right: right.clone(),
+                        reads: start..i,
+                    });
+                }
+                if let Some(pending) = self.finish() {
+                    ready.push(pending);
+                }
+                start = i;
+            }
+            self.bytes += pair_bytes;
+            // An oversized pair must still make progress rather than leaving
+            // an empty buffer loop. It becomes a single-pair batch.
+            if pair_bytes >= byte_limit {
+                self.chunks.push(PairedChunk {
+                    left: left.clone(),
+                    right: right.clone(),
+                    reads: i..i + 1,
+                });
+                ready.push(self.finish().expect("oversized pair is nonempty"));
+                start = i + 1;
+            }
+        }
+        if start < left.len() {
+            self.chunks.push(PairedChunk {
+                reads: start..left.len(),
+                left,
+                right,
+            });
+        }
+        Ok(ready)
+    }
+}
 
 fn produce_batches<R: PackedSeqBatchSource>(
     reader: &mut R,
@@ -165,10 +256,11 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
     let mut merged_map: EcCountMap = EcCountMap::default();
     let mut final_error: Option<Error> = None;
 
+    let sampler = super::paired::FragmentLengthSampler::new(options.fragment_length_samples);
     thread::scope(|scope| {
-        let (left_tx, left_rx) = bounded::<Result<PackedSeqBatch>>(threads * 2);
-        let (right_tx, right_rx) = bounded::<Result<PackedSeqBatch>>(threads * 2);
-        let (work_tx, work_rx) = bounded::<(PackedSeqBatch, PackedSeqBatch)>(threads * 2);
+        let (left_tx, left_rx) = bounded::<Result<PackedSeqBatch>>(2);
+        let (right_tx, right_rx) = bounded::<Result<PackedSeqBatch>>(2);
+        let (work_tx, work_rx) = bounded::<Vec<PairedChunk>>(threads);
         let mut handles = Vec::with_capacity(threads);
 
         let read_start = Instant::now();
@@ -178,32 +270,62 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
         let pseudoalign_start = Instant::now();
         for _ in 0..threads {
             let rx = work_rx.clone();
+            let sampler = &sampler;
             handles.push(scope.spawn(move || -> Result<EcCounts> {
                 let mut acc = EcCounts::new(options.bias);
                 let mut acc_map: EcCountMap = EcCountMap::default();
-                while let Ok((left, right)) = rx.recv() {
-                    super::paired::pseudoalign_paired_bifrost_batch_into(
-                        index,
-                        left,
-                        right,
-                        strand,
-                        options,
-                        &mut acc,
-                        &mut acc_map,
-                    )?;
+                while let Ok(chunks) = rx.recv() {
+                    let budget = sampler.remaining();
+                    let local_sampler = super::paired::FragmentLengthSampler::new(budget);
+                    for chunk in chunks {
+                        super::paired::pseudoalign_paired_bifrost_batch_into(
+                            index,
+                            &chunk.left,
+                            &chunk.right,
+                            chunk.reads,
+                            strand,
+                            options,
+                            &mut acc,
+                            &mut acc_map,
+                            (options.fragment_length_samples != 0).then_some(&local_sampler),
+                        )?;
+                    }
+                    if options.fragment_length_samples != 0 {
+                        sampler.submit(budget - local_sampler.remaining());
+                    }
                 }
                 Ok(acc)
             }));
         }
 
+        let mut batch_builder = PairedBatchBuilder::default();
         loop {
             let left = recv_batch(&left_rx);
             let right = recv_batch(&right_rx);
             match (left, right) {
                 (Ok(Some(left_batch)), Ok(Some(right_batch))) => {
-                    if work_tx.send((left_batch, right_batch)).is_err() {
-                        final_error = Some(Error::InvalidFormat("worker queue closed".into()));
-                        break;
+                    let limit = if options.fragment_length_samples != 0 && sampler.remaining() > 0 {
+                        PAIRED_SAMPLING_BUFFER_BYTES
+                    } else {
+                        0
+                    };
+                    match batch_builder.push(left_batch, right_batch, limit) {
+                        Ok(batches) => {
+                            for batch in batches {
+                                if work_tx.send(batch).is_err() {
+                                    final_error =
+                                        Some(Error::InvalidFormat("worker queue closed".into()));
+                                    break;
+                                }
+                            }
+                            if final_error.is_some() {
+                                break;
+                            }
+                        }
+                        Err(err) => {
+                            final_error = Some(err);
+                            break;
+                        }
                     }
                 }
                 (Ok(None), Ok(None)) => break,
@@ -217,7 +339,16 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
                 }
             }
         }
+        if final_error.is_none()
+            && let Some(batch) = batch_builder.finish()
+            && work_tx.send(batch).is_err()
+        {
+            final_error = Some(Error::InvalidFormat("worker queue closed".into()));
+        }
         drop(work_tx);
+        // Release blocked senders before joining producers after an input error.
+        drop(left_rx);
+        drop(right_rx);
 
         for producer in [left_producer, right_producer] {
             match producer.join() {
@@ -262,5 +393,102 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
         Err(err)
     } else {
         Ok(merged)
+    }
+}
+
+#[cfg(test)]
+mod paired_batch_tests {
+    use super::*;
+    use crate::io::FastqReader;
+    use std::io::Cursor;
+
+    fn packed(lengths: &[usize]) -> PackedSeqBatch {
+        let mut fastq = String::new();
+        for (i, &length) in lengths.iter().enumerate() {
+            fastq.push_str(&format!(
+                "@{i}\n{}\n+\n{}\n",
+                "A".repeat(length),
+                "I".repeat(length)
+            ));
+        }
+        FastqReader::new(Cursor::new(fastq))
+            .next_packed_seq_batch(lengths.len())
+            .unwrap()
+            .unwrap()
+    }
+
+    fn lengths(jobs: Vec<Vec<PairedChunk>>) -> Vec<Vec<(usize, usize)>> {
+        jobs.into_iter()
+            .map(|chunks| {
+                chunks
+                    .into_iter()
+                    .flat_map(|chunk| {
+                        chunk
+                            .reads
+                            .map(move |i| (chunk.left.seq(i).len(), chunk.right.seq(i).len()))
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn paired_sampling_buffers_span_parser_chunks_and_use_both_mate_lengths() {
+        let mut builder = PairedBatchBuilder::default();
+        assert!(
+            builder
+                .push(packed(&[10, 20]), packed(&[5, 7]), 100)
+                .unwrap()
+                .is_empty()
+        );
+        // First two pairs cost 17 + 29 = 46 bytes. The next costs 54,
+        // so exactly 100 fails upstream's strict buffer bound.
+        let mut jobs = builder
+            .push(packed(&[30, 3]), packed(&[22, 4]), 100)
+            .unwrap();
+        jobs.push(builder.finish().unwrap());
+        assert_eq!(
+            lengths(jobs),
+            vec![vec![(10, 5), (20, 7)], vec![(30, 22), (3, 4)]]
+        );
+    }
+
+    #[test]
+    fn paired_sampling_buffers_split_one_parser_chunk_without_losing_pairs() {
+        let mut builder = PairedBatchBuilder::default();
+        let mut jobs = builder
+            .push(packed(&[10; 5]), packed(&[10; 5]), 50)
+            .unwrap();
+        jobs.push(builder.finish().unwrap());
+        assert_eq!(
+            lengths(jobs),
+            vec![vec![(10, 10); 2], vec![(10, 10); 2], vec![(10, 10)]]
+        );
+        assert!(builder.finish().is_none());
+    }
+
+    #[test]
+    fn ending_sampling_flushes_pending_reads_before_normal_work() {
+        let mut builder = PairedBatchBuilder::default();
+        assert!(
+            builder
+                .push(packed(&[10]), packed(&[12]), 100)
+                .unwrap()
+                .is_empty()
+        );
+        let jobs = builder.push(packed(&[20]), packed(&[22]), 0).unwrap();
+        assert_eq!(lengths(jobs), vec![vec![(10, 12)], vec![(20, 22)]]);
+        assert!(builder.finish().is_none());
+    }
+
+    #[test]
+    fn oversized_pairs_progress_and_mate_count_errors_are_preserved() {
+        let mut builder = PairedBatchBuilder::default();
+        let mut jobs = builder
+            .push(packed(&[100, 3]), packed(&[100, 4]), 100)
+            .unwrap();
+        jobs.push(builder.finish().unwrap());
+        assert_eq!(lengths(jobs), vec![vec![(100, 100)], vec![(3, 4)]]);
+        assert!(builder.push(packed(&[1]), packed(&[1, 2]), 100).is_err());
     }
 }

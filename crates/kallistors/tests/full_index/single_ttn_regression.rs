@@ -14,8 +14,10 @@ fn fallback_probe_preserves_unique_ttn_and_agap_reads_in_both_scanners() {
     assert!(index.is_file(), "prepare the GENCODE v50 index first");
     let dir = tempfile::tempdir().expect("tempdir");
     let fixture = dir.path().join("reads.fixture");
-    let mut reads = include_bytes!("fixtures/single_ttn_gencode50.fixture").to_vec();
-    reads.extend_from_slice(include_bytes!("fixtures/single_agap12p_gencode50.fixture"));
+    let mut reads = include_bytes!("../fixtures/single_ttn_gencode50.fixture").to_vec();
+    reads.extend_from_slice(include_bytes!(
+        "../fixtures/single_agap12p_gencode50.fixture"
+    ));
     fs::write(&fixture, reads).expect("write regression reads");
     let binary = std::env::var_os("KALLISTORS_TEST_BIN")
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_kallistors").into());
