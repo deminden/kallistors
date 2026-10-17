@@ -1,7 +1,8 @@
 use super::workers::IndexWorkers;
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::HashMap;
 use std::fs::File;
-use std::hash::{Hash, Hasher};
+use std::hash::BuildHasherDefault;
+use std::hash::Hasher;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -61,37 +62,56 @@ pub(super) struct Transcript {
 }
 
 #[derive(Default)]
+struct NameFingerprintHasher(u64);
+impl Hasher for NameFingerprintHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        self.0 = super::bifrost::wyhash(bytes, 0);
+    }
+}
+
+#[derive(Default)]
 struct TranscriptNames {
-    first: HashMap<u64, usize>,
+    first: HashMap<u64, usize, BuildHasherDefault<NameFingerprintHasher>>,
     collisions: HashMap<u64, Vec<usize>>,
 }
 
 impl TranscriptNames {
     fn insert(&mut self, name: &str, transcripts: &[Transcript]) -> bool {
-        let mut hasher = DefaultHasher::new();
-        name.hash(&mut hasher);
-        self.insert_hashed(hasher.finish(), name, transcripts)
+        self.insert_hashed(
+            super::bifrost::wyhash(name.as_bytes(), 0),
+            name,
+            transcripts,
+        )
     }
     fn insert_hashed(&mut self, hash: u64, name: &str, transcripts: &[Transcript]) -> bool {
-        if let Some(&first) = self.first.get(&hash) {
-            // Hashes select candidates only. Full equality decides membership,
-            // including every distinct name sharing the same complete hash.
-            if transcripts[first].name == name
-                || self
-                    .collisions
-                    .get(&hash)
-                    .is_some_and(|ids| ids.iter().any(|&id| transcripts[id].name == name))
-            {
-                return false;
+        match self.first.entry(hash) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(transcripts.len());
+                true
             }
-            self.collisions
-                .entry(hash)
-                .or_default()
-                .push(transcripts.len());
-        } else {
-            self.first.insert(hash, transcripts.len());
+            std::collections::hash_map::Entry::Occupied(entry) => {
+                if transcripts[*entry.get()].name == name
+                    || self
+                        .collisions
+                        .get(&hash)
+                        .is_some_and(|ids| ids.iter().any(|&id| transcripts[id].name == name))
+                {
+                    false
+                } else {
+                    self.collisions
+                        .entry(hash)
+                        .or_default()
+                        .push(transcripts.len());
+                    true
+                }
+            }
         }
-        true
     }
 }
 
@@ -322,13 +342,27 @@ fn read_transcript_file<R: BufRead>(
 ) -> Result<()> {
     let mut current_name: Option<String> = None;
     let mut current_seq = Vec::new();
-    let mut process_line = |bytes: &[u8]| -> Result<()> {
-        let line = std::str::from_utf8(bytes).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "stream did not contain valid UTF-8",
-            )
-        })?;
+    let mut process_line = |bytes: &[u8], known_ascii: bool| -> Result<()> {
+        if known_ascii && !bytes.starts_with(b">") {
+            let mut end = bytes.len();
+            while end != 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
+                end -= 1;
+            }
+            current_seq.extend_from_slice(&bytes[..end]);
+            return Ok(());
+        }
+        let line = if known_ascii {
+            // SAFETY: every contributing input buffer was checked as ASCII.
+            // Pending lines retain that proof only if all fragments did.
+            unsafe { std::str::from_utf8_unchecked(bytes) }
+        } else {
+            std::str::from_utf8(bytes).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "stream did not contain valid UTF-8",
+                )
+            })?
+        };
         let trimmed = line.trim_end_matches(['\n', '\r']);
         if let Some(rest) = trimmed.strip_prefix('>') {
             flush_transcript(
@@ -349,27 +383,33 @@ fn read_transcript_file<R: BufRead>(
         Ok(())
     };
     let mut pending = Vec::new();
+    let mut pending_ascii = true;
     loop {
         let buffer = reader.fill_buf()?;
         if buffer.is_empty() {
             if !pending.is_empty() {
-                process_line(&pending)?;
+                process_line(&pending, pending_ascii)?;
             }
             break;
         }
+        let ascii = buffer.is_ascii();
         let mut start = 0;
         for end in memchr::memchr_iter(b'\n', buffer) {
             let part = &buffer[start..=end];
             if pending.is_empty() {
-                process_line(part)?;
+                process_line(part, ascii)?;
             } else {
                 pending.extend_from_slice(part);
-                process_line(&pending)?;
+                process_line(&pending, pending_ascii && ascii)?;
                 pending.clear();
+                pending_ascii = true;
             }
             start = end + 1;
         }
         pending.extend_from_slice(&buffer[start..]);
+        if start < buffer.len() {
+            pending_ascii &= ascii;
+        }
         let consumed = buffer.len();
         reader.consume(consumed);
     }

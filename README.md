@@ -33,11 +33,14 @@ pack each completed transcript group before sorting its words. Compact exact loo
 storage and timely scratch release reduce peak memory. One requested worker pool handles graph
 construction, ECs, minimizers and output. Paths are prepared in parallel and claimed in serial
 order; a single counted start table and compact path/link records preserve deterministic joins.
-FASTA normalization retains input-order ambiguity replacement. All transcript metadata, exact
+Exact prefix ranges bound join searches; location batches span short unitigs. Query scratch is reused
+within bounded worker chunks. FASTA parsing checks ASCII once per input buffer and retains Unicode
+validation and input-order ambiguity replacement. All transcript metadata, exact
 continuations, tied minimizers, wide-value fallbacks and the v13 representation are preserved.
 See [construction details](docs/development.md#index-construction).
 An eight-thread index build of the complete, uncompressed GENCODE v50 ALL reference took a
-median **12.39 s**, with **5.08 GiB peak RSS** on Apple Silicon (one warmup, three measured builds).
+median **11.37 s**, with **5.20 GiB peak RSS** and **4.48 GiB peak footprint** on Apple Silicon
+(two opposite-order confirmation sets, each with one warmup and three measured builds).
 The [benchmark guide](docs/benchmarks.md#eight-thread-index-build-measurement) gives the scope,
 phase timings and validation details. Source builds use `target-cpu=native`; release binaries use a
 portable CPU target.

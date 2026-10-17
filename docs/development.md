@@ -374,7 +374,9 @@ Default output still includes HDF5 with DEFLATE level 6 and bounded 16,384-eleme
 
 ## Index construction
 
-Buffered FASTA parsing retains UTF-8 validation, header whitespace and CR/LF behavior. Parallel
+Buffered FASTA parsing checks ASCII once per input buffer and directly appends proven-ASCII
+sequence lines. Pending fragments retain the conjunction of their buffer proofs; Unicode headers
+and invalid UTF-8 retain full validation, whitespace and CR/LF behavior. Parallel
 normalization uppercases and validates independent sequences; ambiguity substitutions still
 consume MT19937 in transcript/base order. Original lengths precede identical polyA trimming.
 Single-threaded construction retains the serial path. The [shared DNA encoder](../crates/kallistors/src/dna.rs)
@@ -382,27 +384,33 @@ serves mapping, graph initialization and minimizer keys, with byte/position/orie
 
 Collection excludes windows only after complete byte equality proves they already occur in an
 earlier transcript in the same bounded group. Shared prefix/suffix anchors and sparse internal
-word anchors select candidates; they do not authorize approximate matches. Seam windows and all
-transcript metadata remain. Group deduplication precedes parallel radix sorting. Completed shards
-append immediately; final ordering is independent of worker completion order. Large parallel
+word anchors select candidates. Seam windows and all transcript metadata remain. Collection uses
+bounded 2,048-transcript groups with sparse internal anchors selected at 1/16 density. Portable word
+comparisons locate the exact differing byte after equal 32-byte blocks. Group deduplication precedes
+parallel radix sorting. Completed shards append immediately; final ordering is independent of worker
+completion order. Large parallel
 collections losslessly pack each group before sorting its words, after borrowed anchors have
-finished. Disjoint mutable
-groups are dispatched to the requested workers; packed records are restored to original transcript
+finished. Disjoint mutable groups are dispatched to the requested workers; packed records are restored to original transcript
 order. The distinct table keeps its virtual allocation until lookup mapping finishes, avoiding a
 second full-table copy. Fully unused initialized tail pages can be discarded without moving live keys.
 
 [Packed transcript scratch](../crates/kallistors/src/index/packed_transcripts.rs) uses two bits per
 normalized base and extracts exact k-mer words directly, including unaligned byte boundaries and
-tails. Shared group buffers retain every sequence until its mapping completes. Identifier bytes
+tails. Shared group buffers retain every sequence until its mapping completes. After packing consumes
+the ASCII sequences, only original transcript lengths remain; the emptied transcript-record
+allocation is retired before topology construction. Identifier bytes
 share one UTF-8 arena during topology construction; owned names are reconstructed unchanged after
-mapping. The name table verifies full equality for every hash match, including complete collisions.
+mapping. The name table hashes each identifier once, uses one entry probe and verifies full
+equality for every hash match, including complete collisions. Bounded DNA anchor maps use fast word hashing
+with complete-key comparisons.
 
 Lookup descriptors store complete singleton suffixes/ranks where they fit. Two-, three- and
 four-key guards reject definite misses and verify full keys on positives. Larger graphs use exact
 rank ranges: shared block bases and packed 12-bit deltas, with exact u32 dense-block and
 large-rank fallbacks. Active query prefixes avoid dummy probes; AArch64 nonblocking cache hints overlap
 independent key reads and positive atomic updates without changing equality checks.
-Query metadata uses one byte per slot in bounded canonical batches. Other architectures retain ordinary reads.
+Canonical batches cover up to 32 sources with 16-bit source/orientation metadata. Active query and
+metadata buffers are reused within bounded worker chunks. Other architectures retain ordinary reads.
 Canonical extension selection queries one reverse-complement representative and updates both
 endpoints through idempotent CAS, including duplicate self-edge cases. Compact records retain
 rank/orientation/degree information and exact continuation eligibility, with full-width fallback.
@@ -410,19 +418,30 @@ Finalization first gives nonunique ranks stable degree sentinels. Atomic neighbo
 update only continuation flags; rank fields remain unchanged, so no separate degree snapshot is
 needed. Bounded prefetch batches overlap those reads. All workers join before immutable ownership
 transfer; matching size/alignment and native byte order are required, with ordinary collection as
-fallback. Completed edge storage is retired before location and transcript-run allocation.
+fallback. Possible join successors are collected in source/orientation order while the edge
+storage is live. The edge allocation is then retired before oriented-start sorting, link
+allocation and joined-sequence assembly. The owned query words preserve the same candidate order
+and complete-word duplicate checks; an empty query set leaves the paths unchanged.
 
 Parallel branch/residual preparation never claims vertices. Serial ordered claims truncate at the
-first earlier canonical claim, preserving orientation, unitig order and reverse collisions. Accepted
-branch sequences materialize in parallel; residual work retains bounded batches and a long-path
+first earlier canonical claim, preserving orientation, unitig order and reverse collisions. Prepared
+groups retain their exact claimed prefixes without a separate count array. The continuation layout
+is selected once per group. Path prefixes use bounded SIMD decoding on little-endian AArch64 with
+a scalar fallback. Accepted branch sequences materialize in parallel; residual work retains bounded batches and a long-path
 serial fallback. Prepared steps use u32 when ranks fit, otherwise u64. Compact oriented starts sort
-by exact numeric keys. A counting pass divides one initialized start allocation into disjoint
-mutable slices, avoiding a complete set of start shards beside its destination. All-active,
-all-inactive and sparse masks retain the same IDs and keys. Ordered candidate discovery preserves
-join priority without another sort. Accepted path metadata uses bounded ordered chunks and exact
+by exact numeric keys. A counting pass divides exact spare capacity into disjoint worker slices;
+length is published only after every worker succeeds. Records implement Copy; on an error the
+vector retains length zero.
+All-active, all-inactive and sparse masks retain the same IDs and keys. Exact prefix ranges and
+equality scans of small ranges retain complete word and duplicate checks. The paths retain exact first/last canonical ranks, avoiding repeated endpoint membership
+searches during query collection. Byte-only internal constructors retain the checked lookup
+fallback. Ordered query resolution preserves join priority without another sort. Freed path
+preparation scratch is collected on its existing worker owners before joining. Accepted path metadata uses bounded ordered chunks and exact
 final assembly. Joined sequences reuse owned buffers. Missing join links use an out-of-domain sentinel, preserving
 state zero and cycles. Transcript runs advance through proven nonbranching unitig interiors; the
-independent byte oracle checks every skipped continuation in test builds.
+independent byte oracle checks every skipped continuation in test builds. Parallel location lookup
+batches span short unitigs and preserve complete canonical membership, offsets and orientations;
+the serial path retains bounded per-unitig batches.
 
 [Transcript-run scratch](../crates/kallistors/src/index/transcript_runs.rs) stores exact whole-unitig
 runs in three words and partial runs in five. Large unitig IDs retain the full representation.
@@ -431,13 +450,19 @@ Known bounds are reconstructed from unitig lengths before stable per-unitig asse
 and group boundaries in contiguous arrays, avoiding an allocation for every transcript in an EC.
 Lookup buffers are released before EC/minimizer payloads. ECs, minimizer work, MPHF marking and grouped
 node serialization run in parallel. Worker-private seen/collision sets merge both within-worker
-and cross-worker collisions exactly; survivor and serialized bitvector order are unchanged.
+and cross-worker collisions exactly. Seen/collision pairs share one local record, and construction
+reuses the mapper's exact remainder from a floor reciprocal with boundary/modulo oracles. Survivor and
+serialized bitvector order are unchanged.
 Survivor IDs and temporary buckets use u32 only when their complete domains fit; usize/u64
 fallbacks serialize identically. Numeric minimizer keys are converted to their original big-endian
 bytes at hashing/serialization boundaries, avoiding a full key-layout copy.
-Rolling minimizer hashes feed a fixed monotonic queue retaining every tied minimum. Numeric
+Index construction and mapping share the exact grouped REP-state initializer. Rolling minimizer
+hashes feed a fixed monotonic queue retaining every tied minimum. Numeric
 radix sorting preserves key byte order. Tiny bitmap and packed-sequence oracles protect serialization;
-AArch64 sequence packing has a scalar fallback. Independent allocations are released in the same
+Native small-array and single run bitmap paths use the locked CRoaring representation only when
+its choice is proven; general cases use the library serializer. Tests compare every emitted byte
+through cardinality, container, adjacency and run-size boundaries. AArch64 sequence packing has a
+scalar fallback. Independent allocations are released in the same
 requested worker pool. [Scratch-page retirement](../crates/kallistors/src/index/scratch_pages.rs)
 releases only page-aligned, wholly unused initialized ranges on macOS/Linux. Live bytes, allocator
 headers and ownership are preserved; spare capacity remains reusable. Dead starts, candidates,

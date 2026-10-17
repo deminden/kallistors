@@ -308,22 +308,43 @@ On Apple Silicon, building the complete GENCODE v50 ALL transcript FASTA with ei
 670,670 transcripts and 207,228,052 distinct k-mers; k=31 and g=23. The input was exactly
 decompressed before timing, with no transcript filtering.
 
-| Measurement | Current kallistors |
-| --- | ---: |
-| Median whole-process elapsed time | 12.39 s |
-| Median peak RSS | 5.08 GiB |
-| Median peak footprint | 4.59 GiB |
+| Measurement | Preceding Rust baseline | Current kallistors |
+| --- | ---: | ---: |
+| Median whole-process elapsed time | 11.643 s | 11.373 s |
+| Median peak RSS | 5.64 GiB | 5.20 GiB |
+| Median peak footprint | 4.60 GiB | 4.48 GiB |
 
-One warmup preceded three measured builds. Source builds used `target-cpu=native`.
-All measured runs were uninterrupted. Five-second sampling recorded a background process at
-26% CPU in one measured build; alternating controls and all three observations were retained.
-RSS and macOS
-peak footprint are separate OS measurements. These values describe this reference and
-machine family; they do not establish a universal timing estimate.
+Across six measured builds per executable, elapsed time changed by -2.32%,
+RSS by -7.88% and footprint by -2.63%.
+RSS and footprint are distinct macOS measurements; RSS varied substantially even for unchanged
+executables, so both measures and individual runs are reported.
 
-Median internal stages were 0.65 s for FASTA parsing, 9.19 s for graph construction,
-0.89 s for EC construction, 0.97 s for minimizer/MPHF work and 0.61 s for writing.
-Independent stage medians need not sum to the median whole-process time.
+Two independent confirmation sets each used one warmup and three alternating measured builds per
+executable. The second set reversed the starting order. External CPU activity was flagged in
+4 of six baseline runs and 0 of six current runs; every observation was retained.
+Source builds used `target-cpu=native`. Every build was uninterrupted and produced identical
+complete index bytes. Comparisons use the preceding Rust builder, without multiplying separate
+optimization-round estimates.
+
+| Set / pair | Baseline seconds | Current seconds | Baseline RSS, GiB | Current RSS, GiB | Baseline footprint, GiB | Current footprint, GiB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Forward / 1 | 11.646 | 11.338 | 5.18 | 5.20 | 4.60 | 4.48 |
+| Forward / 2 | 11.580 | 11.327 | 5.81 | 5.22 | 4.62 | 4.53 |
+| Forward / 3 | 11.808 | 11.485 | 5.82 | 5.20 | 4.59 | 4.46 |
+| Reverse / 1 | 11.823 | 11.173 | 5.48 | 5.14 | 4.60 | 4.47 |
+| Reverse / 2 | 11.584 | 11.407 | 5.81 | 5.37 | 4.60 | 4.48 |
+| Reverse / 3 | 11.640 | 11.752 | 5.10 | 5.19 | 4.66 | 4.48 |
+
+| Internal stage, median seconds | Baseline | Current |
+| --- | ---: | ---: |
+| FASTA parsing | 0.473 | 0.463 |
+| Graph construction | 8.738 | 8.514 |
+| EC construction | 0.919 | 0.917 |
+| Minimizers and MPHF | 0.912 | 0.903 |
+| Serialization and writing | 0.485 | 0.482 |
+
+Independent stage medians need not sum to the median whole-process time. These values describe
+this full-reference workload and machine family, rather than a universal speed or memory estimate.
 
 Construction excludes only byte-proven repeat windows, preserving seams and complete metadata.
 Shared ends and sparse internal anchors select candidate repeats; full equality proves each skip.
@@ -334,9 +355,12 @@ The requested worker pool is reused across stages; edge finalization, accepted
 branch sequences, ECs, minimizers, collision marking and grouped serialization run in parallel.
 Serial ordered claims/joins retain deterministic graph order; long residual paths keep bounded
 fallback handling. Compact path/link/location scratch, sequence ownership reuse and early lookup
-release limit temporary allocations. Exact packed rank bounds, counted start-table filling,
+release limit temporary allocations. Exact packed rank bounds, direct counted start-table filling,
 contiguous grouped EC positions and narrow MPHF scratch avoid overlapping full-size buffers.
-Wholly unused scratch pages are reclaimed on macOS/Linux. All tied minimizers and the v13 representation are preserved.
+Join searches use exact prefix ranges; location lookup batches span short unitigs. Bounded worker
+query buffers are reused. Native bitmap fast paths match CRoaring bytes at their representation
+boundaries, with its serializer retained for the general cases. Wholly unused scratch pages are
+reclaimed on macOS/Linux. All tied minimizers and the v13 representation are preserved.
 The internal total includes final cleanup; process startup and pool teardown remain in whole-process
 time. See [construction details](development.md#index-construction) for exactness guarantees.
 
@@ -344,9 +368,14 @@ Compatibility validation used 99,029 fasterp-trimmed pairs retained from the fir
 SRR13638690 pairs. All 24 complete EC maps matched within their mode/strand case:
 paired/single × unstranded/FR/RF × both index builders × both quantifiers. Normal quantification
 counters and native HDF5 readback passed for both indexes in paired and single-end modes.
-Complete index-byte regression checks passed for both the protein-coding subset and full
-GENCODE v50 ALL reference (670,670 transcripts and 207,228,052 distinct k-mers). Serial/threaded
-construction also matched across the nucleotide k/g and amino-acid validation matrix.
+Complete index-byte regression checks passed for the full GENCODE v50 ALL reference
+(670,670 transcripts and 207,228,052 distinct k-mers). Serial/threaded
+construction also matched across 27 nucleotide k/g cases and one amino-acid case. On all 4.41 million
+fasterp-trimmed pairs, complete paired and single-end EC maps also matched the preceding Rust
+baseline and the original quantifier exactly. Single-end EC checks used a 200 bp fragment length.
+Matched all-observation
+quantification retained identical histograms, target identities, lengths and effective lengths;
+the maximum estimated-count difference was below 1e-9. Native HDF5 readback checked every row.
 
 
 ## Correctness and interpretation

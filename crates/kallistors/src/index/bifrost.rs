@@ -69,12 +69,12 @@ pub struct MphfDebugInfo {
 // floor(2^64 / divisor) underestimates the quotient by at most one for
 // a u64 numerator. One exact correction therefore preserves every remainder.
 #[derive(Clone, Copy)]
-struct ReducedDomain {
+pub(super) struct ReducedDomain {
     divisor: u64,
     reciprocal: u64,
 }
 impl ReducedDomain {
-    fn new(divisor: u64) -> Self {
+    pub(super) fn new(divisor: u64) -> Self {
         assert_ne!(divisor, 0);
         let reciprocal = if divisor == 1 {
             0
@@ -87,7 +87,7 @@ impl ReducedDomain {
         }
     }
     #[inline]
-    fn remainder(self, value: u64) -> u64 {
+    pub(super) fn remainder(self, value: u64) -> u64 {
         if self.divisor == 1 {
             return 0;
         }

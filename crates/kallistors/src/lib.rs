@@ -13,3 +13,5 @@ pub mod util;
 
 pub use error::Error;
 pub type Result<T> = std::result::Result<T, Error>;
+
+mod minimizer_hash;

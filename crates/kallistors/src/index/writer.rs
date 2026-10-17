@@ -5,7 +5,6 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
-use strength_reduce::StrengthReducedU64;
 
 use croaring_sys::{
     roaring_bitmap_add_many, roaring_bitmap_add_range, roaring_bitmap_create, roaring_bitmap_free,
@@ -13,7 +12,7 @@ use croaring_sys::{
     roaring_bitmap_run_optimize, roaring_bitmap_serialize, roaring_bitmap_size_in_bytes,
 };
 
-use super::bifrost::{minimizer_hash, wyhash};
+use super::bifrost::{ReducedDomain, minimizer_hash, wyhash};
 use super::graph_build::{BuildGraph, NodeBlock, NodePayload, encode_kmer};
 use crate::{Error, Result};
 
@@ -218,6 +217,12 @@ fn write_boo_mphf(out: &mut Vec<u8>, keys: &[u64], threads: usize) -> Result<()>
     }
 }
 
+#[derive(Clone, Copy, Default)]
+struct MphfMarks {
+    seen: u64,
+    collisions: u64,
+}
+
 fn write_boo_mphf_ids<Id: MphfIndex, Bucket: MphfBucket>(
     out: &mut Vec<u8>,
     keys: &[u64],
@@ -240,27 +245,30 @@ fn write_boo_mphf_ids<Id: MphfIndex, Bucket: MphfBucket>(
                 let chunk = survivors
                     .len()
                     .div_ceil(threads.min(survivors.len().div_ceil(256)).max(1));
-                let reduced = StrengthReducedU64::new(domain);
+                let reduced = ReducedDomain::new(domain);
                 let shards = pool.install(|| {
                     survivors
                         .par_chunks(chunk)
                         .map(|ids| {
-                            let mut seen = vec![0u64; bitvector.words.len()];
-                            let mut collisions = vec![0u64; bitvector.words.len()];
+                            // Both fields are touched for each hashed bit. Keep
+                            // them on the same cache line without atomic updates.
+                            let mut marks = vec![MphfMarks::default(); bitvector.words.len()];
                             let buckets = ids
                                 .iter()
                                 .map(|&key_idx| {
-                                    let bucket =
-                                        boo_level_hash(&keys[key_idx.index()].to_be_bytes(), level)
-                                            % reduced;
+                                    let bucket = reduced.remainder(boo_level_hash(
+                                        &keys[key_idx.index()].to_be_bytes(),
+                                        level,
+                                    ));
                                     let word = (bucket >> 6) as usize;
                                     let mask = 1 << (bucket & 63);
-                                    collisions[word] |= seen[word] & mask;
-                                    seen[word] |= mask;
+                                    let mark = &mut marks[word];
+                                    mark.collisions |= mark.seen & mask;
+                                    mark.seen |= mask;
                                     Bucket::from_bucket(bucket)
                                 })
                                 .collect::<Vec<_>>();
-                            (seen, collisions, buckets)
+                            (marks, buckets)
                         })
                         .collect::<Vec<_>>()
                 });
@@ -272,9 +280,10 @@ fn write_boo_mphf_ids<Id: MphfIndex, Bucket: MphfBucket>(
                         .for_each(|(word, dest)| {
                             let mut seen = 0;
                             let mut collisions = 0;
-                            for (local_seen, local_collisions, _) in &shards {
-                                collisions |= local_collisions[word] | (seen & local_seen[word]);
-                                seen |= local_seen[word];
+                            for (marks, _) in &shards {
+                                let mark = marks[word];
+                                collisions |= mark.collisions | (seen & mark.seen);
+                                seen |= mark.seen;
                             }
                             *dest = seen & !collisions;
                         })
@@ -283,7 +292,7 @@ fn write_boo_mphf_ids<Id: MphfIndex, Bucket: MphfBucket>(
                     survivors
                         .par_chunks(chunk)
                         .zip(shards.par_iter())
-                        .map(|(ids, (_, _, buckets))| {
+                        .map(|(ids, (_, buckets))| {
                             ids.iter()
                                 .zip(buckets)
                                 .filter_map(|(&key_idx, &bucket)| {
@@ -302,10 +311,10 @@ fn write_boo_mphf_ids<Id: MphfIndex, Bucket: MphfBucket>(
                     .map_err(|_| Error::InvalidFormat("MPHF domain too large".into()))?;
                 let mut counts = vec![0u8; domain_usize];
                 let mut buckets = Vec::with_capacity(survivors.len());
-                let reduced_domain = StrengthReducedU64::new(domain);
+                let reduced_domain = ReducedDomain::new(domain);
                 for &key_idx in &survivors {
-                    let bucket = boo_level_hash(&keys[key_idx.index()].to_be_bytes(), level)
-                        % reduced_domain;
+                    let bucket = reduced_domain
+                        .remainder(boo_level_hash(&keys[key_idx.index()].to_be_bytes(), level));
                     let count = &mut counts[bucket as usize];
                     *count = count.saturating_add(1).min(2);
                     buckets.push(Bucket::from_bucket(bucket));
@@ -393,16 +402,16 @@ fn write_nodes<W: Write>(writer: &mut W, graph: &BuildGraph, threads: usize) -> 
     if threads > 1 && graph.nodes.len() >= 1024 {
         let pool = IndexWorkers::new(threads)?;
         // Keep only a bounded ordered batch of serialized nodes in memory.
-        for first in (0..graph.nodes.len()).step_by(256 * threads) {
-            let end = (first + 256 * threads).min(graph.nodes.len());
+        for first in (0..graph.nodes.len()).step_by(2048 * threads) {
+            let end = (first + 2048 * threads).min(graph.nodes.len());
             let records = pool.install(|| {
                 graph.nodes[first..end]
-                    .par_chunks(32)
+                    .par_chunks(128)
                     .enumerate()
                     .map(|(chunk, nodes)| {
                         let mut record = Vec::with_capacity(nodes.len() * (graph.k + 128));
                         for (relative, node) in nodes.iter().enumerate() {
-                            let idx = first + chunk * 32 + relative;
+                            let idx = first + chunk * 128 + relative;
                             let seq = if idx < graph.unitigs.len() {
                                 &graph.unitigs[idx]
                             } else {
@@ -466,26 +475,105 @@ fn write_block_array(out: &mut Vec<u8>, node: &NodePayload) -> Result<()> {
 }
 
 fn write_block_sparse_vector(out: &mut Vec<u8>, block: &NodeBlock) -> Result<()> {
-    write_prefixed_bitmap(out, &block.ec, false)?;
+    write_prefixed_bitmap::<false>(out, &block.ec)?;
     write_u64(out, block.positions.len() as u64)?;
     for vals in block.positions.iter() {
-        write_prefixed_bitmap(out, vals, true)?;
+        write_prefixed_bitmap::<true>(out, vals)?;
     }
     Ok(())
 }
 
-fn write_prefixed_bitmap(out: &mut Vec<u8>, values: &[u32], run_optimize: bool) -> Result<()> {
-    // CRoaring chooses its plain uint32 array for these cardinalities, including
-    // after run optimization. The sorted-unique guard preserves set semantics.
+// The locked native library chooses runs only on a strict size win. For a
+// single run container its portable header omits offsets; the native wrapper
+// chooses this payload only when smaller than the plain-u32 representation.
+fn write_single_run_bitmap(out: &mut Vec<u8>, values: &[u32]) -> bool {
+    if !cfg!(target_endian = "little")
+        || values.len() < 3
+        || values[0] >> 16 != values[values.len() - 1] >> 16
+    {
+        return false;
+    }
+    let mut runs = 1usize;
+    for pair in values.windows(2) {
+        if pair[0] >= pair[1] {
+            return false;
+        }
+        runs += usize::from(pair[1] - pair[0] != 1);
+    }
+    let container = 2 + 4 * runs;
+    let original = if values.len() <= 4096 {
+        2 * values.len()
+    } else {
+        8192
+    };
+    let portable = 9 + container;
+    if container >= original || portable >= 4 + 4 * values.len() {
+        return false;
+    }
+    out.reserve(8 + 1 + portable);
+    out.extend_from_slice(&((1 + portable) as u64).to_le_bytes());
+    out.push(2);
+    out.extend_from_slice(&12347u32.to_le_bytes());
+    out.push(1);
+    out.extend_from_slice(&((values[0] >> 16) as u16).to_le_bytes());
+    out.extend_from_slice(&((values.len() - 1) as u16).to_le_bytes());
+    out.extend_from_slice(&(runs as u16).to_le_bytes());
+    let mut start = values[0];
+    let mut previous = start;
+    for &value in &values[1..] {
+        if value != previous + 1 {
+            out.extend_from_slice(&(start as u16).to_le_bytes());
+            out.extend_from_slice(&((previous - start) as u16).to_le_bytes());
+            start = value;
+        }
+        previous = value;
+    }
+    out.extend_from_slice(&(start as u16).to_le_bytes());
+    out.extend_from_slice(&((previous - start) as u16).to_le_bytes());
+    true
+}
+
+#[inline]
+fn write_prefixed_bitmap<const RUN: bool>(out: &mut Vec<u8>, values: &[u32]) -> Result<()> {
+    if RUN && write_single_run_bitmap(out, values) {
+        return Ok(());
+    }
+    let run_optimize = RUN;
+    // A run costs at least6bytes, so at most3values cannot strictly beat
+    // an array container even when adjacent. Preserve native plain-u32 bytes.
+    let ordered = |require_gaps: bool| {
+        values
+            .windows(2)
+            .all(|pair| pair[0] < pair[1] && (!require_gaps || pair[1] - pair[0] > 1))
+    };
     if cfg!(target_endian = "little")
-        && (values.len() <= 2 || (!run_optimize && values.len() <= 6))
-        && values.windows(2).all(|pair| pair[0] < pair[1])
+        && values.len() <= 6
+        && ordered(run_optimize && values.len() > 3)
     {
         write_u64(out, (5 + 4 * values.len()) as u64)?;
         write_u8(out, 1)?;
         write_u32(out, values.len() as u32)?;
         for &value in values {
             write_u32(out, value)?;
+        }
+    } else if cfg!(target_endian = "little")
+        && (7..=4096).contains(&values.len())
+        && values[0] >> 16 == values[values.len() - 1] >> 16
+        && ordered(run_optimize)
+    {
+        // One sorted array container (<=4096 values). With run optimization,
+        // nonadjacent values cannot benefit from a run container. CRoaring
+        // selects this exact portable payload over its larger plain-u32 array:
+        // native kind 2, no-run cookie, one key/cardinality, offset16, u16 data.
+        write_u64(out, (17 + 2 * values.len()) as u64)?;
+        write_u8(out, 2)?;
+        write_u32(out, 12346)?;
+        write_u32(out, 1)?;
+        out.extend_from_slice(&((values[0] >> 16) as u16).to_le_bytes());
+        out.extend_from_slice(&((values.len() - 1) as u16).to_le_bytes());
+        write_u32(out, 16)?;
+        for &value in values {
+            out.extend_from_slice(&(value as u16).to_le_bytes());
         }
     } else {
         let bitmap = serialize_roaring(values, run_optimize, false)?;
@@ -707,7 +795,7 @@ mod tests {
 
     #[test]
     fn small_bitmap_records_match_croaring() {
-        for values in [
+        let mut cases = vec![
             vec![],
             vec![0],
             vec![u32::MAX],
@@ -718,10 +806,28 @@ mod tests {
             (0..6).collect(),
             (0..7).collect(),
             vec![0, 65536, 131072, 196608, 262144, 327680],
-        ] {
+        ];
+        for len in [3, 4, 5, 6, 7, 8, 16, 31, 255, 1024, 4096, 4097] {
+            cases.push((0..len).map(|i| 65536 + 2 * i as u32).collect());
+            cases.push((0..len).map(|i| i as u32).collect());
+            cases.push((0..len).map(|i| (i as u32) << 16).collect());
+        }
+        cases.push(vec![65534, 65535, 65536]);
+        cases.push(vec![65533, 65535, 65537, u32::MAX]);
+        cases.push(vec![u32::MAX - 4, u32::MAX - 2, u32::MAX]);
+        for size in [3, 4, 5, 6, 7, 8, 31, 4096, 4097, 65536] {
+            cases.push((0..size).collect());
+            cases.push((0..size).map(|i| i + i / 3).collect());
+            cases.push((0..size.min(32000)).map(|i| 65536 + i + i / 7).collect());
+        }
+        for values in cases {
             for optimize in [false, true] {
                 let mut actual = Vec::new();
-                write_prefixed_bitmap(&mut actual, &values, optimize).unwrap();
+                if optimize {
+                    write_prefixed_bitmap::<true>(&mut actual, &values).unwrap();
+                } else {
+                    write_prefixed_bitmap::<false>(&mut actual, &values).unwrap();
+                }
                 let native = serialize_roaring(&values, optimize, false).unwrap();
                 let mut expected = (native.len() as u64).to_le_bytes().to_vec();
                 expected.extend(native);
