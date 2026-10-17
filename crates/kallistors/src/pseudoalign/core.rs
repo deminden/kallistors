@@ -14,5 +14,7 @@ mod runtime;
 pub(super) use filters::{apply_strand_filter, block_index_for_position, filter_ec_by_fragment};
 pub use local::local_kmer_hits;
 pub(super) use matcher::{special_unitig_for_kmer, special_unitig_for_kmer_raw};
-pub(super) use read::{ec_for_read_bifrost, ec_for_read_bifrost_counting};
+pub(super) use read::{
+    ec_for_read_bifrost, ec_for_read_bifrost_counting, ec_for_read_bifrost_counting_borrowed,
+};
 pub(crate) use runtime::reset_thread_local_caches;

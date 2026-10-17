@@ -7,7 +7,7 @@ use crate::pseudoalign::fingerprints::{self, DISABLED};
 use crate::timing::{self, Stage};
 use rayon::prelude::*;
 use rdst::RadixSort;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU16, Ordering};
 
 const ORD_BITS: u32 = 26;
 const ORD_LIMIT: usize = 1 << ORD_BITS;
@@ -57,7 +57,7 @@ pub(super) fn eligible(
 }
 
 // Packed only during parallel lookup, never in the runtime descriptor table.
-// 46 key bits (bucket26/local20), position37 and fingerprint8 fit in 91 bits.
+// 46 key bits (bucket26/local20), position38 and fingerprint12 fit in 96 bits.
 #[derive(Clone, Copy)]
 #[repr(C, packed(4))]
 struct LookupRecord {
@@ -66,11 +66,12 @@ struct LookupRecord {
 }
 const _: () = assert!(std::mem::size_of::<LookupRecord>() == 12);
 impl LookupRecord {
-    fn new(bucket: u32, local: u32, position: u64, fingerprint: u8) -> Self {
+    fn new(bucket: u32, local: u32, position: u64, fingerprint: u16) -> Self {
+        debug_assert!(fingerprint <= DISABLED);
         let key = (u64::from(bucket) << LOCAL_BITS) | u64::from(local);
         Self {
             low: key | (position << 46),
-            high: ((position >> 18) as u32) | (u32::from(fingerprint) << 19),
+            high: ((position >> 18) as u32) | (u32::from(fingerprint) << 20),
         }
     }
     fn key(self) -> u64 {
@@ -83,16 +84,17 @@ impl LookupRecord {
         (self.key() & LOCAL_MASK) as u32
     }
     fn position(self) -> u64 {
-        (self.low >> 46) | (u64::from(self.high & ((1 << 19) - 1)) << 18)
+        (self.low >> 46) | (u64::from(self.high & ((1 << 20) - 1)) << 18)
     }
-    fn fingerprint(self) -> u8 {
-        (self.high >> 19) as u8
+    fn fingerprint(self) -> u16 {
+        (self.high >> 20) as u16
     }
 }
 impl rdst::RadixKey for LookupRecord {
+    // Fill the leading radix byte: all46 key bits retain their order.
     const LEVELS: usize = 6;
     fn get_level(&self, level: usize) -> u8 {
-        (self.key() >> (level * 8)) as u8
+        ((self.key() << 2) >> (level * 8)) as u8
     }
 }
 #[derive(Clone, Copy)]
@@ -111,14 +113,12 @@ impl Event {
     fn bucket(self) -> usize {
         (self.key >> ORD_BITS) as usize
     }
-    fn ordinal(self) -> u32 {
-        (self.key & ORD_MASK) as u32
-    }
 }
 impl rdst::RadixKey for Event {
+    // Bucket26 + ordinal26 use52 bits; pad to seven complete radix bytes.
     const LEVELS: usize = 7;
     fn get_level(&self, level: usize) -> u8 {
-        (self.key >> (level * 8)) as u8
+        ((self.key << 4) >> (level * 8)) as u8
     }
 }
 fn position_code(position: u64) -> Option<u64> {
@@ -144,26 +144,22 @@ impl Builder {
     }
     #[inline]
     fn record_code(&mut self, bucket: usize, code: u64, ordinal: u32) {
-        let old = self.states[bucket];
-        if old == 0 {
-            self.states[bucket] = (code << ORD_BITS) | (u64::from(ordinal) + 1);
-            return;
-        }
-        let current = Event::new(bucket, ordinal, decode_position(code));
-        self.record_existing(bucket, old, current);
+        record_code_state(
+            &mut self.states[bucket],
+            &mut self.events,
+            bucket,
+            code,
+            ordinal,
+        );
     }
     fn record_existing(&mut self, bucket: usize, old: u64, current: Event) {
-        if old & MULTI_TAG == MULTI_TAG {
-            self.states[bucket] = old + 1;
-        } else {
-            self.events.push(Event::new(
-                bucket,
-                ((old & ORD_MASK) - 1) as u32,
-                decode_position(old >> ORD_BITS),
-            ));
-            self.states[bucket] = MULTI_TAG | 2;
-        }
-        self.events.push(current);
+        record_existing_state(
+            &mut self.states[bucket],
+            &mut self.events,
+            bucket,
+            old,
+            current,
+        );
     }
     fn record_raw(&mut self, bucket: usize, position: u64, ordinal: u32) {
         if let Some(code) = position_code(position) {
@@ -222,10 +218,98 @@ impl Builder {
         }
     }
 }
+#[inline]
+fn record_code_state(
+    state: &mut u64,
+    events: &mut Vec<Event>,
+    bucket: usize,
+    code: u64,
+    ordinal: u32,
+) {
+    let old = *state;
+    if old == 0 {
+        *state = (code << ORD_BITS) | (u64::from(ordinal) + 1);
+        return;
+    }
+    record_existing_state(
+        state,
+        events,
+        bucket,
+        old,
+        Event::new(bucket, ordinal, decode_position(code)),
+    );
+}
+fn record_existing_state(
+    state: &mut u64,
+    events: &mut Vec<Event>,
+    bucket: usize,
+    old: u64,
+    current: Event,
+) {
+    if old & MULTI_TAG == MULTI_TAG {
+        *state = old + 1;
+    } else {
+        events.push(Event::new(
+            bucket,
+            ((old & ORD_MASK) - 1) as u32,
+            decode_position(old >> ORD_BITS),
+        ));
+        *state = MULTI_TAG | 2;
+    }
+    events.push(current);
+}
+
+fn merge_ordinary_chunks(
+    pool: &rayon::ThreadPool,
+    builder: &mut Builder,
+    fingerprints: &[AtomicU16],
+    chunks: &[Vec<LookupRecord>],
+    base: u32,
+) {
+    let width = builder
+        .states
+        .len()
+        .div_ceil(pool.current_num_threads())
+        .max(1);
+    let events: Vec<Vec<Event>> = pool.install(|| {
+        builder
+            .states
+            .par_chunks_mut(width)
+            .enumerate()
+            .map(|(owner, states)| {
+                let first = owner * width;
+                let end = first + states.len();
+                let mut events = Vec::new();
+                // Every source chunk is sorted by bucket, then original ordinal.
+                // Slice out this owner's range without rescanning other buckets.
+                for chunk in chunks {
+                    let lo = chunk.partition_point(|record| record.bucket() < first);
+                    let hi = lo + chunk[lo..].partition_point(|record| record.bucket() < end);
+                    for &record in &chunk[lo..hi] {
+                        let bucket = record.bucket();
+                        fingerprints::observe_serial(&fingerprints[bucket], record.fingerprint());
+                        record_code_state(
+                            &mut states[bucket - first],
+                            &mut events,
+                            bucket,
+                            record.position(),
+                            base + record.local(),
+                        );
+                    }
+                }
+                events
+            })
+            .collect()
+    });
+    for mut shard in events {
+        builder.events.append(&mut shard);
+    }
+}
+
 fn ordinary_batch(
     ctx: &Context<'_>,
     builder: &mut Builder,
-    fingerprints: &[AtomicU8],
+    fingerprints: &[AtomicU16],
     positions: &[u64],
     base: u32,
 ) {
@@ -262,24 +346,30 @@ fn ordinary_batch(
             })
             .collect()
     });
-    for chunk in chunks {
-        for record in chunk {
-            let bucket = record.bucket();
-            fingerprints::observe_serial(&fingerprints[bucket], record.fingerprint());
-            builder.record_code(bucket, record.position(), base + record.local());
+    if ctx.pool.current_num_threads() > 1
+        && positions.len() >= LOAD_MIN_PAR_CHUNK * ctx.pool.current_num_threads()
+    {
+        merge_ordinary_chunks(ctx.pool, builder, fingerprints, &chunks, base);
+    } else {
+        for chunk in chunks {
+            for record in chunk {
+                let bucket = record.bucket();
+                fingerprints::observe_serial(&fingerprints[bucket], record.fingerprint());
+                builder.record_code(bucket, record.position(), base + record.local());
+            }
         }
     }
 }
 fn km_batch(
     ctx: &Context<'_>,
     builder: &mut Builder,
-    fingerprints: &[AtomicU8],
+    fingerprints: &[AtomicU16],
     positions: &[u32],
     base: u32,
 ) {
     let chunk_len =
         (positions.len() / (ctx.pool.current_num_threads() * 4).max(1)).max(LOAD_MIN_PAR_CHUNK);
-    let chunks: Vec<Vec<Event>> = ctx.pool.install(|| {
+    let chunks: Vec<Vec<LookupRecord>> = ctx.pool.install(|| {
         positions
             .par_chunks(chunk_len)
             .enumerate()
@@ -291,10 +381,14 @@ fn km_batch(
                     if let Some(bytes) = ctx.encoded.km_bases.minimizer_at(uid, rel, 23)
                         && let Some(bucket) = ctx.mphf.lookup(&bytes)
                     {
-                        records.push(Event::new(
-                            bucket as usize,
-                            base + (chunk * chunk_len + i) as u32,
-                            ((uid as u64) << 32) | 0x8000_0000 | rel as u64,
+                        // Eligibility bounds UID/position widths. The shared
+                        // record retains the KM bit in its spare high padding.
+                        let code = ((uid as u64) << 16) | (1 << 37) | rel as u64;
+                        records.push(LookupRecord::new(
+                            bucket as u32,
+                            (chunk * chunk_len + i) as u32,
+                            code,
+                            DISABLED,
                         ));
                     }
                 }
@@ -307,11 +401,17 @@ fn km_batch(
             })
             .collect()
     });
-    for chunk in chunks {
-        for record in chunk {
-            let bucket = record.bucket();
-            fingerprints[bucket].store(DISABLED, Ordering::Relaxed);
-            builder.record_raw(bucket, record.position, record.ordinal());
+    if ctx.pool.current_num_threads() > 1
+        && positions.len() >= LOAD_MIN_PAR_CHUNK * ctx.pool.current_num_threads()
+    {
+        merge_ordinary_chunks(ctx.pool, builder, fingerprints, &chunks, base);
+    } else {
+        for chunk in chunks {
+            for record in chunk {
+                let bucket = record.bucket();
+                fingerprints[bucket].store(DISABLED, Ordering::Relaxed);
+                builder.record_code(bucket, record.position(), base + record.local());
+            }
         }
     }
 }
@@ -320,7 +420,7 @@ pub(super) fn build(
     ordinary: Vec<BitmapPositions>,
     km: Vec<BitmapPositions>,
     specials: Vec<(u64, u64)>,
-) -> (MinzPositionIndex, Vec<AtomicU8>) {
+) -> (MinzPositionIndex, Vec<AtomicU16>) {
     debug_assert!(eligible(&ctx, &ordinary, &km, specials.len()));
     let _count = timing::scoped(Stage::MinimizerCountPass);
     let input: usize = ordinary
@@ -330,7 +430,7 @@ pub(super) fn build(
         .sum::<usize>()
         + specials.len();
     let mut builder = Builder::new(ctx.buckets, input);
-    let fingerprints: Vec<_> = (0..ctx.buckets).map(|_| AtomicU8::new(0)).collect();
+    let fingerprints: Vec<_> = (0..ctx.buckets).map(|_| AtomicU16::new(0)).collect();
     let mut ordinal = 0u32;
     let mut batch = Vec::with_capacity(LOAD_BATCH_POSITIONS);
     let mut base = ordinal;
@@ -403,16 +503,59 @@ mod tests {
     use super::*;
     #[test]
     fn records_and_finalization_preserve_zero_positions_full_specials_and_encounter_order() {
-        let record = LookupRecord::new(
-            (ORD_LIMIT - 1) as u32,
-            LOCAL_MASK as u32,
-            ((UID_LIMIT - 1) as u64) << 16 | 65535,
-            254,
+        let mut radix_records = Vec::new();
+        let mut radix_events = Vec::new();
+        for bucket in [0, 1, 255, 256, 1 << 25, ORD_LIMIT - 1] {
+            for ordinal in [0, 1, LOCAL_MASK as u32] {
+                radix_records.push(LookupRecord::new(bucket as u32, ordinal, 0, 1));
+                radix_events.push(Event::new(bucket, ordinal, 0));
+            }
+        }
+        radix_records.reverse();
+        radix_events.reverse();
+        let mut expected: Vec<_> = radix_records.iter().map(|record| record.key()).collect();
+        expected.sort_unstable();
+        radix_records
+            .radix_sort_builder()
+            .with_parallel(false)
+            .with_single_threaded_tuner()
+            .sort();
+        assert_eq!(
+            radix_records
+                .iter()
+                .map(|record| record.key())
+                .collect::<Vec<_>>(),
+            expected
         );
-        assert_eq!(record.bucket(), ORD_LIMIT - 1);
-        assert_eq!(record.local(), LOCAL_MASK as u32);
-        assert_eq!(record.position(), ((UID_LIMIT - 1) as u64) << 16 | 65535);
-        assert_eq!(record.fingerprint(), 254);
+        let mut expected: Vec<_> = radix_events.iter().map(|event| event.key).collect();
+        expected.sort_unstable();
+        radix_events
+            .radix_sort_builder()
+            .with_parallel(false)
+            .with_single_threaded_tuner()
+            .sort();
+        assert_eq!(
+            radix_events
+                .iter()
+                .map(|event| event.key)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for fingerprint in [0, 1, 254, 255, 256, 4094, DISABLED] {
+            let record = LookupRecord::new(
+                (ORD_LIMIT - 1) as u32,
+                LOCAL_MASK as u32,
+                ((UID_LIMIT - 1) as u64) << 16 | 65535 | (1 << 37),
+                fingerprint,
+            );
+            assert_eq!(record.bucket(), ORD_LIMIT - 1);
+            assert_eq!(record.local(), LOCAL_MASK as u32);
+            assert_eq!(
+                record.position(),
+                ((UID_LIMIT - 1) as u64) << 16 | 65535 | (1 << 37)
+            );
+            assert_eq!(record.fingerprint(), fingerprint);
+        }
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(2)
             .build()
@@ -445,6 +588,65 @@ mod tests {
                     expected
                         .iter()
                         .any(|&p| p >> 32 == u32::MAX as u64 && p & 0x8000_0000 != 0)
+                );
+            }
+        }
+        for workers in [1, 2, 8] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let mut serial = Builder::new(17, 500);
+            let mut parallel = Builder::new(17, 500);
+            let serial_fp: Vec<_> = (0..17).map(|_| AtomicU16::new(0)).collect();
+            let parallel_fp: Vec<_> = (0..17).map(|_| AtomicU16::new(0)).collect();
+            serial.record_raw(4, u64::MAX, 0);
+            parallel.record_raw(4, u64::MAX, 0);
+            for fp in [&serial_fp, &parallel_fp] {
+                fp[4].store(DISABLED, Ordering::Relaxed);
+            }
+            let chunks: Vec<Vec<LookupRecord>> = (0..3)
+                .map(|chunk| {
+                    let mut records: Vec<_> = (0..128)
+                        .map(|i| {
+                            LookupRecord::new(
+                                (i * 7 % 17) as u32,
+                                (chunk * 128 + i) as u32,
+                                ((i as u64) << 16) | (chunk as u64) | (u64::from(i % 3 == 0) << 37),
+                                ((i * 31 + chunk * 1365) % 4094 + 1) as u16,
+                            )
+                        })
+                        .collect();
+                    records.sort_unstable_by_key(|record| record.key());
+                    records
+                })
+                .collect();
+            for base in [37, 1000] {
+                for chunk in &chunks {
+                    for &record in chunk {
+                        fingerprints::observe_serial(
+                            &serial_fp[record.bucket()],
+                            record.fingerprint(),
+                        );
+                        serial.record_code(
+                            record.bucket(),
+                            record.position(),
+                            base + record.local(),
+                        );
+                    }
+                }
+                merge_ordinary_chunks(&pool, &mut parallel, &parallel_fp, &chunks, base);
+            }
+            let serial = serial.finish(&pool);
+            let parallel = parallel.finish(&pool);
+            for bucket in 0..17 {
+                assert_eq!(
+                    parallel.get_with_overcrowded(bucket),
+                    serial.get_with_overcrowded(bucket)
+                );
+                assert_eq!(
+                    parallel_fp[bucket].load(Ordering::Relaxed),
+                    serial_fp[bucket].load(Ordering::Relaxed)
                 );
             }
         }

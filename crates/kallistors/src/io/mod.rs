@@ -148,7 +148,7 @@ fn span_as_usize(span: PackedSpan) -> Range<usize> {
 }
 
 pub enum FastqInput {
-    Gzip(Box<BufReader<flate2::read::MultiGzDecoder<BufReader<File>>>>),
+    Gzip(Box<BufReader<flate2::bufread::MultiGzDecoder<BufReader<File>>>>),
     Plain(BufReader<File>),
     Stdin(BufReader<Stdin>),
 }
@@ -207,7 +207,9 @@ pub fn open_fastq_reader(path: &Path) -> Result<FastqReader<FastqInput>> {
     let file = File::open(path).map_err(|_| Error::MissingFile(path.to_path_buf()))?;
     let reader = if path.extension().and_then(|s| s.to_str()) == Some("gz") {
         let file = BufReader::with_capacity(FASTQ_IO_BUFFER_BYTES, file);
-        let decoder = flate2::read::MultiGzDecoder::new(file);
+        // Consume our compressed buffer directly; the Read adapter would add
+        // another buffer and copy between it and this one.
+        let decoder = flate2::bufread::MultiGzDecoder::new(file);
         FastqInput::Gzip(Box::new(BufReader::with_capacity(
             FASTQ_IO_BUFFER_BYTES,
             decoder,
@@ -260,6 +262,37 @@ impl<R: BufRead> FastqReader<R> {
             start: start as u32,
             end: storage.len() as u32,
         }))
+    }
+
+    // A complete record already in the input buffer needs one fill/consume
+    // pair. Partial records retain the line reader's truncation/EOF behavior.
+    fn read_buffered_sequence(&mut self, storage: &mut Vec<u8>) -> Result<Option<PackedSpan>> {
+        let input = self.reader.fill_buf()?;
+        let mut lines = memchr::memchr_iter(b'\n', input);
+        let Some(header_end) = lines.next() else {
+            return Ok(None);
+        };
+        let Some(mut sequence_end) = lines.next() else {
+            return Ok(None);
+        };
+        let Some(_plus_end) = lines.next() else {
+            return Ok(None);
+        };
+        let Some(quality_end) = lines.next() else {
+            return Ok(None);
+        };
+        let sequence_start = header_end + 1;
+        if sequence_end > sequence_start && input[sequence_end - 1] == b'\r' {
+            sequence_end -= 1;
+        }
+        let start = storage.len();
+        storage.extend_from_slice(&input[sequence_start..sequence_end]);
+        let span = PackedSpan {
+            start: start as u32,
+            end: storage.len() as u32,
+        };
+        self.reader.consume(quality_end + 1);
+        Ok(Some(span))
     }
 
     fn read_line_discard(&mut self) -> Result<bool> {
@@ -340,6 +373,10 @@ impl<R: BufRead> PackedSeqBatchSource for FastqReader<R> {
     fn next_packed_seq_batch(&mut self, batch_size: usize) -> Result<Option<PackedSeqBatch>> {
         let mut batch = PackedSeqBatch::with_capacity(batch_size, batch_size * 300);
         while batch.records.len() < batch_size {
+            if let Some(seq) = self.read_buffered_sequence(&mut batch.storage)? {
+                batch.records.push(PackedSeqRecord { seq });
+                continue;
+            }
             if !self.read_line_discard()? {
                 break;
             }
@@ -389,7 +426,7 @@ mod tests {
     #[test]
     fn packed_discard_preserves_boundaries_crlf_and_truncation() {
         let data = b"@long-header\r\nACGT\r\n+long-plus\r\nIIII\r\n@r2\nNn\n+\nII";
-        for capacity in [1, 2, 7, 64] {
+        for capacity in [1, 2, 7, 64, 1024] {
             for batch_size in [1, 3] {
                 let mut reader =
                     FastqReader::new(BufReader::with_capacity(capacity, Cursor::new(data)));
@@ -412,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_discard_reads_concatenated_gzip_members() {
+    fn packed_discard_checks_concatenated_gzip_members() {
         use std::io::Write;
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("reads.fastq.gz");
@@ -426,13 +463,23 @@ mod tests {
             encoder.write_all(data).unwrap();
             compressed.extend(encoder.finish().unwrap());
         }
-        std::fs::write(&path, compressed).unwrap();
+        std::fs::write(&path, &compressed).unwrap();
         let mut reader = open_fastq_reader(&path).unwrap();
         let batch = reader.next_packed_seq_batch(3).unwrap().unwrap();
         assert_eq!(batch.len(), 2);
         assert_eq!(batch.seq(0), b"ACGT");
         assert_eq!(batch.seq(1), b"TGCA");
         assert!(reader.next_packed_seq_batch(3).unwrap().is_none());
+
+        // A valid first member must not hide a damaged or truncated second one.
+        let mut corrupt = compressed.clone();
+        let crc_start = corrupt.len() - 8;
+        corrupt[crc_start] ^= 1;
+        for invalid in [corrupt.as_slice(), &compressed[..compressed.len() - 1]] {
+            std::fs::write(&path, invalid).unwrap();
+            let mut reader = open_fastq_reader(&path).unwrap();
+            assert!(reader.next_packed_seq_batch(3).is_err());
+        }
     }
 
     #[test]

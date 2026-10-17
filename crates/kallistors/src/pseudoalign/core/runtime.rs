@@ -23,13 +23,14 @@ struct MphfCacheEntry {
     key: [u8; 8],
     idx: u32,
     state: u8,
-    fingerprint: u8,
+    fingerprint: u16,
 }
 
 pub(crate) struct MphfLookupCache {
     entries: Vec<MphfCacheEntry>,
     matches: FastKmerMatchCache,
     minimizers: MinimizerCandidateCache,
+    primary_cursor: super::super::minimizers::PrimaryMinimizerCursor,
     query_fingerprints: super::super::fingerprints::QueryFingerprintCache,
     pub(super) scan_scratch: super::fast::FastScannerScratch,
 }
@@ -40,6 +41,7 @@ impl Default for MphfLookupCache {
             entries: vec![MphfCacheEntry::default(); 2048],
             matches: FastKmerMatchCache::new(),
             minimizers: MinimizerCandidateCache::new(),
+            primary_cursor: Default::default(),
             query_fingerprints: super::super::fingerprints::QueryFingerprintCache::default(),
             scan_scratch: super::fast::FastScannerScratch::default(),
         }
@@ -61,7 +63,7 @@ impl MphfLookupCache {
         &mut self,
         forward: u64,
         reverse: u64,
-        fingerprint: u8,
+        fingerprint: u16,
     ) -> bool {
         self.query_fingerprints
             .contains(forward, reverse, fingerprint)
@@ -428,7 +430,7 @@ fn mphf_lookup_cached(
     index: &BifrostIndex,
     cache: &mut MphfLookupCache,
     min_bytes: &[u8; 8],
-) -> Option<(usize, u8)> {
+) -> Option<(usize, u16)> {
     // Canonical minimizers are left-aligned, so their low padding bits carry no entropy.
     let word = u64::from_le_bytes(*min_bytes);
     let slot = (word.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 53) as usize;
@@ -467,7 +469,7 @@ pub(crate) fn minimizer_bucket_with_fingerprint(
     index: &BifrostIndex,
     cache: &mut MphfLookupCache,
     key: &[u8; 8],
-) -> Option<(usize, u8)> {
+) -> Option<(usize, u16)> {
     mphf_lookup_cached(index, cache, key)
 }
 
@@ -487,7 +489,12 @@ pub(crate) fn minimizer_candidates_cached_into_with_code(
             return true;
         }
     }
-    if !minimizers_for_encoded_kmer_into(kmer, g, fwd_code, rev_code, out) {
+    let valid = if kmer.len() == 31 && g == 23 {
+        cache.primary_cursor.fill(fwd_code, rev_code, out)
+    } else {
+        minimizers_for_encoded_kmer_into(kmer, g, fwd_code, rev_code, out)
+    };
+    if !valid {
         return false;
     }
     if !cache_disabled {

@@ -1,9 +1,11 @@
+use super::super::BorrowedReadEc;
 use super::super::debug::{
     DroppedHitTrace, JumpDecisionTrace, MinimizerCandidateTrace, ReadDebugState,
     format_positions_sample,
 };
 use super::super::ec::{
     ec_has_offlist, encode_kmer_pair, filter_shades, intersect_sorted, merge_sorted_unique_vec,
+    valid_kmer_start_at_or_after,
 };
 use super::super::minimizers::{
     fill_revcomp, minhash_next_after_hash, minhash_primary_for_kmer, minimizer_for_kmer_strict,
@@ -23,18 +25,28 @@ use super::runtime::{
 };
 
 // Counting callers have finished placement sampling and do not consume hit metadata.
+pub(crate) fn ec_for_read_bifrost_counting_borrowed<'index>(
+    index: &'index BifrostIndex,
+    seq: &[u8],
+    strand: Strand,
+    options: PseudoalignOptions,
+) -> Option<BorrowedReadEc<'index>> {
+    if index.k > 0 && seq.len() >= index.k && fast_path_enabled(index, false, options) {
+        super::runtime::ensure_cache_context(index);
+        super::fast::ec_for_read_bifrost_fast_counting_borrowed(index, seq, strand, options)
+    } else {
+        ec_for_read_bifrost(index, seq, strand, None, options).map(BorrowedReadEc::owned)
+    }
+}
+
 pub(crate) fn ec_for_read_bifrost_counting(
     index: &BifrostIndex,
     seq: &[u8],
     strand: Strand,
     options: PseudoalignOptions,
 ) -> Option<ReadEc> {
-    if index.k > 0 && seq.len() >= index.k && fast_path_enabled(index, false, options) {
-        super::runtime::ensure_cache_context(index);
-        super::fast::ec_for_read_bifrost_fast_counting(index, seq, strand, options)
-    } else {
-        ec_for_read_bifrost(index, seq, strand, None, options)
-    }
+    ec_for_read_bifrost_counting_borrowed(index, seq, strand, options)
+        .map(BorrowedReadEc::into_owned)
 }
 
 // Main parity scanner: stream hits, keep an online EC intersection, and jump when safe.
@@ -729,7 +741,11 @@ pub(crate) fn ec_for_read_bifrost(
                 next_pos = last_pos;
             }
             if next_pos > pos {
-                let kmer_next = &seq[next_pos..next_pos + index.k];
+                let Some(next_query_pos) = valid_kmer_start_at_or_after(seq, next_pos, index.k)
+                else {
+                    break;
+                };
+                let kmer_next = &seq[next_query_pos..next_query_pos + index.k];
                 let next_hit = match_kmer_at_pos(
                     index,
                     kmer_next,
@@ -783,13 +799,15 @@ pub(crate) fn ec_for_read_bifrost(
                                 block_idx,
                                 used_revcomp,
                             });
-                            jump_to = Some(next_pos);
+                            jump_to = Some(next_query_pos);
                             jump_reason = "next_same_ec_direct";
                         }
                     } else if dist > 4 {
                         let middle_pos = (pos + next_pos) / 2;
-                        if middle_pos <= last_pos {
-                            let kmer_mid = &seq[middle_pos..middle_pos + index.k];
+                        if let Some(middle_query_pos) =
+                            valid_kmer_start_at_or_after(seq, middle_pos, index.k)
+                        {
+                            let kmer_mid = &seq[middle_query_pos..middle_query_pos + index.k];
                             if let Some((uid3, _start3, rev3, block_idx3, mid_relaxed)) =
                                 match_kmer_at_pos(
                                     index,
@@ -871,7 +889,7 @@ pub(crate) fn ec_for_read_bifrost(
                                         force_break = true;
                                         jump_reason = "mid_match_direct_end";
                                     } else {
-                                        jump_to = Some(next_pos);
+                                        jump_to = Some(next_query_pos);
                                         jump_reason = "mid_match_direct";
                                     }
                                 }
@@ -907,7 +925,7 @@ pub(crate) fn ec_for_read_bifrost(
                             block_idx,
                             used_revcomp,
                         });
-                        jump_to = Some(next_pos);
+                        jump_to = Some(next_query_pos);
                     }
                     if dlist_early_return {
                         force_break = true;

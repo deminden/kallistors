@@ -467,6 +467,31 @@ struct ReadEc {
     hard_reject_pair: bool,
 }
 
+// A completed count-only scan can keep an unchanged immutable graph EC.
+// Full/diagnostic callers retain the existing owned ReadEc interface.
+#[derive(Debug)]
+struct BorrowedReadEc<'index> {
+    read: ReadEc,
+    borrowed: Option<&'index [u32]>,
+}
+impl<'index> BorrowedReadEc<'index> {
+    fn owned(read: ReadEc) -> Self {
+        Self {
+            read,
+            borrowed: None,
+        }
+    }
+    fn ec(&self) -> &[u32] {
+        self.borrowed.unwrap_or(&self.read.ec)
+    }
+    fn into_owned(mut self) -> ReadEc {
+        if let Some(ec) = self.borrowed {
+            self.read.ec.extend_from_slice(ec);
+        }
+        self.read
+    }
+}
+
 /// Build a naive k-mer -> EC map by scanning unitigs and EC blocks in the index.
 pub fn build_kmer_ec_index(path: &Path) -> Result<KmerEcIndex> {
     let file = File::open(path).map_err(|_| Error::MissingFile(path.to_path_buf()))?;

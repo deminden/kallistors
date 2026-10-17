@@ -1,9 +1,12 @@
+use super::super::BorrowedReadEc;
 use super::super::debug::{
     DroppedHitTrace, JumpDecisionTrace, MinimizerCandidateTrace, ReadDebugState,
     format_positions_sample,
 };
-use super::super::ec::{KmerPairCursor, encode_kmer_pair, intersect_sorted_in_place};
-use super::super::minimizers::minimizer_tail_for_kmer;
+use super::super::ec::{
+    KmerPairCursor, encode_kmer_pair, encoded_kmer_at_or_after, intersect_sorted_in_place,
+};
+use super::super::minimizers::minimizer_tail_for_encoded;
 use super::super::{BifrostIndex, Hit, MatchInfo, PseudoalignOptions, ReadEc, Strand};
 use super::matcher::{
     jump_distance_for_match, match_kmer_at_pos, match_kmer_direct, match_unitig_candidate_encoded,
@@ -17,10 +20,51 @@ use super::runtime::{
 };
 
 #[inline]
+fn all_ascii_uppercase(sequence: &[u8]) -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::*;
+        let (wide, rest) = sequence.as_chunks::<64>();
+        for block in wide {
+            // SAFETY: each of the four loads is contained in this 64-byte
+            // array. Unsigned subtraction implements the exact A..Z range.
+            let invalid = unsafe {
+                let bad =
+                    |bytes| vcgtq_u8(vsubq_u8(bytes, vdupq_n_u8(b'A')), vdupq_n_u8(b'Z' - b'A'));
+                let a = bad(vld1q_u8(block.as_ptr()));
+                let b = bad(vld1q_u8(block.as_ptr().add(16)));
+                let c = bad(vld1q_u8(block.as_ptr().add(32)));
+                let d = bad(vld1q_u8(block.as_ptr().add(48)));
+                vmaxvq_u8(vorrq_u8(vorrq_u8(a, b), vorrq_u8(c, d)))
+            };
+            if invalid != 0 {
+                return false;
+            }
+        }
+        let (blocks, tail) = rest.as_chunks::<16>();
+        for block in blocks {
+            // SAFETY: one complete 16-byte array, baseline AArch64 NEON.
+            let invalid = unsafe {
+                vmaxvq_u8(vcgtq_u8(
+                    vsubq_u8(vld1q_u8(block.as_ptr()), vdupq_n_u8(b'A')),
+                    vdupq_n_u8(b'Z' - b'A'),
+                ))
+            };
+            if invalid != 0 {
+                return false;
+            }
+        }
+        tail.iter().all(u8::is_ascii_uppercase)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    sequence.iter().all(u8::is_ascii_uppercase)
+}
+
+#[inline]
 fn bucket_may_match(
     index: &BifrostIndex,
     cache: &mut MphfLookupCache,
-    fingerprint: u8,
+    fingerprint: u16,
     key: &[u8; 8],
     forward: u64,
     reverse: u64,
@@ -405,7 +449,8 @@ fn match_kmer_at_pos_fast_uncached_with_candidates(
         return matched;
     }
     // The tail is consulted only after the primary candidates fail.
-    if let Some((tail_bytes, tail_pos)) = minimizer_tail_for_kmer(kmer, index.g)
+    if let Some((tail_bytes, tail_pos)) =
+        minimizer_tail_for_encoded(kmer.len(), index.g, read_fwd, read_rev)
         && !min_candidates
             .iter()
             .any(|&(min_bytes, min_pos)| min_bytes == tail_bytes && min_pos == tail_pos)
@@ -539,6 +584,34 @@ fn match_kmer_at_pos_fast_with_codes(
     matched
 }
 
+// The lazy final-hit fold shares this prefix. Keep an immutable graph slice
+// until an actually different constraint requires writable intersection storage.
+struct OnlineIntersection<'index, 'scratch> {
+    initial: Option<&'index [u32]>,
+    owned: &'scratch mut Vec<u32>,
+}
+impl std::ops::Deref for OnlineIntersection<'_, '_> {
+    type Target = [u32];
+    fn deref(&self) -> &[u32] {
+        self.initial.unwrap_or(self.owned)
+    }
+}
+impl<'index> OnlineIntersection<'index, '_> {
+    fn initialize(&mut self, ec: &'index [u32]) {
+        self.initial = Some(ec);
+    }
+    fn intersect(&mut self, ec: &[u32]) {
+        if let Some(initial) = self.initial {
+            if initial == ec {
+                return;
+            }
+            self.owned.extend_from_slice(initial);
+            self.initial = None;
+        }
+        intersect_sorted_in_place(self.owned, ec);
+    }
+}
+
 #[derive(Default)]
 pub(super) struct FastScannerScratch {
     min_candidates: Vec<([u8; 8], usize)>,
@@ -588,16 +661,16 @@ pub(crate) fn ec_for_read_bifrost_fast(
             )
         };
         cache.scan_scratch = scratch;
-        result
+        result.map(BorrowedReadEc::into_owned)
     })
 }
 
-pub(super) fn ec_for_read_bifrost_fast_counting(
-    index: &BifrostIndex,
+pub(super) fn ec_for_read_bifrost_fast_counting_borrowed<'index>(
+    index: &'index BifrostIndex,
     seq: &[u8],
     strand: Strand,
     options: PseudoalignOptions,
-) -> Option<ReadEc> {
+) -> Option<BorrowedReadEc<'index>> {
     super::runtime::with_mphf_lookup_cache(|cache| {
         let mut scratch = std::mem::take(&mut cache.scan_scratch);
         scratch.clear();
@@ -615,15 +688,15 @@ pub(super) fn ec_for_read_bifrost_fast_counting(
     })
 }
 
-fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool>(
-    index: &BifrostIndex,
+fn ec_for_read_bifrost_fast_with_cache<'index, const TRACE: bool, const COUNT_ONLY: bool>(
+    index: &'index BifrostIndex,
     seq: &[u8],
     strand: Strand,
     mut dbg: Option<&mut ReadDebugState>,
     options: PseudoalignOptions,
     cache: &mut MphfLookupCache,
     scratch: &mut FastScannerScratch,
-) -> Option<ReadEc> {
+) -> Option<BorrowedReadEc<'index>> {
     let mut current: Vec<u32> = Vec::new();
     let min_candidates = &mut scratch.min_candidates;
     let jump_candidates = &mut scratch.jump_candidates;
@@ -635,13 +708,19 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
     let mut first_hit: Option<Hit> = None;
     let mut hits: Vec<Hit> = Vec::new();
     let mut counted = super::count::FinalHitFold::default();
+    // The folds share an exact prefix until a recorded constraint was omitted
+    // from the online stream. Materialize that prefix only on divergence.
+    let mut counted_diverged = false;
     // Ordinary reads only need to know whether an on-list exists. Counting every
     // transcript here would rescan the whole reference for every read.
     let dlist_onlist = index.onlist.as_deref();
     let mut any_dlist_kmer = false;
     let mut dlist_early_return = false;
     let mut append_dummy_hit = false;
-    let online_intersection = &mut scratch.online_intersection;
+    let online_intersection = &mut OnlineIntersection {
+        initial: None,
+        owned: &mut scratch.online_intersection,
+    };
     let mut has_online_intersection = false;
     let mut last_online_block = None;
     let mut backoff_until: Option<usize> = None;
@@ -652,9 +731,8 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
         "KALLISTORS_DISABLE_MINIMIZER_CACHE",
     );
     let match_cache_disabled = env_flag(&DISABLE_MATCH_CACHE, "KALLISTORS_DISABLE_MATCH_CACHE");
-    let negative_cache_enabled = dbg.is_none()
-        && !options.investigation.any_enabled()
-        && seq.iter().all(u8::is_ascii_uppercase);
+    let negative_cache_enabled =
+        dbg.is_none() && !options.investigation.any_enabled() && all_ascii_uppercase(seq);
     let mut kmer_cursor = KmerPairCursor::new(index.k);
     let mut pos = 0usize;
     let last_pos = seq.len() - index.k;
@@ -842,9 +920,9 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
         }
         if accept_for_stream && !ec.is_empty() && last_online_block != Some((uid, block_idx)) {
             if has_online_intersection {
-                intersect_sorted_in_place(online_intersection, ec);
+                online_intersection.intersect(ec);
                 if online_intersection.is_empty() {
-                    return Some(ReadEc {
+                    return Some(BorrowedReadEc::owned(ReadEc {
                         ec: Vec::new(),
                         best_match,
                         first_hit,
@@ -852,10 +930,10 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
                         had_offlist: false,
                         shade_union: Vec::new(),
                         hard_reject_pair: true,
-                    });
+                    }));
                 }
             } else {
-                online_intersection.extend_from_slice(ec);
+                online_intersection.initialize(ec);
                 has_online_intersection = true;
             }
             last_online_block = Some((uid, block_idx));
@@ -875,7 +953,17 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
             used_revcomp,
         };
         if COUNT_ONLY {
-            counted.push(index, hit);
+            if counted_diverged {
+                counted.push(index, hit);
+            } else if !accept_for_stream
+                && !ec.is_empty()
+                && last_online_block != Some((uid, block_idx))
+            {
+                counted =
+                    super::count::FinalHitFold::from_online(online_intersection, last_online_block);
+                counted.push(index, hit);
+                counted_diverged = true;
+            }
         } else {
             hits.push(hit);
         }
@@ -910,8 +998,13 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
                 next_pos = last_pos;
             }
             if next_pos > pos {
-                let kmer_next = &seq[next_pos..next_pos + index.k];
-                let kmer_next_codes = encode_kmer_pair(kmer_next);
+                let Some((next_query_pos, next_codes)) =
+                    encoded_kmer_at_or_after(seq, next_pos, index.k)
+                else {
+                    break;
+                };
+                let kmer_next = &seq[next_query_pos..next_query_pos + index.k];
+                let kmer_next_codes = Some(next_codes);
                 let mut next_hit = kmer_next_codes.and_then(|(next_fwd, next_rev)| {
                     match_kmer_at_pos_fast_with_codes(
                         index,
@@ -1000,32 +1093,33 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
                                 block_idx,
                                 used_revcomp,
                             });
-                            jump_to = Some(next_pos);
+                            jump_to = Some(next_query_pos);
                         }
                     } else if dist > 4 {
                         let middle_pos = (pos + next_pos) / 2;
-                        if middle_pos <= last_pos {
-                            let kmer_mid = &seq[middle_pos..middle_pos + index.k];
-                            let mut mid_hit =
-                                encode_kmer_pair(kmer_mid).and_then(|(mid_fwd, mid_rev)| {
-                                    match_kmer_at_pos_fast_with_codes(
-                                        index,
-                                        kmer_mid,
-                                        mid_fwd,
-                                        mid_rev,
-                                        allow_forward_base,
-                                        allow_rev_base,
-                                        diff,
-                                        jump_candidates,
-                                        cache,
-                                        true,
-                                        !in_backoff,
-                                        minimizer_cache_disabled,
-                                        match_cache_disabled,
-                                        true,
-                                        negative_cache_enabled,
-                                    )
-                                });
+                        if let Some((middle_query_pos, mid_codes)) =
+                            encoded_kmer_at_or_after(seq, middle_pos, index.k)
+                        {
+                            let kmer_mid = &seq[middle_query_pos..middle_query_pos + index.k];
+                            let mut mid_hit = Some(mid_codes).and_then(|(mid_fwd, mid_rev)| {
+                                match_kmer_at_pos_fast_with_codes(
+                                    index,
+                                    kmer_mid,
+                                    mid_fwd,
+                                    mid_rev,
+                                    allow_forward_base,
+                                    allow_rev_base,
+                                    diff,
+                                    jump_candidates,
+                                    cache,
+                                    true,
+                                    !in_backoff,
+                                    minimizer_cache_disabled,
+                                    match_cache_disabled,
+                                    true,
+                                    negative_cache_enabled,
+                                )
+                            });
                             if mid_hit.is_none()
                                 && in_backoff
                                 && let Some((
@@ -1090,9 +1184,9 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
                                         && last_online_block != Some((uid3, block_idx3))
                                     {
                                         if has_online_intersection {
-                                            intersect_sorted_in_place(online_intersection, mid_ec);
+                                            online_intersection.intersect(mid_ec);
                                             if online_intersection.is_empty() {
-                                                return Some(ReadEc {
+                                                return Some(BorrowedReadEc::owned(ReadEc {
                                                     ec: Vec::new(),
                                                     best_match,
                                                     first_hit,
@@ -1100,10 +1194,10 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
                                                     had_offlist: false,
                                                     shade_union: Vec::new(),
                                                     hard_reject_pair: true,
-                                                });
+                                                }));
                                             }
                                         } else {
-                                            online_intersection.extend_from_slice(mid_ec);
+                                            online_intersection.initialize(mid_ec);
                                             has_online_intersection = true;
                                         }
                                         last_online_block = Some((uid3, block_idx3));
@@ -1122,7 +1216,7 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
                                     if next_pos >= last_pos {
                                         force_break = true;
                                     } else {
-                                        jump_to = Some(next_pos);
+                                        jump_to = Some(next_query_pos);
                                     }
                                 }
                             }
@@ -1176,7 +1270,7 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
                             block_idx,
                             used_revcomp,
                         });
-                        jump_to = Some(next_pos);
+                        jump_to = Some(next_query_pos);
                     }
                     if dlist_early_return {
                         force_break = true;
@@ -1251,7 +1345,18 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
                 }
                 if let Some(hit) = synthetic_hit.take() {
                     if COUNT_ONLY {
-                        counted.push(index, hit);
+                        if counted_diverged {
+                            counted.push(index, hit);
+                        } else if last_online_block != Some((hit.unitig_id, hit.block_idx))
+                            && !ec_slice(index, hit.unitig_id, hit.block_idx).is_empty()
+                        {
+                            counted = super::count::FinalHitFold::from_online(
+                                online_intersection,
+                                last_online_block,
+                            );
+                            counted.push(index, hit);
+                            counted_diverged = true;
+                        }
                     } else {
                         hits.push(hit);
                     }
@@ -1286,7 +1391,7 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
     let mut found_nonempty = false;
     if COUNT_ONLY {
         if counted.rejected {
-            return Some(ReadEc {
+            return Some(BorrowedReadEc::owned(ReadEc {
                 ec: Vec::new(),
                 best_match,
                 first_hit,
@@ -1294,9 +1399,35 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
                 had_offlist: false,
                 shade_union: Vec::new(),
                 hard_reject_pair: true,
+            }));
+        }
+        if !counted_diverged
+            && !append_dummy_hit
+            && let Some(ec) = online_intersection.initial
+            && !ec.is_empty()
+            && index
+                .onlist
+                .as_deref()
+                .is_none_or(|mask| ec.iter().all(|&id| mask.get(id as usize) == Some(&true)))
+        {
+            return Some(BorrowedReadEc {
+                borrowed: Some(ec),
+                read: ReadEc {
+                    ec: Vec::new(),
+                    best_match,
+                    first_hit,
+                    hits,
+                    had_offlist: false,
+                    shade_union: Vec::new(),
+                    hard_reject_pair: false,
+                },
             });
         }
-        current = counted.ec;
+        if counted_diverged {
+            current = counted.ec;
+        } else {
+            current.extend_from_slice(online_intersection);
+        }
     } else {
         for hit in &hits {
             minpos = minpos.min(hit.read_pos);
@@ -1325,7 +1456,7 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
             }
             intersect_sorted_in_place(&mut current, ec);
             if current.is_empty() {
-                return Some(ReadEc {
+                return Some(BorrowedReadEc::owned(ReadEc {
                     ec: Vec::new(),
                     best_match,
                     first_hit,
@@ -1333,7 +1464,7 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
                     had_offlist: false,
                     shade_union: Vec::new(),
                     hard_reject_pair: true,
-                });
+                }));
             }
             last_unitig = Some(hit.unitig_id);
             last_block_idx = Some(hit.block_idx);
@@ -1348,7 +1479,7 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
         } else {
             intersect_sorted_in_place(&mut current, &ec);
             if current.is_empty() {
-                return Some(ReadEc {
+                return Some(BorrowedReadEc::owned(ReadEc {
                     ec: Vec::new(),
                     best_match,
                     first_hit,
@@ -1356,7 +1487,7 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
                     had_offlist: true,
                     shade_union: Vec::new(),
                     hard_reject_pair: true,
-                });
+                }));
             }
         }
     }
@@ -1374,7 +1505,7 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
     if maxpos >= minpos && (maxpos - minpos + index.k) < min_range {
         return None;
     }
-    Some(ReadEc {
+    Some(BorrowedReadEc::owned(ReadEc {
         ec: current,
         best_match,
         first_hit,
@@ -1382,5 +1513,56 @@ fn ec_for_read_bifrost_fast_with_cache<const TRACE: bool, const COUNT_ONLY: bool
         had_offlist: false,
         shade_union: Vec::new(),
         hard_reject_pair: false,
-    })
+    }))
+}
+
+#[cfg(test)]
+mod uppercase_tests {
+    use super::all_ascii_uppercase;
+    #[test]
+    fn uppercase_vectors_match_scalar_for_all_bytes_and_record_tails() {
+        for len in [
+            0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 95, 100, 127, 128, 129, 257,
+        ] {
+            let mut input = vec![b'N'; len];
+            assert!(all_ascii_uppercase(&input));
+            for position in 0..len {
+                for value in 0..=u8::MAX {
+                    input[position] = value;
+                    assert_eq!(
+                        all_ascii_uppercase(&input),
+                        input.iter().all(u8::is_ascii_uppercase),
+                        "{len} {position} {value}"
+                    );
+                }
+                input[position] = b'N';
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod borrowed_prefix_tests {
+    use super::*;
+    #[test]
+    fn borrowed_prefix_materializes_only_when_a_constraint_changes() {
+        let original = [1, 1, 3, 7];
+        let same = [1, 1, 3, 7];
+        let mut scratch = Vec::new();
+        let mut online = OnlineIntersection {
+            initial: None,
+            owned: &mut scratch,
+        };
+        online.initialize(&original);
+        online.intersect(&same);
+        assert!(online.initial.is_some());
+        assert_eq!(&*online, &original);
+        online.intersect(&[1, 3, 3, 8]);
+        assert!(online.initial.is_none());
+        assert_eq!(&*online, &[1, 3]);
+        online.intersect(&[3]);
+        assert_eq!(&*online, &[3]);
+        online.intersect(&[]);
+        assert!(online.is_empty());
+    }
 }

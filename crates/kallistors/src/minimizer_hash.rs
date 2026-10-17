@@ -28,34 +28,26 @@ const REP_HASH_GROUPS: [[u64; 256]; 5] = {
     }
     groups
 };
-// Grouped XOR/rotation composition for the common 23-base initializer.
-static REP_GROUP_SIX: [u64; 4096] = {
-    let mut groups = [0; 4096];
-    let mut word = 0;
-    while word < groups.len() {
-        groups[word] =
-            REP_HASH_GROUPS[4][word & 255] ^ REP_HASH_GROUPS[2][word >> 8].rotate_left(4);
-        word += 1;
+// Three-base groups keep the initializer table within512 bytes.
+static REP_GROUP_THREE: [u64; 64] = {
+    let mut groups = [0; 64];
+    let mut i = 0;
+    while i < 64 {
+        groups[i] = REP_HASH_GROUPS[3][i];
+        i += 1;
     }
     groups
 };
-static REP_GROUP_FIVE: [u64; 1024] = {
-    let mut groups = [0; 1024];
-    let mut word = 0;
-    while word < groups.len() {
-        groups[word] =
-            REP_HASH_GROUPS[4][word & 255] ^ REP_HASH_GROUPS[1][word >> 8].rotate_left(4);
-        word += 1;
-    }
-    groups
-};
-
 #[inline]
 fn rep_grouped_23(word: u64) -> u64 {
-    REP_GROUP_SIX[(word & 4095) as usize]
-        ^ REP_GROUP_SIX[((word >> 12) & 4095) as usize].rotate_left(6)
-        ^ REP_GROUP_SIX[((word >> 24) & 4095) as usize].rotate_left(12)
-        ^ REP_GROUP_FIVE[((word >> 36) & 1023) as usize].rotate_left(18)
+    REP_GROUP_THREE[(word & 63) as usize]
+        ^ REP_GROUP_THREE[((word >> 6) & 63) as usize].rotate_left(3)
+        ^ REP_GROUP_THREE[((word >> 12) & 63) as usize].rotate_left(6)
+        ^ REP_GROUP_THREE[((word >> 18) & 63) as usize].rotate_left(9)
+        ^ REP_GROUP_THREE[((word >> 24) & 63) as usize].rotate_left(12)
+        ^ REP_GROUP_THREE[((word >> 30) & 63) as usize].rotate_left(15)
+        ^ REP_GROUP_THREE[((word >> 36) & 63) as usize].rotate_left(18)
+        ^ REP_HASH_GROUPS[2][((word >> 42) & 15) as usize].rotate_left(21)
 }
 
 /// Exact REP state from a validated right-aligned A/C/G/T two-bit word.

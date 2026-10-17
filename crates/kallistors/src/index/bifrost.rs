@@ -66,28 +66,50 @@ pub struct MphfDebugInfo {
     pub final_hash_hit: bool,
 }
 
-// floor(2^64 / divisor) underestimates the quotient by at most one for
-// a u64 numerator. One exact correction therefore preserves every remainder.
+// Word-aligned domains keep the low six bits unchanged. Their remaining
+// numerator has only 58 bits, allowing a rounded-up reciprocal with a proven
+// error below 1/divisor and no remainder correction. Other domains retain the
+// full-u64 reciprocal and its single exact correction.
 #[derive(Clone, Copy)]
 pub(super) struct ReducedDomain {
     divisor: u64,
     reciprocal: u64,
+    word_shift: Option<u32>,
 }
 impl ReducedDomain {
     pub(super) fn new(divisor: u64) -> Self {
         assert_ne!(divisor, 0);
-        let reciprocal = if divisor == 1 {
-            0
+        if divisor >= 4096 && divisor.is_multiple_of(64) {
+            let words = divisor >> 6;
+            let bits = u64::BITS - (words - 1).leading_zeros();
+            let exponent = 58 + bits;
+            let reciprocal = (1u128 << exponent).div_ceil(u128::from(words)) as u64;
+            Self {
+                divisor: words,
+                reciprocal,
+                word_shift: Some(exponent - 64),
+            }
         } else {
-            ((1u128 << 64) / u128::from(divisor)) as u64
-        };
-        Self {
-            divisor,
-            reciprocal,
+            let reciprocal = if divisor == 1 {
+                0
+            } else {
+                ((1u128 << 64) / u128::from(divisor)) as u64
+            };
+            Self {
+                divisor,
+                reciprocal,
+                word_shift: None,
+            }
         }
     }
     #[inline]
     pub(super) fn remainder(self, value: u64) -> u64 {
+        if let Some(shift) = self.word_shift {
+            let numerator = value >> 6;
+            let quotient =
+                (((u128::from(numerator) * u128::from(self.reciprocal)) >> 64) as u64) >> shift;
+            return ((numerator - quotient * self.divisor) << 6) | (value & 63);
+        }
         if self.divisor == 1 {
             return 0;
         }
@@ -109,7 +131,7 @@ struct BooLevel {
 }
 
 impl BooLevel {
-    #[inline]
+    #[inline(always)]
     fn rank_for_hash(&self, hash: u64) -> Option<u64> {
         let bucket = match self.reduced_domain {
             Some(domain) => domain.remainder(hash),
@@ -139,15 +161,9 @@ impl BitVector {
     fn load<R: Read>(reader: &mut R) -> Result<Self> {
         let size = read_u64_le(reader)?;
         let nchar = read_u64_le(reader)?;
-        let mut bit_array = vec![0u64; nchar as usize];
-        for slot in &mut bit_array {
-            *slot = read_u64_le(reader)?;
-        }
+        let bit_array = read_u64_array(reader, nchar as usize)?;
         let ranks_len = read_u64_le(reader)? as usize;
-        let mut ranks = vec![0u64; ranks_len];
-        for slot in &mut ranks {
-            *slot = read_u64_le(reader)?;
-        }
+        let ranks = read_u64_array(reader, ranks_len)?;
         let mut ranked_words = Vec::with_capacity(bit_array.len());
         'blocks: for (words, &base) in bit_array.chunks(8).zip(&ranks) {
             let mut rank = base;
@@ -188,8 +204,16 @@ impl BitVector {
             };
             Some(u64::from(word.rank) + u64::from(before))
         } else {
-            self.get(pos).then(|| self.rank(pos))
+            self.get_rank_fallback(pos)
         }
+    }
+
+    // Compact rank words cover ordinary indexes. Keep the full-width path
+    // available for large/incomplete tables without expanding each hot probe.
+    #[cold]
+    #[inline(never)]
+    fn get_rank_fallback(&self, pos: u64) -> Option<u64> {
+        self.get(pos).then(|| self.rank(pos))
     }
 
     fn get(&self, pos: u64) -> bool {
@@ -609,6 +633,24 @@ pub(crate) unsafe fn deserialize_roaring_to_vec(buf: &[u8]) -> Option<Vec<u32>> 
     Some(out)
 }
 
+fn read_u64_array<R: Read>(reader: &mut R, len: usize) -> Result<Vec<u64>> {
+    let mut words = vec![0u64; len];
+    // SAFETY: every u64 bit pattern is valid. The byte view spans exactly
+    // initialized exclusive Vec storage, and cannot outlive that borrow.
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(
+            words.as_mut_ptr().cast::<u8>(),
+            std::mem::size_of_val(words.as_slice()),
+        )
+    };
+    reader.read_exact(bytes)?;
+    #[cfg(target_endian = "big")]
+    for word in &mut words {
+        *word = u64::from_le(*word);
+    }
+    Ok(words)
+}
+
 fn read_u64_le<R: Read>(reader: &mut R) -> Result<u64> {
     let mut buf = [0u8; 8];
     reader.read_exact(&mut buf)?;
@@ -646,6 +688,24 @@ mod mphf_lookup_tests {
     use super::*;
 
     #[test]
+    fn bulk_bitvector_words_preserve_little_endian_and_truncated_input_errors() {
+        let words = [0u64, 1, u64::MAX, 1 << 63, 0x0123456789abcdef];
+        let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        assert_eq!(
+            read_u64_array(&mut std::io::Cursor::new(&bytes), words.len()).unwrap(),
+            words
+        );
+        assert!(
+            read_u64_array(&mut std::io::Cursor::new([]), 0)
+                .unwrap()
+                .is_empty()
+        );
+        for end in 0..bytes.len() {
+            assert!(read_u64_array(&mut std::io::Cursor::new(&bytes[..end]), words.len()).is_err());
+        }
+    }
+
+    #[test]
     fn reduced_domains_preserve_exact_u64_remainders_at_boundaries() {
         let mut state = 17u64;
         for domain in [
@@ -655,9 +715,17 @@ mod mphf_lookup_tests {
             7,
             64,
             65,
+            4096,
+            4160,
+            8128,
+            8192,
+            8256,
+            1 << 20,
+            50_102_144,
             50_102_171,
             u32::MAX as u64,
             1u64 << 63,
+            u64::MAX - 63,
             u64::MAX,
         ] {
             let reduced = StrengthReducedU64::new(domain);

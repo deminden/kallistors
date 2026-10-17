@@ -350,6 +350,30 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
         .unwrap_or_else(|| vec![0u32; super::MAX_FRAG_LEN as usize]);
 
     let fragment_budget = sampling.map_or(usize::MAX, FragmentLengthSampler::remaining);
+    if fragment_budget == 0
+        && counts.bias.is_none()
+        && options.strand_specific.is_none()
+        && !index.use_shade
+        && !options.dfk_onlist
+    {
+        count_paired_borrowed_batch(
+            index,
+            left_batch,
+            right_batch,
+            read_range,
+            strand,
+            options,
+            counts,
+            ec_map,
+        );
+        if let Some(sampler) = sampling {
+            sampler.submit(0);
+        }
+        counts.fragment_length_stats = (frag_stats.count() > 0).then_some(frag_stats);
+        counts.fragment_length_hist = counts.fragment_length_stats.as_ref().map(|_| frag_hist);
+        return Ok(());
+    }
+
     let mut sampled = 0usize;
     let mut merged = Vec::new();
     for idx in read_range {
@@ -528,6 +552,55 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
     Ok(())
 }
 
+// This caller has validated the paired range and exhausted the placement quota.
+// The index stays immutably borrowed while both mate EC views are consumed.
+#[allow(clippy::too_many_arguments)]
+fn count_paired_borrowed_batch(
+    index: &BifrostIndex,
+    left: &PackedSeqBatch,
+    right: &PackedSeqBatch,
+    range: std::ops::Range<usize>,
+    strand: Strand,
+    options: PseudoalignOptions,
+    counts: &mut EcCounts,
+    ec_map: &mut EcCountMap,
+) {
+    let mut merged = Vec::new();
+    for idx in range {
+        if super::reset_all_caches_per_read() {
+            super::reset_thread_local_caches();
+        }
+        counts.reads_processed = counts.reads_processed.saturating_add(1);
+        // SAFETY: caller proved both batch lengths equal and this range in bounds.
+        let a_seq = unsafe { left.seq_unchecked(idx) };
+        let b_seq = unsafe { right.seq_unchecked(idx) };
+        let a = super::core::ec_for_read_bifrost_counting_borrowed(index, a_seq, strand, options);
+        if a.as_ref().is_some_and(|v| v.read.hard_reject_pair) {
+            continue;
+        }
+        let b = super::core::ec_for_read_bifrost_counting_borrowed(index, b_seq, strand, options);
+        if b.as_ref().is_some_and(|v| v.read.hard_reject_pair) {
+            continue;
+        }
+        let a = a.as_ref().filter(|v| !v.ec().is_empty());
+        let b = b.as_ref().filter(|v| !v.ec().is_empty());
+        let ec = match (a, b) {
+            (None, None) => continue,
+            (Some(v), None) | (None, Some(v)) => v.ec(),
+            (Some(a), Some(b)) if std::ptr::eq(a.ec(), b.ec()) => a.ec(),
+            (Some(a), Some(b)) => {
+                super::intersect_sorted(a.ec(), b.ec(), &mut merged);
+                &merged
+            }
+        };
+        if ec.is_empty() {
+            continue;
+        }
+        counts.reads_aligned = counts.reads_aligned.saturating_add(1);
+        super::utils::add_ec_count_slice(counts, ec_map, ec);
+    }
+}
+
 fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
     index: &BifrostIndex,
     reader1: &mut R1,
@@ -565,8 +638,26 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
 
                 let mut dbg1 = report.as_ref().map(|_| ReadDebugState::default());
                 let mut dbg2 = report.as_ref().map(|_| ReadDebugState::default());
-                let ec1 = super::ec_for_read_bifrost(index, &a.seq, strand, dbg1.as_mut(), options);
-                let ec2 = super::ec_for_read_bifrost(index, &b.seq, strand, dbg2.as_mut(), options);
+                // Once the placement quota is complete, ordinary counting needs
+                // the exact EC fold but no hit collection or best-match metadata.
+                // Diagnostics, bias and stranded filters retain the complete scan.
+                let count_only = options.fragment_length_samples != 0
+                    && frag_stats.count() >= options.fragment_length_samples as u64
+                    && bias.is_none()
+                    && options.strand_specific.is_none()
+                    && report.is_none()
+                    && final_trace.is_none();
+                let (ec1, ec2) = if count_only {
+                    (
+                        super::core::ec_for_read_bifrost_counting(index, &a.seq, strand, options),
+                        super::core::ec_for_read_bifrost_counting(index, &b.seq, strand, options),
+                    )
+                } else {
+                    (
+                        super::ec_for_read_bifrost(index, &a.seq, strand, dbg1.as_mut(), options),
+                        super::ec_for_read_bifrost(index, &b.seq, strand, dbg2.as_mut(), options),
+                    )
+                };
 
                 if ec1.is_none() && ec2.is_none() {
                     if let Some(trace) = final_trace.as_mut() {

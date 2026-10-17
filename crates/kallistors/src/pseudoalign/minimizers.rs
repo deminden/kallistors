@@ -229,6 +229,68 @@ pub(super) fn minimizers_for_encoded_kmer_into(
     !out.is_empty()
 }
 
+// Reuse five exact overlapping g-mer hashes when successive query words
+// share all 30 bases. Content equality proves reuse even across read boundaries.
+#[derive(Default)]
+pub(super) struct PrimaryMinimizerCursor {
+    previous: Option<u64>,
+    hashes: [u64; 6],
+    last: Option<RepHashWindow>,
+}
+impl PrimaryMinimizerCursor {
+    pub(super) fn fill(
+        &mut self,
+        forward: u64,
+        reverse: u64,
+        out: &mut Vec<([u8; 8], usize)>,
+    ) -> bool {
+        const MASK: u64 = (1u64 << 46) - 1;
+        const OVERLAP: u64 = (1u64 << 60) - 1;
+        let adjacent = self
+            .previous
+            .is_some_and(|previous| previous & OVERLAP == forward >> 2);
+        let mut rolling;
+        if adjacent {
+            self.hashes.copy_within(1..6, 0);
+            let pos = 6;
+            rolling = self.last.expect("previous query has final window");
+            rolling = rolling.advance_encoded(
+                ((forward >> (2 * (31 - pos))) & 3) as usize,
+                ((forward >> (2 * (31 - pos - 23))) & 3) as usize,
+                23,
+            );
+            self.hashes[5] = rolling.finish();
+        } else {
+            rolling =
+                RepHashWindow::from_encoded((forward >> 14) & MASK, (reverse >> 2) & MASK, 23);
+            for (offset, hash) in self.hashes.iter_mut().enumerate() {
+                let pos = offset + 1;
+                if offset != 0 {
+                    rolling = rolling.advance_encoded(
+                        ((forward >> (2 * (31 - pos))) & 3) as usize,
+                        ((forward >> (2 * (31 - pos - 23))) & 3) as usize,
+                        23,
+                    );
+                }
+                *hash = rolling.finish();
+            }
+        }
+        self.previous = Some(forward);
+        self.last = Some(rolling);
+        let best = self.hashes.iter().copied().min().expect("six windows");
+        out.clear();
+        for (offset, hash) in self.hashes.iter().copied().enumerate() {
+            if hash == best {
+                let pos = offset + 1;
+                let f = (forward >> (2 * (8 - pos))) & MASK;
+                let r = (reverse >> (2 * pos)) & MASK;
+                out.push(((f.min(r) << 18).to_le_bytes(), pos));
+            }
+        }
+        true
+    }
+}
+
 fn minimizers_31_23(forward: u64, reverse: u64, out: &mut Vec<([u8; 8], usize)>) -> bool {
     const MASK: u64 = (1u64 << 46) - 1;
     let mut rolling =
@@ -294,6 +356,55 @@ pub(super) fn minimizers_ranked_for_kmer(
 
 type MinimizerCandidates = Vec<([u8; 8], usize)>;
 type MinhashCandidates = (MinimizerCandidates, Option<([u8; 8], usize)>);
+
+// Bifrost's inclusive neighbor bounds include one more anchor than ordinary
+// primary candidates. Preserve that separate bound and every equal-hash tie.
+pub(super) fn minhash_primary_for_encoded(
+    k: usize,
+    g: usize,
+    forward: u64,
+    reverse: u64,
+) -> Option<(u64, MinimizerCandidates)> {
+    if k > 32 {
+        return None;
+    }
+    let bounds = bifrost_neighbor_bounds(k, g)?;
+    let mask = if g == 0 { 0 } else { u64::MAX >> (64 - 2 * g) };
+    let first = bounds.start;
+    let mut rolling = RepHashWindow::from_encoded(
+        (forward >> (2 * (k - g - first))) & mask,
+        (reverse >> (2 * first)) & mask,
+        g,
+    );
+    let mut best = None;
+    let mut out = Vec::new();
+    for pos in bounds {
+        if pos > first {
+            rolling = rolling.advance_encoded(
+                ((forward >> (2 * (k - pos))) & 3) as usize,
+                ((forward >> (2 * (k - pos - g))) & 3) as usize,
+                g,
+            );
+        }
+        let hash = rolling.finish();
+        if best.is_some_and(|best| hash > best) {
+            continue;
+        }
+        let word = if g == 0 {
+            0
+        } else {
+            let f = (forward >> (2 * (k - g - pos))) & mask;
+            let r = (reverse >> (2 * pos)) & mask;
+            f.min(r) << (64 - 2 * g)
+        };
+        if best != Some(hash) {
+            out.clear();
+            best = Some(hash);
+        }
+        out.push((word.to_le_bytes(), pos));
+    }
+    best.map(|best| (best, out))
+}
 
 pub(super) fn minhash_primary_for_kmer(seq: &[u8], g: usize) -> Option<(u64, MinimizerCandidates)> {
     let bounds = bifrost_neighbor_bounds(seq.len(), g)?;
@@ -379,6 +490,27 @@ pub(super) fn minhash_candidates_for_kmer(seq: &[u8], g: usize) -> Option<Minhas
     let (min_hash, min_positions) = minhash_primary_for_kmer(seq, g)?;
     let next_min = minhash_next_after_hash(seq, g, min_hash).map(|(_, v)| v);
     Some((min_positions, next_min))
+}
+
+// The caller has already validated and encoded the complete query word.
+#[inline]
+pub(super) fn minimizer_tail_for_encoded(
+    k: usize,
+    g: usize,
+    forward: u64,
+    reverse: u64,
+) -> Option<([u8; 8], usize)> {
+    if k > 32 {
+        return None;
+    }
+    let end = bifrost_neighbor_bounds(k, g)?.last;
+    if g == 0 {
+        return Some(([0; 8], end));
+    }
+    let mask = (1u64 << (2 * g)) - 1;
+    let f = (forward >> (2 * (k - end - g))) & mask;
+    let r = (reverse >> (2 * end)) & mask;
+    Some(((f.min(r) << (64 - 2 * g)).to_le_bytes(), end))
 }
 
 pub(super) fn minimizer_tail_for_kmer(seq: &[u8], g: usize) -> Option<([u8; 8], usize)> {
@@ -611,6 +743,16 @@ mod encoded_tests {
                     r |= (3 - code) << (2 * i);
                 }
                 for g in 0..=k {
+                    assert_eq!(
+                        minimizer_tail_for_encoded(k, g, f, r),
+                        minimizer_tail_for_kmer(&seq, g),
+                        "tail k={k} g={g} case={case}"
+                    );
+                    assert_eq!(
+                        minhash_primary_for_encoded(k, g, f, r),
+                        minhash_primary_for_kmer(&seq, g),
+                        "inclusive primary k={k} g={g} case={case}"
+                    );
                     let mut old = Vec::new();
                     let mut new = Vec::new();
                     assert_eq!(
@@ -618,6 +760,38 @@ mod encoded_tests {
                         minimizers_for_encoded_kmer_into(&seq, g, f, r, &mut new)
                     );
                     assert_eq!(old, new, "k={k}, g={g}, case={case}");
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod primary_cursor_tests {
+    use super::*;
+    #[test]
+    fn overlapping_primary_hashes_match_independent_byte_oracle() {
+        let mut cursor = PrimaryMinimizerCursor::default();
+        let mut state = 17u64;
+        for kind in 0..6 {
+            let sequence: Vec<u8> = (0..500)
+                .map(|i| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    match kind {
+                        0 => b'A',
+                        1 => b"AT"[i % 2],
+                        _ => b"ACGT"[(state >> 32) as usize & 3],
+                    }
+                })
+                .collect();
+            for step in [1, 2, 7, 31] {
+                for window in sequence.windows(31).step_by(step) {
+                    let (f, r) = super::super::ec::encode_kmer_pair(window).unwrap();
+                    let mut expected = Vec::new();
+                    minimizers_for_kmer_into(window, 23, &mut expected);
+                    let mut actual = Vec::new();
+                    assert!(cursor.fill(f, r, &mut actual));
+                    assert_eq!(actual, expected);
                 }
             }
         }

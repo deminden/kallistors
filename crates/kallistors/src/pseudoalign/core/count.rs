@@ -12,6 +12,15 @@ pub(super) struct FinalHitFold {
 }
 
 impl FinalHitFold {
+    pub(super) fn from_online(ec: &[u32], last: Option<(usize, usize)>) -> Self {
+        Self {
+            ec: ec.to_vec(),
+            rejected: false,
+            found_nonempty: !ec.is_empty(),
+            last,
+        }
+    }
+
     pub(super) fn push(&mut self, index: &BifrostIndex, hit: Hit) {
         if self.rejected {
             return;
@@ -70,7 +79,36 @@ mod tests {
         .unwrap();
         crate::index::build_index(&path, &[fasta], crate::index::IndexBuildOptions::default())
             .unwrap();
-        let index = crate::pseudoalign::build_bifrost_index_threaded(&path, 2).unwrap();
+        let mut index = crate::pseudoalign::build_bifrost_index_threaded(&path, 2).unwrap();
+        for mask in [
+            Some(vec![true; 3]),
+            Some(vec![false, true, true]),
+            Some(vec![false; 3]),
+            None,
+        ] {
+            index.onlist = mask;
+            let borrowed = super::super::read::ec_for_read_bifrost_counting_borrowed(
+                &index,
+                &a[31..151],
+                Strand::Unstranded,
+                PseudoalignOptions::default(),
+            );
+            let full = ec_for_read_bifrost(
+                &index,
+                &a[31..151],
+                Strand::Unstranded,
+                None,
+                PseudoalignOptions::default(),
+            );
+            assert_eq!(
+                borrowed.as_ref().map(|v| v.ec()),
+                full.as_ref().map(|v| v.ec.as_slice())
+            );
+            if index.onlist.as_ref().is_none_or(|m| m.iter().all(|&x| x)) {
+                assert!(borrowed.as_ref().unwrap().borrowed.is_some());
+            }
+        }
+        index.onlist = Some(vec![true; 3]);
         let mut queries = Vec::new();
         for seq in [&a, &b, &c] {
             for window in seq.windows(120).step_by(37) {
@@ -101,9 +139,18 @@ mod tests {
                     strand,
                     PseudoalignOptions::default(),
                 );
+                let borrowed = super::super::read::ec_for_read_bifrost_counting_borrowed(
+                    &index,
+                    &read,
+                    strand,
+                    PseudoalignOptions::default(),
+                )
+                .map(super::super::super::BorrowedReadEc::into_owned);
+                let expected = key(full);
+                assert_eq!(key(borrowed), expected);
                 assert_eq!(
                     key(counted),
-                    key(full),
+                    expected,
                     "{} {strand:?}",
                     String::from_utf8_lossy(&read)
                 );

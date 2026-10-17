@@ -68,3 +68,70 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root")
         .to_path_buf()
 }
+
+// SRR10919051.8026841 and .8028299, fasterp-trimmed; expected complete ECs
+// independently exported by original kallisto v0.52.0 with Pachter Lab v1
+// mature + nascent FASTAs concatenated in that order. No introns are synthesized.
+#[test]
+#[ignore = "requires the official Pachter Lab human NAC index"]
+fn paired_nac_ambiguous_jump_probes_keep_complete_upstream_ecs() {
+    use kallistors::io::ReadSource;
+    use kallistors::pseudoalign::{
+        build_bifrost_index_quant_packed_threaded, trace_read_pair_bifrost,
+    };
+    use std::collections::BTreeMap;
+
+    let path = std::env::var_os("KALLISTORS_TEST_NAC_INDEX")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            workspace_root().join("data/official-human-nac/human_nac.mature-plus-nascent.idx")
+        });
+    assert!(
+        path.is_file(),
+        "prepare the official Pachter Lab human NAC index first"
+    );
+    let index =
+        build_bifrost_index_quant_packed_threaded(&path, 8).expect("load official NAC index");
+    let reads1 = include_bytes!("../fixtures/paired_nac_ambiguous_1.fixture");
+    let reads2 = include_bytes!("../fixtures/paired_nac_ambiguous_2.fixture");
+    let expected = [
+        vec![18719, 18720, 18721, 18722, 18732, 231083],
+        vec![251846, 251888],
+    ];
+    for threads in [1, 8] {
+        let mut left = FastqReader::new(Cursor::new(reads1));
+        let mut right = FastqReader::new(Cursor::new(reads2));
+        let counts = pseudoalign_paired_bifrost_with_options_threaded(
+            &index,
+            &mut left,
+            &mut right,
+            Strand::Unstranded,
+            PseudoalignOptions::default(),
+            threads,
+        )
+        .expect("map ambiguous paired reads");
+        assert_eq!(counts.reads_processed, 2);
+        assert_eq!(counts.reads_aligned, 2);
+        let actual: BTreeMap<_, _> = counts.ec_list.into_iter().zip(counts.counts).collect();
+        let oracle: BTreeMap<_, _> = expected.iter().cloned().map(|ec| (ec, 1)).collect();
+        assert_eq!(actual, oracle, "threads={threads}");
+    }
+    let mut left = FastqReader::new(Cursor::new(reads1));
+    let mut right = FastqReader::new(Cursor::new(reads2));
+    for ec in expected {
+        let a = left.next_record().unwrap().unwrap();
+        let b = right.next_record().unwrap().unwrap();
+        for fast in [false, true] {
+            let mut options = PseudoalignOptions::default();
+            options.investigation.trace_fast_path = fast;
+            let trace =
+                trace_read_pair_bifrost(&index, &a.seq, &b.seq, Strand::Unstranded, options);
+            assert_eq!(
+                trace.merged_ec.as_deref(),
+                Some(ec.as_slice()),
+                "fast={fast}"
+            );
+            assert!(!trace.hard_reject_pair);
+        }
+    }
+}

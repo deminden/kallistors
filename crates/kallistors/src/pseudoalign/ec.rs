@@ -232,6 +232,43 @@ pub(crate) fn lookup_ec(index: &KmerEcIndex, code: u64) -> Option<&[u32]> {
     None
 }
 
+/// Match Bifrost's iterator advance: a requested probe skips windows containing
+/// ambiguous bases and may reach the end instead of producing a lookup miss.
+#[inline]
+pub(crate) fn valid_kmer_start_at_or_after(
+    seq: &[u8],
+    mut start: usize,
+    k: usize,
+) -> Option<usize> {
+    if k == 0 {
+        return None;
+    }
+    loop {
+        let window = seq.get(start..start.checked_add(k)?)?;
+        let Some(invalid) = window
+            .iter()
+            .rposition(|&base| BASE_CODES[base as usize] == INVALID_BASE_CODE)
+        else {
+            return Some(start);
+        };
+        start += invalid + 1;
+    }
+}
+
+#[inline]
+pub(crate) fn encoded_kmer_at_or_after(
+    seq: &[u8],
+    start: usize,
+    k: usize,
+) -> Option<(usize, (u64, u64))> {
+    let window = seq.get(start..start.checked_add(k)?)?;
+    if let Some(codes) = encode_kmer_pair(window) {
+        return Some((start, codes));
+    }
+    let valid = valid_kmer_start_at_or_after(seq, start, k)?;
+    encode_kmer_pair(&seq[valid..valid + k]).map(|codes| (valid, codes))
+}
+
 /// Reuse exact words only when the scanner advances one base; jumps re-encode.
 pub(crate) struct KmerPairCursor {
     k: usize,
@@ -280,6 +317,44 @@ impl KmerPairCursor {
 #[cfg(test)]
 mod rolling_read_tests {
     use super::*;
+
+    #[test]
+    fn jump_probes_skip_ambiguous_windows_like_the_upstream_iterator() {
+        let mut sequences = vec![b"ACGTacgtACGT".to_vec(), b"NNNNNN".to_vec()];
+        let mut read = b"ACGT".repeat(32);
+        read[58] = b'N';
+        read[95] = b'n';
+        sequences.push(read);
+        for sequence in sequences {
+            for k in [1, 3, 31, 32, 47] {
+                for start in 0..=sequence.len() + 1 {
+                    let expected = sequence.get(start..).and_then(|suffix| {
+                        suffix
+                            .windows(k)
+                            .position(|window| {
+                                window.iter().all(|base| {
+                                    matches!(base.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T')
+                                })
+                            })
+                            .map(|offset| start + offset)
+                    });
+                    assert_eq!(valid_kmer_start_at_or_after(&sequence, start, k), expected);
+                    if k <= 32 {
+                        let encoded = encoded_kmer_at_or_after(&sequence, start, k);
+                        assert_eq!(encoded.map(|(position, _)| position), expected);
+                        if let Some((position, codes)) = encoded {
+                            assert_eq!(
+                                Some(codes),
+                                encode_kmer_pair_byte_oracle(&sequence[position..position + k])
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(valid_kmer_start_at_or_after(b"ACGT", 0, 0), None);
+        assert_eq!(valid_kmer_start_at_or_after(b"ACGT", usize::MAX, 31), None);
+    }
 
     #[test]
     fn sorted_intersection_preserves_multisets_and_reused_output() {

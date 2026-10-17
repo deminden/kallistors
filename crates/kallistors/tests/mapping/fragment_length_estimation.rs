@@ -56,6 +56,25 @@ fn sampling_preserves_every_ec_across_parser_chunks() {
         .unwrap()
     };
     let serial = run(1, 37);
+    // The sequence-only serial parser must preserve the record API's exact
+    // observation order, quota, histogram and first-occurrence EC ordering.
+    let record_serial = pseudoalign_paired_bifrost_with_options(
+        &index,
+        &mut FastqReader::new(Cursor::new(&fq1)),
+        &mut FastqReader::new(Cursor::new(&fq2)),
+        Strand::Unstranded,
+        PseudoalignOptions {
+            fragment_length_samples: 37,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(serial.ec_list, record_serial.ec_list);
+    assert_eq!(serial.counts, record_serial.counts);
+    assert_eq!(
+        serial.fragment_length_hist,
+        record_serial.fragment_length_hist
+    );
     let parallel = run(4, 37);
     let all = run(4, 0);
     let canonical = |c: &kallistors::pseudoalign::EcCounts| {

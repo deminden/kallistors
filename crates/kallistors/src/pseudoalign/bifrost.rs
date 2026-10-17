@@ -6,10 +6,10 @@ use load_positions::BitmapPositions;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::ops::Index;
 use std::path::Path;
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, AtomicUsize, Ordering};
 
 use rayon::ThreadPool;
 use rayon::ThreadPoolBuilder;
@@ -188,6 +188,90 @@ pub(crate) struct PackedKmerRange {
     right_shift: u32,
     next: usize,
     end: usize,
+}
+
+impl PackedKmerRange {
+    #[inline]
+    pub(crate) fn first_match(
+        mut self,
+        forward: u64,
+        reverse: u64,
+        allow_forward: bool,
+        allow_reverse: bool,
+    ) -> Option<(usize, bool)> {
+        #[cfg(target_arch = "aarch64")]
+        if self.right_shift == 2 {
+            use std::arch::aarch64::*;
+            // SAFETY: NEON is baseline on AArch64. All vector reads/writes use
+            // complete local arrays; reference sequence words were bounded by
+            // range construction. No vector access reads outside that range.
+            unsafe {
+                let shifts01 = vld1q_s64([0, 2].as_ptr());
+                let shifts23 = vld1q_s64([4, 6].as_ptr());
+                let right01 = vld1q_s64([-64, -62].as_ptr());
+                let right23 = vld1q_s64([-60, -58].as_ptr());
+                let indices = vld1q_u32([0, 1, 2, 3].as_ptr());
+                let wanted_forward = vdupq_n_u64(forward);
+                let wanted_reverse = vdupq_n_u64(reverse);
+                while self.next <= self.end && self.end - self.next >= 3 {
+                    let high = vdupq_n_u64(self.high);
+                    let low = vdupq_n_u64(self.low);
+                    let first = vshrq_n_u64::<2>(vorrq_u64(
+                        vshlq_u64(high, shifts01),
+                        vshlq_u64(low, right01),
+                    ));
+                    let second = vshrq_n_u64::<2>(vorrq_u64(
+                        vshlq_u64(high, shifts23),
+                        vshlq_u64(low, right23),
+                    ));
+                    let f0 = if allow_forward {
+                        vceqq_u64(first, wanted_forward)
+                    } else {
+                        vdupq_n_u64(0)
+                    };
+                    let f1 = if allow_forward {
+                        vceqq_u64(second, wanted_forward)
+                    } else {
+                        vdupq_n_u64(0)
+                    };
+                    let r0 = if allow_reverse {
+                        vceqq_u64(first, wanted_reverse)
+                    } else {
+                        vdupq_n_u64(0)
+                    };
+                    let r1 = if allow_reverse {
+                        vceqq_u64(second, wanted_reverse)
+                    } else {
+                        vdupq_n_u64(0)
+                    };
+                    let mask =
+                        vcombine_u32(vmovn_u64(vorrq_u64(f0, r0)), vmovn_u64(vorrq_u64(f1, r1)));
+                    let offset = vminvq_u32(vbslq_u32(mask, indices, vdupq_n_u32(u32::MAX)));
+                    if offset < 4 {
+                        let mut codes = [0u64; 4];
+                        vst1q_u64(codes.as_mut_ptr(), first);
+                        vst1q_u64(codes.as_mut_ptr().add(2), second);
+                        return Some((
+                            self.next + offset as usize,
+                            !allow_forward || codes[offset as usize] != forward,
+                        ));
+                    }
+                    self.high = (self.high << 8) | (self.low >> 56);
+                    self.low <<= 8;
+                    self.next += 4;
+                }
+            }
+        }
+        for (start, code) in self {
+            if allow_forward && code == forward {
+                return Some((start, false));
+            }
+            if allow_reverse && code == reverse {
+                return Some((start, true));
+            }
+        }
+        None
+    }
 }
 
 impl Iterator for PackedKmerRange {
@@ -505,6 +589,24 @@ impl FlatEcIndex {
             self.last_ec = start..end;
             self.blocks.push(lb, ub, start, end);
         }
+    }
+
+    fn push_buffered_node<R: BufRead>(
+        &mut self,
+        reader: &mut R,
+        size: usize,
+        scratch: &mut Vec<u8>,
+    ) -> Result<()> {
+        let available = reader.fill_buf()?;
+        if available.len() >= size {
+            self.push_serialized_node(&available[..size])?;
+            reader.consume(size);
+        } else {
+            scratch.resize(size, 0);
+            reader.read_exact(scratch)?;
+            self.push_serialized_node(scratch)?;
+        }
+        Ok(())
     }
 
     fn push_serialized_node(&mut self, node: &[u8]) -> Result<()> {
@@ -934,7 +1036,7 @@ pub struct BifrostIndex {
     pub(crate) ec_blocks: Vec<Vec<crate::index::EcBlock>>,
     pub(crate) flat_ec: FlatEcIndex,
     pub minz_positions: MinzPositionIndex,
-    pub(crate) minz_fingerprints: Vec<u8>,
+    pub(crate) minz_fingerprints: Vec<u16>,
     pub mphf: BooPhf,
     pub(crate) selective_fallback_kmers: SelectiveFallbackKmerIndex,
     pub onlist: Option<Vec<bool>>,
@@ -1194,13 +1296,18 @@ fn build_bifrost_index_with_positions_threaded_impl(
     for _ in 0..v_unitigs_sz {
         let len = read_u64_le(&mut reader)? as usize;
         let data_sz = len.div_ceil(4);
-        compressed_scratch.resize(data_sz, 0);
-        reader.read_exact(&mut compressed_scratch)?;
         if packed_graph {
             packed_offsets.push(packed_values.len());
             packed_lengths.push(len);
-            append_compressed_words(&compressed_scratch, len, &mut packed_values);
+            append_buffered_compressed(
+                &mut reader,
+                len,
+                &mut packed_values,
+                &mut compressed_scratch,
+            )?;
         } else {
+            compressed_scratch.resize(data_sz, 0);
+            reader.read_exact(&mut compressed_scratch)?;
             unitigs.push(decode_compressed_sequence(&compressed_scratch, len));
         }
     }
@@ -1376,12 +1483,12 @@ fn build_bifrost_index_with_positions_threaded_impl(
             }
         }
         let node_size = read_u32_le(&mut reader)? as usize;
-        node_buf.resize(node_size, 0);
-        reader.read_exact(&mut node_buf)?;
         if !store_ec_blocks && !load_positional_info {
-            flat_ec.push_serialized_node(&node_buf)?;
+            flat_ec.push_buffered_node(&mut reader, node_size, &mut node_buf)?;
             continue;
         }
+        node_buf.resize(node_size, 0);
+        reader.read_exact(&mut node_buf)?;
         let mut cur = std::io::Cursor::new(node_buf.as_slice());
         let _node_id = read_u32_le(&mut cur)?;
         let blocks = if load_positional_info {
@@ -1466,13 +1573,14 @@ fn build_bifrost_index_with_positions_threaded_impl(
             && !store_ec_blocks
             && !load_positional_info)
             .then(|| Vec::with_capacity(bmp_unitigs[0].len()));
-        let fingerprinting = load_threads > 1
-            && k == 31
-            && g == 23
-            && unitig_bucket_cache.is_some()
-            && bmp_km.len() <= 1;
+        // The same conservative query filter benefits the serial scanner.
+        // Its construction already supports the calling thread without a pool.
+        let fingerprinting =
+            k == 31 && g == 23 && unitig_bucket_cache.is_some() && bmp_km.len() <= 1;
         let minz_fingerprints: Vec<_> = if fingerprinting {
-            (0..hmap_min_unitigs_sz).map(|_| AtomicU8::new(0)).collect()
+            (0..hmap_min_unitigs_sz)
+                .map(|_| AtomicU16::new(0))
+                .collect()
         } else {
             Vec::new()
         };
@@ -1613,7 +1721,7 @@ fn build_bifrost_index_with_positions_threaded_impl(
         minz_positions,
         minz_fingerprints: minz_fingerprints
             .into_iter()
-            .map(AtomicU8::into_inner)
+            .map(AtomicU16::into_inner)
             .collect(),
         mphf,
         selective_fallback_kmers,
@@ -1738,6 +1846,35 @@ mod packed_base_tests {
                     })
                     .collect();
                 assert_eq!(got, expected, "k={k} first={first}");
+                for flags in 0..4 {
+                    for query in [
+                        expected[0].1,
+                        expected[expected.len() / 2].1,
+                        expected.last().unwrap().1,
+                        u64::MAX,
+                    ] {
+                        let reverse = query ^ 3;
+                        let reference = expected.iter().find_map(|&(start, code)| {
+                            if flags & 1 != 0 && code == query {
+                                Some((start, false))
+                            } else if flags & 2 != 0 && code == reverse {
+                                Some((start, true))
+                            } else {
+                                None
+                            }
+                        });
+                        assert_eq!(
+                            store.kmer_range(0, first, last, k).unwrap().first_match(
+                                query,
+                                reverse,
+                                flags & 1 != 0,
+                                flags & 2 != 0
+                            ),
+                            reference,
+                            "k={k} first={first} flags={flags}"
+                        );
+                    }
+                }
             }
         }
         assert!(store.kmer_range(0, 0, 64, 1).is_none());
@@ -1897,7 +2034,7 @@ fn precompute_unitig_block_states(
 }
 
 #[inline]
-fn fingerprinted_lookup(mphf: &BooPhf, key: &[u8; 8], fingerprints: &[AtomicU8]) -> Option<u64> {
+fn fingerprinted_lookup(mphf: &BooPhf, key: &[u8; 8], fingerprints: &[AtomicU16]) -> Option<u64> {
     let bucket = mphf.lookup(key)?;
     if let Some(slot) = fingerprints.get(bucket as usize) {
         super::fingerprints::observe(slot, u64::from_le_bytes(*key));
@@ -1912,7 +2049,7 @@ fn populate_unitig_minimizer_counts(
     mphf: &BooPhf,
     pool: Option<&ThreadPool>,
     bucket_cache: Option<&mut Vec<u32>>,
-    fingerprints: &[AtomicU8],
+    fingerprints: &[AtomicU16],
 ) {
     if fingerprints.is_empty() {
         populate_unitig_counts_typed::<u32>(
@@ -1944,7 +2081,7 @@ fn populate_unitig_counts_typed<K: BucketCountKey>(
     mphf: &BooPhf,
     pool: Option<&ThreadPool>,
     mut bucket_cache: Option<&mut Vec<u32>>,
-    fingerprints: &[AtomicU8],
+    fingerprints: &[AtomicU16],
 ) {
     if bmp_unitigs.is_empty() || encoded_unitigs.unitig_bases.metadata.is_empty() {
         return;
@@ -2228,7 +2365,7 @@ fn populate_kmer_minimizer_counts(
     bmp_km: &[BitmapPositions],
     ctx: &KmerLoadContext<'_>,
     pool: Option<&ThreadPool>,
-    fingerprints: &[AtomicU8],
+    fingerprints: &[AtomicU16],
 ) {
     let Some(pool) = pool else {
         for (i, bitmap) in bmp_km.iter().enumerate() {
@@ -2512,6 +2649,27 @@ pub(super) fn read_unitig_sequences<R: Read + Seek>(
     Ok((seqs, abundant_base))
 }
 
+// Decode a complete buffered graph record in place. Records crossing the
+// input buffer retain Read::read_exact truncation and tail behavior.
+fn append_buffered_compressed<R: BufRead>(
+    reader: &mut R,
+    len: usize,
+    out: &mut Vec<u64>,
+    scratch: &mut Vec<u8>,
+) -> Result<()> {
+    let bytes = len.div_ceil(4);
+    let available = reader.fill_buf()?;
+    if available.len() >= bytes {
+        append_compressed_words(&available[..bytes], len, out);
+        reader.consume(bytes);
+    } else {
+        scratch.resize(bytes, 0);
+        reader.read_exact(scratch)?;
+        append_compressed_words(scratch, len, out);
+    }
+    Ok(())
+}
+
 // Bifrost stores the first base in the low pair of each byte; packed
 // matchers place it in the high pair. Convert directly without ASCII buffers.
 fn append_compressed_words(data: &[u8], len: usize, out: &mut Vec<u64>) {
@@ -2525,9 +2683,19 @@ fn append_compressed_words(data: &[u8], len: usize, out: &mut Vec<u64>) {
         }
         values
     };
-    for chunk in data.chunks(8) {
+    let (words, tail) = data.as_chunks::<8>();
+    out.reserve(words.len() + usize::from(!tail.is_empty()));
+    for bytes in words {
+        // Reverse base-pair order with one word reversal, retaining bit order
+        // within each two-bit base. Bifrost's byte order is little endian.
+        let reversed = u64::from_le_bytes(*bytes).reverse_bits();
+        out.push(
+            ((reversed & 0x5555_5555_5555_5555) << 1) | ((reversed >> 1) & 0x5555_5555_5555_5555),
+        );
+    }
+    if !tail.is_empty() {
         let mut bytes = [0; 8];
-        for (slot, &byte) in bytes.iter_mut().zip(chunk) {
+        for (slot, &byte) in bytes.iter_mut().zip(tail) {
             *slot = REVERSE_PAIRS[byte as usize];
         }
         out.push(u64::from_be_bytes(bytes));
@@ -2589,11 +2757,74 @@ mod loader_order_tests {
     use super::*;
 
     #[test]
+    fn buffered_ec_nodes_preserve_boundaries_and_truncation_errors() {
+        let mut bitmap = vec![1u8];
+        bitmap.extend_from_slice(&2u32.to_le_bytes());
+        bitmap.extend_from_slice(&1u32.to_le_bytes());
+        bitmap.extend_from_slice(&7u32.to_le_bytes());
+        let mut node = 7u32.to_le_bytes().to_vec();
+        node.push(1);
+        node.extend_from_slice(&0u32.to_le_bytes());
+        node.extend_from_slice(&31u32.to_le_bytes());
+        node.extend_from_slice(&(bitmap.len() as u64).to_le_bytes());
+        node.extend_from_slice(&bitmap);
+        node.extend_from_slice(&0u64.to_le_bytes());
+        for capacity in [1, 5, 17, 1024] {
+            let mut payload = node.clone();
+            payload.push(0x5a);
+            let mut reader =
+                std::io::BufReader::with_capacity(capacity, std::io::Cursor::new(payload));
+            let mut flat = FlatEcIndex::new(1);
+            flat.push_buffered_node(&mut reader, node.len(), &mut Vec::new())
+                .unwrap();
+            assert_eq!(flat.ec(0, 0), &[1, 7]);
+            assert_eq!(flat.block_bounds(0, 0), Some((0, 31)));
+            let mut next = [0];
+            reader.read_exact(&mut next).unwrap();
+            assert_eq!(next, [0x5a]);
+        }
+        for cut in 0..node.len() {
+            let mut reader =
+                std::io::BufReader::with_capacity(7, std::io::Cursor::new(&node[..cut]));
+            let mut flat = FlatEcIndex::new(1);
+            assert!(
+                flat.push_buffered_node(&mut reader, node.len(), &mut Vec::new())
+                    .is_err()
+            );
+            assert!(flat.ec_values.is_empty());
+        }
+    }
+
+    #[test]
     fn compressed_words_preserve_every_byte_and_partial_word() {
         for len in 0usize..=257 {
             let data: Vec<u8> = (0..len.div_ceil(4)).map(|i| (i * 79 + 37) as u8).collect();
             let mut values = Vec::new();
             append_compressed_words(&data, len, &mut values);
+            for capacity in [1, 7, 8, 9, 64, 1024] {
+                let mut payload = data.clone();
+                payload.push(0x5a);
+                let mut reader =
+                    std::io::BufReader::with_capacity(capacity, std::io::Cursor::new(payload));
+                let mut actual = vec![u64::MAX];
+                let mut scratch = Vec::new();
+                append_buffered_compressed(&mut reader, len, &mut actual, &mut scratch).unwrap();
+                assert_eq!(&actual[1..], values.as_slice());
+                assert_eq!(actual[0], u64::MAX);
+                let mut following = [0];
+                reader.read_exact(&mut following).unwrap();
+                assert_eq!(following, [0x5a]);
+            }
+            for cut in 0..data.len() {
+                let mut reader =
+                    std::io::BufReader::with_capacity(7, std::io::Cursor::new(&data[..cut]));
+                let mut actual = vec![u64::MAX];
+                assert!(
+                    append_buffered_compressed(&mut reader, len, &mut actual, &mut Vec::new())
+                        .is_err()
+                );
+                assert_eq!(actual, vec![u64::MAX]);
+            }
             let seq = EncodedSequence {
                 words: &values,
                 len,

@@ -248,9 +248,37 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
     threads: usize,
 ) -> Result<EcCounts> {
     if threads <= 1 {
-        return super::paired::pseudoalign_paired_bifrost_with_options(
-            index, reader1, reader2, strand, options,
-        );
+        // Final-pair diagnostics consume names and qualities. Ordinary mapping
+        // can parse sequence-only batches on this same thread, without workers.
+        if std::env::var_os("KALLISTORS_PAIRED_FINAL_TRACE").is_some() {
+            return super::paired::pseudoalign_paired_bifrost_with_options(
+                index, reader1, reader2, strand, options,
+            );
+        }
+        let mut counts = EcCounts::new(options.bias);
+        let mut ec_map = EcCountMap::default();
+        let sampler = super::paired::FragmentLengthSampler::new(options.fragment_length_samples);
+        loop {
+            let left = reader1.next_packed_seq_batch(super::BATCH_SIZE / 2)?;
+            let right = reader2.next_packed_seq_batch(super::BATCH_SIZE / 2)?;
+            match (left, right) {
+                (None, None) => return Ok(counts),
+                (Some(left), Some(right)) => {
+                    super::paired::pseudoalign_paired_bifrost_batch_into(
+                        index,
+                        &left,
+                        &right,
+                        0..left.len(),
+                        strand,
+                        options,
+                        &mut counts,
+                        &mut ec_map,
+                        (options.fragment_length_samples != 0).then_some(&sampler),
+                    )?;
+                }
+                _ => return Err(Error::InvalidFormat("paired FASTQ length mismatch".into())),
+            }
+        }
     }
 
     let threads = threads.max(1);

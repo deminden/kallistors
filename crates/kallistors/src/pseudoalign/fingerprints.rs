@@ -1,15 +1,15 @@
 //! Conservative bucket filtering; false positives retain ordinary exact matching.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU16, Ordering};
 
-pub(crate) const DISABLED: u8 = u8::MAX;
+pub(crate) const DISABLED: u16 = (1 << 12) - 1;
 
 #[inline]
-pub(crate) fn word_fingerprint(word: u64) -> u8 {
-    (word.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56) as u8
+pub(crate) fn word_fingerprint(word: u64) -> u16 {
+    (word.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 52) as u16
 }
 
-pub(crate) fn observe(slot: &AtomicU8, word: u64) {
+pub(crate) fn observe(slot: &AtomicU16, word: u64) {
     let fingerprint = word_fingerprint(word);
     if fingerprint == 0 || fingerprint == DISABLED {
         slot.store(DISABLED, Ordering::Relaxed);
@@ -35,10 +35,9 @@ pub(crate) fn observe(slot: &AtomicU8, word: u64) {
 
 #[derive(Default)]
 struct QueryFingerprints {
-    first: u64,
-    last: u8,
+    first: [u16; 8],
+    last: u16,
 }
-
 impl QueryFingerprints {
     fn new(forward: u64, reverse: u64) -> Self {
         const MASK: u64 = (1u64 << 46) - 1;
@@ -48,35 +47,56 @@ impl QueryFingerprints {
             let r = (reverse >> (2 * position)) & MASK;
             let fingerprint = word_fingerprint(f.min(r) << 18);
             if position < 8 {
-                result.first |= u64::from(fingerprint) << (8 * position);
+                result.first[position] = fingerprint;
             } else {
                 result.last = fingerprint;
             }
         }
         result
     }
-
     #[inline]
-    fn contains(&self, fingerprint: u8) -> bool {
-        let different = self.first ^ (u64::from(fingerprint) * 0x0101_0101_0101_0101);
-        let equal = !((different & 0x7f7f_7f7f_7f7f_7f7f).wrapping_add(0x7f7f_7f7f_7f7f_7f7f)
-            | different)
-            & 0x8080_8080_8080_8080;
-        equal != 0 || self.last == fingerprint
+    fn contains(&self, fingerprint: u16) -> bool {
+        #[cfg(target_arch = "aarch64")]
+        {
+            use std::arch::aarch64::*;
+            // SAFETY: first is exactly eight initialized u16 values; NEON
+            // permits this unaligned bounded load on every AArch64 target.
+            let any = unsafe {
+                vmaxvq_u16(vceqq_u16(
+                    vld1q_u16(self.first.as_ptr()),
+                    vdupq_n_u16(fingerprint),
+                ))
+            };
+            any != 0 || self.last == fingerprint
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            self.first.contains(&fingerprint) || self.last == fingerprint
+        }
     }
 }
-
 #[derive(Default)]
 pub(crate) struct QueryFingerprintCache {
     key: Option<u64>,
     fingerprints: QueryFingerprints,
 }
-
 impl QueryFingerprintCache {
     #[inline]
-    pub(crate) fn contains(&mut self, forward: u64, reverse: u64, fingerprint: u8) -> bool {
+    pub(crate) fn contains(&mut self, forward: u64, reverse: u64, fingerprint: u16) -> bool {
         if self.key != Some(forward) {
-            self.fingerprints = QueryFingerprints::new(forward, reverse);
+            const OVERLAP: u64 = (1u64 << 60) - 1;
+            if self
+                .key
+                .is_some_and(|previous| previous & OVERLAP == forward >> 2)
+            {
+                const MASK: u64 = (1u64 << 46) - 1;
+                self.fingerprints.first.copy_within(1..8, 0);
+                self.fingerprints.first[7] = self.fingerprints.last;
+                self.fingerprints.last =
+                    word_fingerprint((forward & MASK).min((reverse >> 16) & MASK) << 18);
+            } else {
+                self.fingerprints = QueryFingerprints::new(forward, reverse);
+            }
             self.key = Some(forward);
         }
         self.fingerprints.contains(fingerprint)
@@ -88,7 +108,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_anchor_and_byte_membership_match_independent_oracles() {
+    fn every_anchor_and_fingerprint_membership_match_independent_oracles() {
+        let sequence: Vec<_> = (0..191).map(|i| b"ACGT"[(i * i + i / 7) % 4]).collect();
+        let mut rolling = QueryFingerprintCache::default();
+        for reversed in [false, true] {
+            for position in (0..=160).chain([19, 20, 21, 1, 2, 3, 159, 160]) {
+                let mut query = sequence[position..position + 31].to_vec();
+                if reversed {
+                    query.reverse();
+                    for byte in &mut query {
+                        *byte = match *byte {
+                            b'A' => b'T',
+                            b'C' => b'G',
+                            b'G' => b'C',
+                            _ => b'A',
+                        };
+                    }
+                }
+                let (forward, reverse) = crate::dna::encode_kmer_pair(&query).unwrap();
+                let expected: Vec<_> = query
+                    .windows(23)
+                    .map(|window| {
+                        word_fingerprint(u64::from_le_bytes(
+                            crate::index::bifrost::encode_minimizer_rep(window).unwrap(),
+                        ))
+                    })
+                    .collect();
+                for fingerprint in 0..=DISABLED {
+                    assert_eq!(
+                        rolling.contains(forward, reverse, fingerprint),
+                        expected.contains(&fingerprint),
+                        "position={position} reversed={reversed}"
+                    );
+                }
+            }
+        }
         let mut state = 17u64;
         let mut cache = QueryFingerprintCache::default();
         for _ in 0..1000 {
@@ -107,7 +161,18 @@ mod tests {
                     ))
                 })
                 .collect();
-            for fingerprint in 0..=u8::MAX {
+            // Rolling cases above exhaust the complete fingerprint domain.
+            // Random words cover every real anchor plus absent/boundary values.
+            for fingerprint in expected.iter().copied().chain([
+                0,
+                1,
+                255,
+                256,
+                DISABLED - 1,
+                DISABLED,
+                (state as u16) & DISABLED,
+                ((state >> 12) as u16) & DISABLED,
+            ]) {
                 assert_eq!(
                     cache.contains(forward, reverse, fingerprint),
                     expected.contains(&fingerprint)
@@ -122,13 +187,28 @@ mod tests {
 
     #[test]
     fn conflicting_and_special_buckets_stay_disabled_under_parallel_updates() {
+        for bucket in [0, 1, u32::MAX] {
+            for word in [0, 1, 17, 123456789, u64::MAX] {
+                let tagged = TaggedBucket::new(bucket, word);
+                assert_eq!(tagged.bucket(), bucket);
+                assert_eq!(tagged.fingerprint(), word_fingerprint(word));
+                let decoded =
+                    (0..<TaggedBucket as rdst::RadixKey>::LEVELS).fold(0u64, |v, level| {
+                        v | (u64::from(rdst::RadixKey::get_level(&tagged, level)) << (8 * level))
+                    });
+                assert_eq!(
+                    decoded,
+                    (u64::from(bucket) << 16) | u64::from(word_fingerprint(word))
+                );
+            }
+        }
         let words: Vec<_> = (1..10000u64)
             .map(|word| word << 18)
             .filter(|&word| word_fingerprint(word) != 0 && word_fingerprint(word) != DISABLED)
             .take(2)
             .collect();
         assert_ne!(word_fingerprint(words[0]), word_fingerprint(words[1]));
-        let slot = AtomicU8::new(0);
+        let slot = AtomicU16::new(0);
         std::thread::scope(|scope| {
             for &word in &words {
                 let slot = &slot;
@@ -138,7 +218,7 @@ mod tests {
         assert_eq!(slot.load(Ordering::Relaxed), DISABLED);
         observe(&slot, words[0]);
         assert_eq!(slot.load(Ordering::Relaxed), DISABLED);
-        let special = AtomicU8::new(DISABLED);
+        let special = AtomicU16::new(DISABLED);
         observe(&special, words[1]);
         assert_eq!(special.load(Ordering::Relaxed), DISABLED);
     }
@@ -150,7 +230,7 @@ pub(crate) trait BucketCountKey: rdst::RadixKey + Send + Sync + Copy {
     const FINGERPRINT: bool;
     fn new(bucket: u32, word: u64) -> Self;
     fn bucket(self) -> u32;
-    fn fingerprint(self) -> u8;
+    fn fingerprint(self) -> u16;
 }
 impl BucketCountKey for u32 {
     const FINGERPRINT: bool = false;
@@ -160,14 +240,14 @@ impl BucketCountKey for u32 {
     fn bucket(self) -> u32 {
         self
     }
-    fn fingerprint(self) -> u8 {
+    fn fingerprint(self) -> u16 {
         0
     }
 }
 #[derive(Clone, Copy)]
 pub(crate) struct TaggedBucket(u64);
 impl rdst::RadixKey for TaggedBucket {
-    const LEVELS: usize = 5;
+    const LEVELS: usize = 6;
     fn get_level(&self, level: usize) -> u8 {
         (self.0 >> (level * 8)) as u8
     }
@@ -175,18 +255,18 @@ impl rdst::RadixKey for TaggedBucket {
 impl BucketCountKey for TaggedBucket {
     const FINGERPRINT: bool = true;
     fn new(bucket: u32, word: u64) -> Self {
-        Self((u64::from(bucket) << 8) | u64::from(word_fingerprint(word)))
+        Self((u64::from(bucket) << 16) | u64::from(word_fingerprint(word)))
     }
     fn bucket(self) -> u32 {
-        (self.0 >> 8) as u32
+        (self.0 >> 16) as u32
     }
-    fn fingerprint(self) -> u8 {
-        self.0 as u8
+    fn fingerprint(self) -> u16 {
+        self.0 as u16
     }
 }
 // Called by the serial count merger after every parallel chunk has completed.
 // No concurrent fingerprint writes exist during this phase.
-pub(crate) fn observe_serial(slot: &AtomicU8, fingerprint: u8) {
+pub(crate) fn observe_serial(slot: &AtomicU16, fingerprint: u16) {
     let old = slot.load(Ordering::Relaxed);
     if fingerprint == 0 || fingerprint == DISABLED || (old != 0 && old != fingerprint) {
         slot.store(DISABLED, Ordering::Relaxed);

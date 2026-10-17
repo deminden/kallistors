@@ -129,15 +129,9 @@ pub(crate) fn match_unitig_candidate_encoded(
         return None;
     }
     if let Some(windows) = sequence.range(start_lo, start_hi, index.k) {
-        for (start, code) in windows {
-            if allow_forward && code == read_fwd {
-                return Some((start, false, true, true));
-            }
-            if allow_rev && code == read_rev {
-                return Some((start, true, true, false));
-            }
-        }
-        return None;
+        return windows
+            .first_match(read_fwd, read_rev, allow_forward, allow_rev)
+            .map(|(start, rev)| (start, rev, true, !rev));
     }
     for start in start_lo..=start_hi {
         let Some(code) = sequence.kmer_at(start, index.k) else {
@@ -190,14 +184,40 @@ pub(crate) fn match_kmer_at_pos(
         let block_idx = block_index_for_position_fast(index, uid, start)?;
         return Some((uid, start, used_revcomp, block_idx, false));
     }
+    let encoded_match_codes = (index.k <= 32 && kmer.iter().all(u8::is_ascii_uppercase))
+        .then(|| encode_kmer_pair(kmer))
+        .flatten();
+    let min_codes = encoded_match_codes.map(|(f, r)| {
+        if use_revcomp && (kallisto_bifrost_find || kallisto_strict) {
+            (r, f)
+        } else {
+            (f, r)
+        }
+    });
     let (mut min_candidates, mut min_hash_current) = if kallisto_bifrost_find {
-        let (min_hash, candidates) = minhash_primary_for_kmer(min_input, index.g)?;
+        let (min_hash, candidates) = if let Some((f, r)) = min_codes {
+            super::super::minimizers::minhash_primary_for_encoded(min_input.len(), index.g, f, r)?
+        } else {
+            minhash_primary_for_kmer(min_input, index.g)?
+        };
         (candidates, Some(min_hash))
     } else {
         let candidates = if kallisto_strict {
             vec![minimizer_for_kmer_strict(min_input, index.g)?]
         } else if kallisto_enum {
             minimizers_ranked_for_kmer(min_input, index.g, 2)?
+        } else if let Some((f, r)) = min_codes {
+            let mut candidates = Vec::new();
+            if !super::super::minimizers::minimizers_for_encoded_kmer_into(
+                min_input,
+                index.g,
+                f,
+                r,
+                &mut candidates,
+            ) {
+                return None;
+            }
+            candidates
         } else {
             minimizers_for_kmer(min_input, index.g)?
         };
@@ -235,12 +255,10 @@ pub(crate) fn match_kmer_at_pos(
         );
     }
     let fingerprint_codes = (index.k == 31 && index.g == 23 && !index.minz_fingerprints.is_empty())
-        .then(|| encode_kmer_pair(kmer))
+        .then(|| encoded_match_codes.or_else(|| encode_kmer_pair(kmer)))
         .flatten();
     let mut query_fingerprints = super::super::fingerprints::QueryFingerprintCache::default();
-    let encoded_match_codes = (index.k <= 32 && kmer.iter().all(u8::is_ascii_uppercase))
-        .then(|| encode_kmer_pair(kmer))
-        .flatten();
+
     let mut tried_tail_minimizer = false;
     'min_outer: loop {
         let mut request_next_min = false;
