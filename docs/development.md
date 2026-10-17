@@ -7,7 +7,9 @@ tracing flags, see [kallisto_debug_build.md](kallisto_debug_build.md).
 ## Toolchain
 
 Development requires Rust 1.97 or newer. The workspace uses Rust edition 2024 and declares the
-minimum supported Rust version in the root `Cargo.toml`.
+minimum supported Rust version in the root `Cargo.toml`. Source builds use
+`target-cpu=native` from `.cargo/config.toml`; CI overrides `RUSTFLAGS` with
+`-C target-cpu=generic` for portable release artifacts and validation.
 
 ## Required checks
 
@@ -19,16 +21,83 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
 
+## Test strategy and prerequisites
+
+The default suite is deterministic and self-contained. Small mapping fixtures always use the
+Rust index builder, regardless of installed tools. They include shared transcript sequence,
+unique sequence and unmapped reads; threaded mapping cases span multiple work batches.
+
+Integration tests are grouped into six executable targets to limit repeated compilation and
+linking. Run just the affected target during development:
+
+| Target | Contract checked |
+| --- | --- |
+| `index_builder` | Index structure, normalization, empty graphs and repeated names |
+| `mapping` | Complete EC maps against the naive scanner, strand behavior, fragment sampling and multi-batch threading |
+| `quantification` | EM against an independent dense reference, serial/threaded bit parity, count conservation, active bias correction and TSV/HDF5/bootstrap values |
+| `bus` | Technology layouts, input validation, BUS records and decoded BAM/index outputs |
+| `upstream` | Opt-in comparisons with original kallisto, including both builders crossed with both quantifiers |
+| `full_index` | Opt-in GENCODE v50 scanner, abundant-node and paired fallback regressions |
+
+For example, `cargo test --locked -p kallistors --test mapping` runs only mapping integration
+checks. Individual modules and cases can be selected with the usual test-name filter.
+
+Keep tests tied to observable behavior or a documented algorithm/format boundary. JSON and TSV
+checks parse schemas and values without fixing whitespace, JSON field order or version strings.
+Parallel tests must prove their fixture reaches multiple batches; bias tests must show a real
+correction. Comparisons against a shared implementation also need independent expected values
+or invariants. A test that compares a function to itself adds no protection. Deadlock regressions
+run in subprocesses with a watchdog that terminates and reaps a stalled process.
+
+Small focused unit tests remain beside the implementation for packing/width boundaries,
+minimizer selection, encoding and sampling quotas. Integration helpers live in
+`crates/kallistors/tests/helpers/mod.rs`. Avoid duplicate fixtures and success-only checks when
+an existing case can verify the same option together with its output.
+
+BUS validation, input inference, barcode geometry and corrected-tag variants use labelled case
+tables with shared tiny fixtures. Keep separate cases for distinct parser branches and error
+conditions; every matrix assertion should identify its case. Reuse output checks for verbose
+reporting and basic record decoding. The paired batch regression checks complete fragment
+histograms with facing mates, including a different expected fragment length for each batch.
+
+Tests that directly compare against original kallisto are ignored by default. With kallisto
+v0.52.0 on `PATH`, enable them with:
+
+```bash
+cargo test --locked -p kallistors --test upstream --test bus -- --ignored
+```
+
+Full-index regressions require the prepared GENCODE v50 index and are also ignored by default.
+Enabling an external test without its prerequisite fails clearly. Ordinary tests do not download
+data or measure speed: use the [benchmark workflow](benchmarks.md) to evaluate performance.
+HDF5 readback through the Rust library checks values; native-library validation below supplies
+an independent format check. Passing synthetic tests does not establish general real-data or
+biological accuracy.
+
+## Native HDF5 output validation
+
+For changes to HDF5 output, also read a generated quantification directory with the native
+HDF5 library. This catches format errors that a writer and reader from the same implementation
+can both accept. Install `h5py` and `numpy` in a Python environment, then run:
+
+```bash
+python scripts/check_hdf5_output.py path/to/quant-output --json hdf5-readback.json
+```
+
+The check reads every dataset, compares all transcript IDs, estimated counts, effective lengths
+and target lengths with `abundance.tsv`, and validates processed-read and bootstrap metadata.
+The Rust `quantification` integration tests include a 70,003-target case with a partial final chunk.
+
 ## Release workflow
 
-The crate version lives in `crates/kallistors/Cargo.toml`. Version 0.5.0 is prepared in this
-checkout. Its [release notes](releases/0.5.0.md) describe the performance changes,
-validation evidence, and remaining compatibility differences.
+The crate version lives in `crates/kallistors/Cargo.toml`. Version-specific release notes
+live in `docs/releases/`; the binary publication workflow reads the file matching its tag.
 
 For a release:
 
 1. Bump the crate version and refresh its package entry in `Cargo.lock`. Update `CHANGELOG.md`,
-   the README, and `docs/releases/<version>.md`; retain dates and versions on historical reports.
+   the README, and `docs/releases/<version>.md`. Document supported behavior and compatibility
+   requirements. Keep generated benchmark outputs outside the maintained documentation.
 2. Run the required fmt/clippy/test checks above with the locked dependencies. Run any explicitly
    enabled external-data regressions needed for the changed behavior.
 3. Build and check the publication package:
@@ -39,14 +108,15 @@ For a release:
    cargo publish --package kallistors --locked --dry-run
    ```
 
-   During preparation before committing, add `--allow-dirty` to the dry run. It creates and
-   compiles the crate package without publishing. Check that the package includes the license
+   Use `--allow-dirty` when reviewing uncommitted package changes. The dry run compiles
+   the crate package without publishing. Check that the package includes the license
    text and read fixtures, and excludes downloaded data and generated benchmark outputs.
    Keep `crates/kallistors/LICENSE` identical to the root `LICENSE`.
-4. Commit the reviewed release contents and tag that commit `v0.5.0`. Pushing the tag starts
+4. Commit the reviewed release contents and tag that commit `v<version>`. Pushing the tag starts
    publication; the release notes are consumed directly by the binary workflow.
 
 Two GitHub workflows handle release publication:
+
 - `Publish to crates.io` runs on version tags (`v*` and `[0-9]*`). It verifies
   that the tag matches the crate version, runs fmt/clippy/tests, performs a
   locked dry run, then publishes when `CARGO_REGISTRY_TOKEN` is configured.
@@ -56,7 +126,7 @@ Two GitHub workflows handle release publication:
   for Linux x86_64, macOS x86_64, macOS arm64, and Windows x86_64, then uploads
   archives plus `.sha256` checksum files to the release. On a tag push or manual dispatch, it
   creates a missing GitHub Release using `docs/releases/<version>.md` when available, otherwise
-  generated GitHub notes. Archives include README, license, changelog, and documentation.
+  generated GitHub notes. Archives include README, license, changelog, documentation, and benchmark scripts/manifests.
 
 ## Kallistors CLI debugging tools
 
@@ -106,41 +176,43 @@ python3 scripts/compare_ec_counts.py \
 
 Both runs must use the same index: transcript IDs are index-specific. The script ignores EC
 numbering, compares counted transcript sets, and exits nonzero on a mismatch. The
-[paired performance report](paired_performance_fix_2026-10-14.md) includes the complete reproduction
-commands and the profiling procedure's interpretation.
+[benchmark guide](benchmarks.md) gives the complete reproduction commands and phase boundaries.
 
 ## GENCODE v50 comparison and regression workflow
 
-The [read comparison guide](read_comparison_2026-10-14.md) documents the three public ENA
-runs, download checksums, fastp trimming, index building, and multicore timing commands. The
-[fix report](quantification_fixes_2026-10-14.md) records the latest complete EC validation and
-the remaining fragment-sampling differences.
+The [benchmark guide](benchmarks.md) documents public ENA retrieval, checksums, fasterp
+trimming, shared references and timing commands. [Fragment sampling](fragment_length_sampling.md)
+describes the paired default. Regression tests exercise the current library and CLI, including
+regressions for fragment models, abundant-node associations and fallback probes.
 
 ```bash
-# Optional R/fastp environment; R is not needed to run kallistors.
-mamba env create -f environment.yml
-mamba run -n kallistors-r bash scripts/prepare_benchmark.sh
+# Prepare reads and the reference independently.
+cargo install --locked fasterp --version 0.2.1
+python3 scripts/prepare_benchmark.py --samples SRR13638690
+python3 scripts/prepare_reference.py --reference gencode50
 
 # Prepare the shared reference with an upstream v0.52.0 executable.
 target/tools/kallisto-0.52.0 index -t 8 \
   -i data/srr-small/gencode.v50.kallisto.idx \
   data/srr-small/gencode.v50.transcripts.fa.gz
 
-# Enable the full-reference TTN/AGAP12P scanner regression explicitly.
+# Enable full-reference scanner and abundant-node regressions explicitly.
 cargo build --locked --release
 KALLISTORS_TEST_BIN="$PWD/target/release/kallistors" \
-  cargo test --locked -p kallistors --test single_ttn_regression -- --ignored
+  cargo test --locked -p kallistors --test full_index -- --ignored
 
-# Optional fresh eight-thread comparison; final outputs are copied outside timing.
+# Optional fresh eight-thread comparison; final outputs are retained for validation.
 python3 scripts/benchmark_reads.py \
-  --samples SRR13638690_larger --thread-counts 8 --keep-last-output \
-  --out-prefix target/benchmarks/gencode50-release
+  --samples SRR13638690 --thread-counts 8 \
+  --diagnostic-kallisto target/tools/kallisto-src/build/src/kallisto \
+  --hdf-python target/hdf5-native-check/bin/python \
+  --out target/benchmarks/gencode50-release
 ```
 
 The upstream executable is downloaded separately, as described in the guide. The normal suite
-includes synthetic empirical-fragment tests; the downloaded-index test remains ignored by default.
-The benchmark runner saves completed run records as it progresses. Abundance outputs are retained
-only for the final measured repetition when `--keep-last-output` is enabled.
+includes synthetic empirical-fragment tests; downloaded-index tests are ignored by default.
+The benchmark runner saves completed run records as it progresses. Abundance outputs from the final
+measured repetition are retained for native HDF5 and abundance validation.
 
 ## Per-read EC traces
 
@@ -149,88 +221,84 @@ Trace per-read EC decisions for a small set of single-end reads:
 ```bash
 printf "READ_ID_1\nREAD_ID_2\n" > read_list.txt
 target/release/kallistors trace-reads \
-  --index data/gencode.v49_kallisto.idx \
-  --reads data/SRR13638690_RNA_seq_of_homo_sapiens_temporal_muscle_of_low_grade.gz \
+  --index data/srr-small/gencode.v50.kallisto.idx \
+  --reads data/srr13638690/trimmed-fasterp/SRR13638690_1.trimmed.fastq.gz \
   --read-list read_list.txt \
   --out read_traces.tsv \
   --fragment-length 200
 ```
 
-## Real-data subset parity
+## Real-data EC parity
 
-Run deterministic paired-prefix parity against the real-read dataset:
-
-```bash
-python3 scripts/real_subset_parity.py \
-  --mode paired \
-  --threads 32 \
-  --sizes 64,256,1024,4096,16384,65536,131072,262144 \
-  --kallisto-bin ./kallisto_src/build/src/kallisto \
-  --kallistors-bin ./target/release/kallistors \
-  --report /tmp/kallistors-parity.tsv
-```
-
-When investigating an experimental fast-path branch, pass `--fast-env` to run
-the candidate under the relevant environment flag and emit `trace-compare`
-output for the first divergent read:
-
-```bash
-python3 scripts/real_subset_parity.py \
-  --mode paired \
-  --threads 32 \
-  --sizes 64,256,1024,4096 \
-  --fast-env KALLISTORS_FAST_DELTA_BOUNDED_INCREMENTAL_SCAN=1 \
-  --trace-out /tmp/kallistors-trace-compare.tsv
-```
+Use the complete EC comparison in [the benchmark guide](benchmarks.md#correctness-and-interpretation).
+The quantification runner exports original ECs with the tracked diagnostic
+patch, runs current `pseudoalign`, and fails on any counted transcript-set difference.
+For faster investigation, construct paired subsets with `scripts/subsample_benchmark_pairs.py`
+and pass the same subset/index to both tools. Use `trace-reads` on selected reads after a
+mismatch is found.
 
 ## Index builder validation
 
-Build and inspect a reduced real-transcript index:
+Build and inspect an index from a supplied small transcript FASTA:
 
 ```bash
 cargo build --release
+mkdir -p target/validation
 target/release/kallistors index \
-  -i /tmp/reduced.kallistors.idx \
+  -i target/validation/reduced.idx \
   -t 4 \
   --timings \
-  data/subsets/reduced_64_transcripts.fa.gz
+  /path/to/small-transcripts.fa
 
-target/release/kallistors index-info --index /tmp/reduced.kallistors.idx
-./kallisto_src/build/src/kallisto inspect /tmp/reduced.kallistors.idx
+target/release/kallistors index-info --index target/validation/reduced.idx
+target/tools/kallisto-0.52.0 inspect target/validation/reduced.idx
 ```
 
-Run a large GENCODE build benchmark:
+Compare index builds with one warmup and three alternating measured runs:
 
 ```bash
-/usr/bin/time -o /tmp/kallistors-index.time -f 'elapsed=%E maxrss=%MKB' \
-  target/release/kallistors index \
-  -i /tmp/gencode.kallistors.idx \
-  -t 8 \
-  --timings \
-  data/gencode.v49.transcripts.fa.gz
-```
-
-Compare against upstream and write a Markdown report:
-
-```bash
-python3 scripts/bench_index_build.py \
-  --fasta data/gencode.v49.transcripts.fa.gz \
-  --threads 8 \
-  --kallisto-bin ./kallisto_src/build/src/kallisto \
-  --kallistors-bin ./target/release/kallistors \
-  --out target/validation/index_build_benchmark.md
+python3 scripts/benchmark_index.py \
+  --fasta data/srr-small/gencode.v50.transcripts.fa.gz \
+  --threads 8 --out target/validation/index-build
 ```
 
 For compatibility validation, run paired quant on the same reads with:
+
 - an upstream `kallisto index` output
 - a `kallistors index` output loaded by `kallistors quant`
 - a `kallistors index` output loaded by upstream `kallisto quant`
 
-The expected first-order check is exact `run_info.json` count parity. `abundance.tsv` comparisons
-use the same tolerance-based diff workflow described above.
+Compare complete EC maps as well as `run_info.json` counters. Use the abundance-diff workflow
+above with matched fragment models to check effective lengths and estimated counts.
 
 ## Performance comparison
 
-The [0.5.0 performance report](performance_0.5.0.md) records eight-thread comparisons
-against original kallisto, CPU contention, complete EC validation and the
-`scripts/benchmark_quant_variants.py` workflow.
+The [benchmark guide](benchmarks.md) describes current-versus-original controls, repeated
+stage timings, CPU/power context, RSS/footprint and complete EC/HDF5 checks. Use
+`scripts/benchmark_reads.py --stages` for optional phase timing alongside paired/single
+total time and peak RSS on macOS/Linux. It verifies complete EC parity before any timing.
+Use a new output directory after changing either executable.
+
+## Source layout
+
+| Responsibility | Modules |
+| --- | --- |
+| CLI orchestration | `commands/quant.rs`, `commands/pseudoalign.rs`, `commands/bus.rs` |
+| Index loading and building | `index/`, `pseudoalign/bifrost.rs` |
+| Read matching | `pseudoalign/core/`, `pseudoalign/single.rs`, `pseudoalign/paired.rs` |
+| Threaded input and EC aggregation | `pseudoalign/threaded.rs` |
+| EC dumps, minimizer lookup and read traces | `pseudoalign/diagnostics/{ec_dump,minimizer,tracing}.rs` |
+| Fragment models, EM and bootstraps | `quant/mod.rs` |
+| Abundance TSV/HDF5 and run metadata | `quant/output/{tsv,hdf5,metadata}.rs` |
+| BUS input, records and technology definitions | `commands/bus/{input,output,technology}.rs` |
+| BUS genome projection and BAM output | `commands/bus/{genome,pseudobam}.rs` |
+| BUS unit/integration tests | `commands/bus/tests.rs`, `tests/bus.rs` |
+
+Public diagnostic and quantification output APIs are re-exported from their parent modules.
+Keep module boundaries separate from algorithm changes. Changes to mapping must preserve
+candidate/fallback order, EC contribution order, cache ownership and wide-value handling.
+Changes to EM must preserve per-transcript addition order and convergence rules.
+
+Validate structural changes with complete EC maps, matched-model abundances, native HDF5
+readback and diagnostic/BAM output checks. Compare one- and eight-thread whole-process timing
+and memory with alternating controls. Use the same executable for all validation of a candidate.

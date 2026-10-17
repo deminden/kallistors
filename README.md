@@ -8,76 +8,56 @@ A Rust implementation of kallisto-style pseudoalignment and RNA-seq quantificati
 - Quantifies paired-end and single-end reads, with kallisto-style `abundance.tsv`, `run_info.json`,
   and default `abundance.h5` output.
 - Supports single-cell BUS workflows, including supported BAM input and output modes.
-- Version **0.5.0** accelerates index loading, matching and EM while preserving exact EC parity.
-  See the [release notes](docs/releases/0.5.0.md) and [changelog](CHANGELOG.md).
+- Uses compact index/EM storage, cached exact matching and parallel quantification.
+- Paired fragment estimation follows kallisto's sequence-buffer sampling rules; all reads
+  contribute to EC counts. See [sampling behavior](docs/fragment_length_sampling.md).
 
-## Performance
+## Performance and benchmarking
 
-On Apple Silicon, full paired quantification of **4.41 million fastp-trimmed read pairs** against
-**670,670 GENCODE v50 ALL transcripts** at **8 threads**, including index loading and default HDF5 output:
+Quantification uses the requested thread count for mapping and EM. Compact index storage,
+packed matching, bounded input queues and buffered output reduce work and memory use.
+Source builds use `target-cpu=native`; release binaries use a portable CPU target.
 
-| Tool | Total elapsed time | Peak RSS |
-| --- | ---: | ---: |
-| Original kallisto v0.52.0 | 47.673 s | 2.85 GiB |
-| kallistors 0.5.0 | 17.532 s | 3.01 GiB |
+The [benchmark guide](docs/benchmarks.md) documents public datasets, read trimming,
+GENCODE cDNA and Pachter Lab mature-plus-nascent references, repeated comparisons with original
+kallisto, phase timing, memory measurement and complete EC validation. Performance depends on the
+input, reference, thread count, build and hardware; compare complete quantification runs.
 
-**2.72x faster; 63.22% less time; 5.7% more peak resident memory.** One measured pair with
-already warmed inputs, using macOS `/usr/bin/time -l`; background CPU activity was recorded.
-Speed and memory depend on workload and hardware. Full EC count maps remain exact in all
-**six paired/single-end cases**.
+Current release details are in the [0.5.1 notes](docs/releases/0.5.1.md) and
+[changelog](CHANGELOG.md).
 
-The [performance report](docs/performance_0.5.0.md) records the method, memory allocation diagnosis,
-performance changes and validation against original kallisto. The
-[initial bottleneck report](docs/paired_performance_fix_2026-10-14.md) explains the per-read on-list
-scan removed in 0.5.0; [benchmarks](docs/benchmarks.md) retain historical release results.
+## Compatibility notes
 
-## Compatibility notes (v0.5.0)
-
-Coverage is described below; unlisted kallisto options and modes need their own compatibility checks.
+The notes below describe the supported interface. See [compatibility limits](docs/compatibility.md)
+for differences from original kallisto.
 
 | Area | Status |
 | --- | --- |
 | Existing `kallisto` index loading | Supported |
 | Pure Rust index building | Supported for normal nucleotide transcript FASTA, v13-compatible output; amino-acid BUS indexes are supported with `index --aa` |
-| Paired-end quant | Uses the observed fragment histogram for effective lengths; complete EC counts match upstream in all three documented GENCODE v50 datasets |
-| Single-end quant | Uses the supplied Gaussian fragment model; complete EC counts match upstream in all three documented GENCODE v50 datasets |
+| Paired-end quant | Uses an empirical fragment histogram for effective lengths |
+| Single-end quant | Uses the supplied Gaussian fragment model |
 | Single-cell BUS output | Fixed presets and custom `-x` triples; batch/interleaved FASTQ, BAM input tags, SmartSeq3 tags, supported amino-acid and long-read BUS modes, pseudobam, and projected/sorted genome BAM with BAI or CSI index |
 | Sequence-specific bias correction | Optional with `--bias` and `--transcripts` |
 | Bootstrap / H5 output | Supported for quant; `abundance.h5` is written by default, plaintext bootstrap TSVs with `--plaintext` |
 | Long-read and fusion detection | Long-read BUS filtering/output is implemented; general long-read quant and fusion detection are not implemented |
 | CLI option coverage | Partial |
 
-Current real-data validation ([0.5.0 performance validation](docs/performance_0.5.0.md)
-and [0.4.2 quantification corrections](docs/quantification_fixes_2026-10-14.md)):
+Current validation and output compatibility:
 
-- Complete nonzero EC count maps match kallisto v0.52.0 for ERR2260014, DRR023395, and SRR13638690
-  in both paired and single-end modes, using the same GENCODE v50 ALL-transcript index.
-- Paired TPM mass difference falls from 4.46% to numerical noise on the compact sample,
-  1.05% to 0.010% on the medium sample, and 3.94% to 0.080% on the largest sample.
-- Kallistors collects all qualifying fragment observations. Upstream samples near its observation
-  goal, with multithreaded overshoot, so paired abundance can still differ despite exact EC counts.
-- Serial and threaded EM regressions agree exactly, including empirical fragment models and
-  bias-weight refresh. A new single-end speed median is not claimed.
-
-Additional recorded validation and output compatibility:
-
-- In the May 19 GENCODE v49 snapshot, paired-end parity is exact on the deterministic
-  `1,048,576`-pair subset across `1, 2, 4, 8, 16, 32` threads.
-- The recorded full-file paired check matches kallisto counts exactly:
-  `n_processed=4,408,640`, `n_pseudoaligned=4,244,771`, `n_unique=276,251`.
-- The historical May 19 Linux/GENCODE v49 snapshot was faster at 32 threads; it is documented
-  separately from the current Apple Silicon/GENCODE v50 results.
-- Pure Rust index output is accepted by both `kallistors` and standard `MAX_KMER_SIZE=32` upstream
-  `kallisto inspect/quant` builds on the reduced real subset and the GENCODE validation path.
-  Generated indexes are format-compatible for that compile-time width, not byte-identical to
-  upstream indexes.
-- `abundance.tsv` is validated with floating-point tolerances where tests compare estimates. The
-  README does not claim bit-for-bit abundance parity.
-- H5 output is readable by upstream `kallisto h5dump` and uses kallisto-compatible default bias
-  datasets when sequence bias is disabled. H5 writing uses a pure Rust writer, so building
-  `kallistors` does not require system HDF5 development headers/libraries. Bootstrap dataset
-  layout is compatible, but bootstrap sample values are not yet expected to be byte-identical to
-  upstream kallisto because the RNG/sampling path still differs.
+- Complete EC comparisons use counted transcript sets, independent of EC numbering.
+- Regression coverage includes paired/single-end matching, TTN/AGAP12P fallback probes,
+  abundant-node associations, empirical fragment models, and serial/threaded EM.
+  Full-index regression tests are explicitly enabled when the downloaded reference is present.
+- Paired fragment-length estimation follows original's 10,000-observation goal and 8 MiB
+  sequence-buffer quotas, including possible concurrent overshoot. Every read contributes
+  to EC counting. See [fragment sampling](docs/fragment_length_sampling.md).
+- Pure Rust indexes are checked against standard `MAX_KMER_SIZE=32` upstream builds.
+  Format compatibility does not require byte-identical index files.
+- Native HDF5 readback checks target IDs, estimated counts, effective lengths, target lengths
+  and run metadata against TSV. Bootstrap output is supported, but its RNG/sample values
+  are not expected to match upstream exactly.
+- Exact abundance equality and real-data sequence-bias parity are not general claims.
 
 Sequence-specific bias correction is optional and enabled only with `--bias`.
 The index builder targets nucleotide transcript FASTA by default. Use `index --aa` for BUS indexes
@@ -247,21 +227,24 @@ Notes:
 
 ### Performance and validation
 
-- Current benchmark tables, raw artifact paths, and methodology are in
+- Data preparation, benchmark commands and measurement methodology are in
   [docs/benchmarks.md](docs/benchmarks.md).
 - Developer-facing trace workflows, abundance diffs, and parity-debug commands are in
   [docs/development.md](docs/development.md).
 - Instrumented upstream kallisto build notes are in
   [docs/kallisto_debug_build.md](docs/kallisto_debug_build.md).
-- Reproducible downloads, MD5/gzip checks, fastp trimming, and repeated comparisons are documented
-  in [the read comparison guide](docs/read_comparison_2026-10-14.md). The optional
-  [R 4.6.1 / fastp environment](environment.yml) supports this workflow; R is not required by the CLI.
+- Reproducible downloads, MD5/gzip checks, fasterp trimming, and repeated comparisons are documented
+  in [the benchmark guide](docs/benchmarks.md). Install fasterp separately with Cargo.
+  Quantification benchmarks require complete EC parity before timing and export JSON/TSV reports.
 
 ### As a Crate
 
-Existing quantification APIs remain serial. Use `em_quantify_with_fragment_histogram_threaded`
+The serial quantification APIs use one thread. Use `em_quantify_with_fragment_histogram_threaded`
 with an explicit thread count for parallel EM. The CLI `quant -t N` uses N threads for mapping
-and EM in successive phases; default thread count, index format and output layout are unchanged.
+and EM in successive phases. HDF5 output uses bounded chunks. Set the
+`PseudoalignOptions::fragment_length_samples` field when using exhaustive struct literals, or use
+`..PseudoalignOptions::default()` for the 10,000-observation goal. Use zero to collect all
+qualifying fragment observations.
 
 Add to `Cargo.toml`:
 ```toml
@@ -339,7 +322,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 ### Development docs
 
 Developer-facing checks, trace workflows, abundance-diff commands, and real-data
-parity workflows are in [docs/development.md](docs/development.md).
+parity workflows are in [docs/development.md](docs/development.md). The
+[source layout](docs/development.md#source-layout) describes mapping, quantification,
+diagnostics and BUS output modules.
 
 ## Contributing
 

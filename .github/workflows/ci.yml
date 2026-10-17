@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+env:
+  RUSTFLAGS: "-C target-cpu=generic"
+
 jobs:
   build:
     runs-on: ubuntu-latest

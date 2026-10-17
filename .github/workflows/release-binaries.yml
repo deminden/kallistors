@@ -17,6 +17,9 @@ on:
 permissions:
   contents: write
 
+env:
+  RUSTFLAGS: "-C target-cpu=generic"
+
 jobs:
   prepare-release:
     name: Prepare release
@@ -123,11 +126,11 @@ jobs:
           if [[ -f CHANGELOG.md ]]; then
             cp CHANGELOG.md "${dist_dir}/"
           fi
-          if [[ -f environment.yml ]]; then
-            cp environment.yml "${dist_dir}/"
-          fi
           if [[ -d docs ]]; then
             cp -R docs "${dist_dir}/docs"
+          fi
+          if [[ -d scripts ]]; then
+            cp -R scripts "${dist_dir}/scripts"
           fi
 
           if [[ "${{ matrix.archive }}" == "zip" ]]; then

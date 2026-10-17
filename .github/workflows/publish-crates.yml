@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  RUSTFLAGS: "-C target-cpu=generic"
+
 jobs:
   publish:
     name: Publish kallistors
