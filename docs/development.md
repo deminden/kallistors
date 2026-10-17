@@ -37,7 +37,7 @@ linking. Run just the affected target during development:
 | `quantification` | EM against an independent dense reference, serial/threaded bit parity, count conservation, active bias correction and TSV/HDF5/bootstrap values |
 | `bus` | Technology layouts, input validation, BUS records and decoded BAM/index outputs |
 | `upstream` | Opt-in comparisons with original kallisto, including both builders crossed with both quantifiers |
-| `full_index` | Opt-in GENCODE v50 scanner, abundant-node and paired fallback regressions |
+| `full_index` | Opt-in GENCODE v50 scanner, abundant-node, paired fallback and reverse-unitig SVIL regressions |
 
 For example, `cargo test --locked -p kallistors --test mapping` runs only mapping integration
 checks. Individual modules and cases can be selected with the usual test-name filter.
@@ -67,7 +67,10 @@ v0.52.0 on `PATH`, enable them with:
 cargo test --locked -p kallistors --test upstream --test bus -- --ignored
 ```
 
-Full-index regressions require the prepared GENCODE v50 index and are also ignored by default.
+Full-index regressions require prepared GENCODE v50 indexes and are also ignored by default.
+The reverse-unitig SVIL case additionally uses `data/srr-small/gencode.v50.kallistors.idx`,
+built with `kallistors index` from the same ALL transcript FASTA; `KALLISTORS_TEST_RUST_INDEX`
+can select its path. The other full-index cases use the original builder's index.
 Enabling an external test without its prerequisite fails clearly. Ordinary tests do not download
 data or measure speed: use the [benchmark workflow](benchmarks.md) to evaluate performance.
 HDF5 readback through the Rust library checks values; native-library validation below supplies
@@ -198,6 +201,9 @@ target/tools/kallisto-0.52.0 index -t 8 \
 
 # Enable full-reference scanner and abundant-node regressions explicitly.
 cargo build --locked --release
+target/release/kallistors index -t 8 \
+  -i data/srr-small/gencode.v50.kallistors.idx \
+  data/srr-small/gencode.v50.transcripts.fa.gz
 KALLISTORS_TEST_BIN="$PWD/target/release/kallistors" \
   cargo test --locked -p kallistors --test full_index -- --ignored
 
@@ -302,3 +308,84 @@ Changes to EM must preserve per-transcript addition order and convergence rules.
 Validate structural changes with complete EC maps, matched-model abundances, native HDF5
 readback and diagnostic/BAM output checks. Compare one- and eight-thread whole-process timing
 and memory with alternating controls. Use the same executable for all validation of a candidate.
+
+## Index construction
+
+Buffered FASTA parsing retains UTF-8 validation, header whitespace and CR/LF behavior. Parallel
+normalization uppercases and validates independent sequences; ambiguity substitutions still
+consume MT19937 in transcript/base order. Original lengths precede identical polyA trimming.
+Single-threaded construction retains the serial path. The [shared DNA encoder](../crates/kallistors/src/dna.rs)
+serves mapping, graph initialization and minimizer keys, with byte/position/orientation oracles.
+
+Collection excludes windows only after complete byte equality proves they already occur in an
+earlier transcript in the same bounded group. Shared prefix/suffix anchors and sparse internal
+word anchors select candidates; they do not authorize approximate matches. Seam windows and all
+transcript metadata remain. Group deduplication precedes parallel radix sorting. Completed shards
+append immediately; final ordering is independent of worker completion order. Large parallel
+collections losslessly pack each group before sorting its words, after borrowed anchors have
+finished. Disjoint mutable
+groups are dispatched to the requested workers; packed records are restored to original transcript
+order. The distinct table keeps its virtual allocation until lookup mapping finishes, avoiding a
+second full-table copy. Fully unused initialized tail pages can be discarded without moving live keys.
+
+[Packed transcript scratch](../crates/kallistors/src/index/packed_transcripts.rs) uses two bits per
+normalized base and extracts exact k-mer words directly, including unaligned byte boundaries and
+tails. Shared group buffers retain every sequence until its mapping completes. Identifier bytes
+share one UTF-8 arena during topology construction; owned names are reconstructed unchanged after
+mapping. The name table verifies full equality for every hash match, including complete collisions.
+
+Lookup descriptors store complete singleton suffixes/ranks where they fit. Two-, three- and
+four-key guards reject definite misses and verify full keys on positives. Larger graphs use exact
+rank ranges: shared block bases and packed 12-bit deltas, with exact u32 dense-block and
+large-rank fallbacks. Active query prefixes avoid dummy probes; AArch64 nonblocking cache hints overlap
+independent key reads and positive atomic updates without changing equality checks.
+Query metadata uses one byte per slot in bounded canonical batches. Other architectures retain ordinary reads.
+Canonical extension selection queries one reverse-complement representative and updates both
+endpoints through idempotent CAS, including duplicate self-edge cases. Compact records retain
+rank/orientation/degree information and exact continuation eligibility, with full-width fallback.
+Finalization first gives nonunique ranks stable degree sentinels. Atomic neighbor reads then
+update only continuation flags; rank fields remain unchanged, so no separate degree snapshot is
+needed. Bounded prefetch batches overlap those reads. All workers join before immutable ownership
+transfer; matching size/alignment and native byte order are required, with ordinary collection as
+fallback. Completed edge storage is retired before location and transcript-run allocation.
+
+Parallel branch/residual preparation never claims vertices. Serial ordered claims truncate at the
+first earlier canonical claim, preserving orientation, unitig order and reverse collisions. Accepted
+branch sequences materialize in parallel; residual work retains bounded batches and a long-path
+serial fallback. Prepared steps use u32 when ranks fit, otherwise u64. Compact oriented starts sort
+by exact numeric keys. A counting pass divides one initialized start allocation into disjoint
+mutable slices, avoiding a complete set of start shards beside its destination. All-active,
+all-inactive and sparse masks retain the same IDs and keys. Ordered candidate discovery preserves
+join priority without another sort. Accepted path metadata uses bounded ordered chunks and exact
+final assembly. Joined sequences reuse owned buffers. Missing join links use an out-of-domain sentinel, preserving
+state zero and cycles. Transcript runs advance through proven nonbranching unitig interiors; the
+independent byte oracle checks every skipped continuation in test builds.
+
+[Transcript-run scratch](../crates/kallistors/src/index/transcript_runs.rs) stores exact whole-unitig
+runs in three words and partial runs in five. Large unitig IDs retain the full representation.
+Known bounds are reconstructed from unitig lengths before stable per-unitig assembly.
+[Block positions](../crates/kallistors/src/index/block_positions.rs) retain sorted unique positions
+and group boundaries in contiguous arrays, avoiding an allocation for every transcript in an EC.
+Lookup buffers are released before EC/minimizer payloads. ECs, minimizer work, MPHF marking and grouped
+node serialization run in parallel. Worker-private seen/collision sets merge both within-worker
+and cross-worker collisions exactly; survivor and serialized bitvector order are unchanged.
+Survivor IDs and temporary buckets use u32 only when their complete domains fit; usize/u64
+fallbacks serialize identically. Numeric minimizer keys are converted to their original big-endian
+bytes at hashing/serialization boundaries, avoiding a full key-layout copy.
+Rolling minimizer hashes feed a fixed monotonic queue retaining every tied minimum. Numeric
+radix sorting preserves key byte order. Tiny bitmap and packed-sequence oracles protect serialization;
+AArch64 sequence packing has a scalar fallback. Independent allocations are released in the same
+requested worker pool. [Scratch-page retirement](../crates/kallistors/src/index/scratch_pages.rs)
+releases only page-aligned, wholly unused initialized ranges on macOS/Linux. Live bytes, allocator
+headers and ownership are preserved; spare capacity remains reusable. Dead starts, candidates,
+join links, consumed path metadata and the completed graph-section buffer are retired at their last
+use. Owner-pool allocator collection skips allocations supplied by system-allocator library hosts.
+Stage clocks do not overlap; MPHF is separate from writing and the internal
+total includes final cleanup. Whole-process time additionally includes startup and pool teardown.
+
+The shared-window union oracle protects prefix/suffix and internal seams, changed flanks and
+mutations. Serial/parallel graph checks cover canonical claims, joins, narrow/wide steps, reverse
+collisions and long cycles; lookup and MPHF oracles protect exact keys and serialized bytes.
+Real-reference validation checks complete index bytes, then complete paired/single EC maps in both
+quantifiers across both builders. Summary counters alone are insufficient. See the
+[benchmark guide](benchmarks.md) for reference preparation, trimming and phase/memory measurement.

@@ -16,7 +16,19 @@ A Rust implementation of kallisto-style pseudoalignment and RNA-seq quantificati
 
 Quantification uses the requested thread count for mapping and EM. Compact index storage,
 packed matching, bounded input queues and buffered output reduce work and memory use.
-Source builds use `target-cpu=native`; release binaries use a portable CPU target.
+Index construction deduplicates byte-proven repeated windows. Large parallel collections losslessly
+pack each completed transcript group before sorting its words. Compact exact lookups, contiguous transcript/EC position
+storage and timely scratch release reduce peak memory. One requested worker pool handles graph
+construction, ECs, minimizers and output. Paths are prepared in parallel and claimed in serial
+order; a single counted start table and compact path/link records preserve deterministic joins.
+FASTA normalization retains input-order ambiguity replacement. All transcript metadata, exact
+continuations, tied minimizers, wide-value fallbacks and the v13 representation are preserved.
+See [construction details](docs/development.md#index-construction).
+An eight-thread index build of the complete, uncompressed GENCODE v50 ALL reference took a
+median **12.39 s**, with **5.08 GiB peak RSS** on Apple Silicon (one warmup, three measured builds).
+The [benchmark guide](docs/benchmarks.md#eight-thread-index-build-measurement) gives the scope,
+phase timings and validation details. Source builds use `target-cpu=native`; release binaries use a
+portable CPU target.
 
 The [benchmark guide](docs/benchmarks.md) documents public datasets, read trimming,
 GENCODE cDNA and Pachter Lab mature-plus-nascent references, repeated comparisons with original

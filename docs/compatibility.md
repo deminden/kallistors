@@ -8,6 +8,8 @@ separate compatibility checks.
 
 - Complete EC parity means identical counts for each transcript set, independent of EC numbering.
   Equal `run_info.json` totals alone do not establish EC parity.
+- `--fr-stranded` and `--rf-stranded` retain strand annotations. A mapped mate rejected by
+  strand rejects the pair; a genuinely unmapped mate can still allow its matching partner.
 - Paired effective lengths use the empirical fragment histogram. The default
   [sampling policy](fragment_length_sampling.md) follows original kallisto's 10,000-observation
   goal and 8 MiB sequence buffers. Concurrent scheduling can change the sampled histogram.

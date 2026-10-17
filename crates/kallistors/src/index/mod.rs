@@ -3,6 +3,7 @@
 pub mod bifrost;
 pub mod builder;
 mod graph_build;
+mod workers;
 mod writer;
 
 pub use builder::{IndexBuildOptions, IndexBuildReport, build_index, build_index_with_report};
@@ -910,3 +911,11 @@ mod skipped_position_tests {
         }
     }
 }
+
+mod packed_transcripts;
+
+mod scratch_pages;
+
+mod transcript_runs;
+
+mod block_positions;

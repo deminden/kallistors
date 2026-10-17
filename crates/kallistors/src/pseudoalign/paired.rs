@@ -194,6 +194,7 @@ pub fn trace_read_pair_bifrost(
                 b"",
             )
         {
+            read_ec.hard_reject_pair |= filtered.is_empty();
             read_ec.ec = filtered;
         }
         if let Some(read_ec) = ec2.as_mut()
@@ -207,6 +208,7 @@ pub fn trace_read_pair_bifrost(
                 b"",
             )
         {
+            read_ec.hard_reject_pair |= filtered.is_empty();
             read_ec.ec = filtered;
         }
     }
@@ -375,6 +377,7 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
                     b"",
                 )
             {
+                read_ec.hard_reject_pair |= filtered.is_empty();
                 read_ec.ec = filtered;
             }
             if let Some(read_ec) = ec2.as_mut()
@@ -388,6 +391,7 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
                     b"",
                 )
             {
+                read_ec.hard_reject_pair |= filtered.is_empty();
                 read_ec.ec = filtered;
             }
         }
@@ -608,6 +612,7 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                             &a.header,
                         )
                     {
+                        read_ec.hard_reject_pair |= filtered.is_empty();
                         read_ec.ec = filtered;
                     }
                     if let Some(read_ec) = ec2.as_mut()
@@ -621,6 +626,7 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                             &b.header,
                         )
                     {
+                        read_ec.hard_reject_pair |= filtered.is_empty();
                         read_ec.ec = filtered;
                     }
                 }

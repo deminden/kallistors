@@ -78,6 +78,37 @@ target/tools/kallisto-0.52.0 index -t 8 \
 
 The ALL transcript FASTA has 670,670 targets and MD5 `4d5bd41b247480e12c0b370490f52ddd`.
 
+For construction measurements that exclude gzip decoding, decompress the same verified file:
+
+```bash
+mkdir -p data/gencode50-all
+gzip -dc data/srr-small/gencode.v50.transcripts.fa.gz \
+  > data/gencode50-all/gencode.v50.transcripts.fa
+```
+
+The uncompressed ALL FASTA is 1,575,713,375 bytes, with SHA-256
+`179bbe798a0e455d05b9456ab5f7ef51bffdcab6118d4697ea3219181c5e7c93`.
+Pass this file to `benchmark_index.py --fasta` when reproducing the uncompressed measurements.
+
+### Smaller index-building target: protein-coding transcripts
+
+```bash
+python3 scripts/prepare_reference.py --reference gencode50-protein-coding \
+  --transcripts data/srr-small/gencode.v50.transcripts.fa.gz
+python3 scripts/benchmark_index.py \
+  --fasta data/gencode50-protein-coding/gencode.v50.protein_coding.fa \
+  --threads 8 --warmups 1 --runs 3 --stages --keep-last-index \
+  --out target/benchmarks/protein-coding-index
+```
+
+This selects 288,650 transcripts with biotype `protein_coding`, the eighth pipe-delimited
+GENCODE header field, from the checksum-verified ALL FASTA. IDs, sequences and input order are
+preserved. Transcripts with other biotypes are excluded even when their gene is protein
+coding. Both builders receive the same uncompressed FASTA. The preparation record includes
+source and output hashes and target/base counts. This smaller reference supports iterative
+index-build measurements: k=31 and g=23 produce 109,981,201 distinct k-mers and
+1,017,525 unitigs. It does not replace full-reference compatibility checks.
+
 ### Intronic reference: Pachter Lab human NAC
 
 ```bash
@@ -198,12 +229,79 @@ For index build comparisons:
 ```bash
 python3 scripts/benchmark_index.py \
   --fasta data/srr-small/gencode.v50.transcripts.fa.gz --threads 8 \
-  --runs 3 --warmups 1 --out target/benchmarks/index-build
+  --runs 3 --warmups 1 --stages --keep-last-index \
+  --out target/benchmarks/index-build
 ```
 
 Index benchmarking shares execution, provenance, memory and summary code with quantification.
 Its outputs can be exported with `report_benchmarks.py` using the same command structure.
-Index time/size comparisons do not by themselves establish index compatibility.
+`--keep-last-index` retains the last measured index from each builder for compatibility checks;
+other generated indexes are removed after measurement. Without that option all generated indexes
+are removed. `--stages` records kallistors' internal build stages in JSON and TSV:
+
+| Build stage | Work included |
+| --- | --- |
+| `fasta_parse` | FASTA reading and transcript normalization |
+| `graph_build` | K-mer collection/sorting, topology, compaction and k-mer locations |
+| `ec_build` | Transcript mapping and EC/position blocks |
+| `minimizer_mphf` | Selected minimizer indexing and MPHF construction |
+| `write` | Serialization and file writing, excluding MPHF construction |
+
+These stages do not overlap. Unattributed setup and cleanup can leave their sum below the
+internal total; independently calculated stage medians need not sum to the median total.
+Use external whole-process elapsed time for speed comparisons. Original kallisto's normal
+progress log is retained, without claiming equivalent internal stage measurements.
+
+Index time/size comparisons do not by themselves establish index compatibility. Load both
+builders' indexes in both quantifiers and compare complete counted EC maps on identical reads,
+including paired/single and relevant strand options. Index bytes may differ between builders.
+
+### Eight-thread index build measurement
+
+On Apple Silicon, building the complete GENCODE v50 ALL transcript FASTA with eight threads:
+670,670 transcripts and 207,228,052 distinct k-mers; k=31 and g=23. The input was exactly
+decompressed before timing, with no transcript filtering.
+
+| Measurement | Current kallistors |
+| --- | ---: |
+| Median whole-process elapsed time | 12.39 s |
+| Median peak RSS | 5.08 GiB |
+| Median peak footprint | 4.59 GiB |
+
+One warmup preceded three measured builds. Source builds used `target-cpu=native`.
+All measured runs were uninterrupted. Five-second sampling recorded a background process at
+26% CPU in one measured build; alternating controls and all three observations were retained.
+RSS and macOS
+peak footprint are separate OS measurements. These values describe this reference and
+machine family; they do not establish a universal timing estimate.
+
+Median internal stages were 0.65 s for FASTA parsing, 9.19 s for graph construction,
+0.89 s for EC construction, 0.97 s for minimizer/MPHF work and 0.61 s for writing.
+Independent stage medians need not sum to the median whole-process time.
+
+Construction excludes only byte-proven repeat windows, preserving seams and complete metadata.
+Shared ends and sparse internal anchors select candidate repeats; full equality proves each skip.
+Bounded deduplication and radix sorting limit collection work; completed parallel groups are
+losslessly packed before their word sort and restored to transcript order. Canonical-edge symmetry, exact
+small-bucket guards, active query batches and AArch64 cache hints reduce graph lookup work.
+The requested worker pool is reused across stages; edge finalization, accepted
+branch sequences, ECs, minimizers, collision marking and grouped serialization run in parallel.
+Serial ordered claims/joins retain deterministic graph order; long residual paths keep bounded
+fallback handling. Compact path/link/location scratch, sequence ownership reuse and early lookup
+release limit temporary allocations. Exact packed rank bounds, counted start-table filling,
+contiguous grouped EC positions and narrow MPHF scratch avoid overlapping full-size buffers.
+Wholly unused scratch pages are reclaimed on macOS/Linux. All tied minimizers and the v13 representation are preserved.
+The internal total includes final cleanup; process startup and pool teardown remain in whole-process
+time. See [construction details](development.md#index-construction) for exactness guarantees.
+
+Compatibility validation used 99,029 fasterp-trimmed pairs retained from the first 100,000
+SRR13638690 pairs. All 24 complete EC maps matched within their mode/strand case:
+paired/single × unstranded/FR/RF × both index builders × both quantifiers. Normal quantification
+counters and native HDF5 readback passed for both indexes in paired and single-end modes.
+Complete index-byte regression checks passed for both the protein-coding subset and full
+GENCODE v50 ALL reference (670,670 transcripts and 207,228,052 distinct k-mers). Serial/threaded
+construction also matched across the nucleotide k/g and amino-acid validation matrix.
+
 
 ## Correctness and interpretation
 

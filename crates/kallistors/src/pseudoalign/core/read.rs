@@ -699,16 +699,8 @@ pub(crate) fn ec_for_read_bifrost(
             pos += 1;
             continue;
         }
-        if !accept_for_stream && in_backoff {
-            let can_terminal_jump =
-                jump_distance_for_match(index, uid, block_idx, start, forward_strand)
-                    .is_some_and(|dist| pos.saturating_add(dist) >= last_pos);
-            if !can_terminal_jump {
-                pos += 1;
-                continue;
-            }
-        }
-
+        // Excluding a probe from EC intersection does not invalidate its exact
+        // sequence match for confirming a jump, including on reverse unitigs.
         let mut jump_to: Option<usize> = None;
         let mut force_break = false;
         let mut synthetic_hit: Option<Hit> = None;

@@ -51,6 +51,7 @@ fn build_mapping_index(
     debug: bool,
 ) -> kallistors::Result<kallistors::pseudoalign::BifrostIndex> {
     use kallistors::pseudoalign::*;
+    let load_positional_info = load_positional_info || options.strand_specific.is_some();
     if options.kallisto_direct_kmer {
         build_bifrost_index_with_kmer_pos(path, load_positional_info)
     } else if options.kallisto_fallback {

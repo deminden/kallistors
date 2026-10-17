@@ -89,6 +89,8 @@ def main():
                     stages = central_stages(measured)
                     row.update(startup=stages['startup_index'] + stages['input_setup'], reads=stages['read_processing'],
                                model_em=stages['model_and_em'], output=stages['output_shutdown'])
+                if 'median_build_stages_seconds' in stats:
+                    row.update({f'build_{name}': value for name, value in stats['median_build_stages_seconds'].items()})
                 rows.append(row)
             if protocol['kind'] == 'quantification':
                 if not selected or not all(r['counters_match'] for r in selected):

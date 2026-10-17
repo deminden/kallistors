@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare GENCODE v50 cDNA or Pachter Lab human NAC references."""
+"""Prepare GENCODE v50 cDNA, protein-coding cDNA or Pachter Lab human NAC references."""
 
 import argparse
 import gzip
@@ -41,6 +41,23 @@ def read_fasta(path, destination=None, seen=None):
     return {'targets': targets, 'bases': bases}
 
 
+def protein_coding(transcripts, out):
+    fasta = out / 'gencode.v50.protein_coding.fa'
+    if fasta.exists():
+        raise ValueError(f'Output already exists: {fasta}')
+    selected = False
+    with gzip.open(transcripts, 'rb') as source, fasta.open('wb') as destination:
+        for line in source:
+            if line.startswith(b'>'):
+                fields = line.rstrip().split(b'|')
+                if len(fields) < 8:
+                    raise ValueError('Expected GENCODE transcript FASTA header with transcript biotype')
+                selected = fields[7] == b'protein_coding'
+            if selected:
+                destination.write(line)
+    return fasta, read_fasta(fasta)
+
+
 def official_nac(out):
     base = 'https://github.com/pachterlab/kallisto-transcriptome-indices/releases/download/v1/'
     assets = {'human_nac.mature.fa.gz': 58045671, 'human_nac.nascent.fa.gz': 558305249}
@@ -63,12 +80,13 @@ def official_nac(out):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--reference', choices=('gencode50', 'official-nac'), required=True)
+    parser.add_argument('--reference', choices=('gencode50', 'gencode50-protein-coding', 'official-nac'), required=True)
     parser.add_argument('--out', type=Path)
-    parser.add_argument('--transcripts', type=Path, help='existing GENCODE v50 ALL FASTA.gz for gencode50')
+    parser.add_argument('--transcripts', type=Path, help='existing GENCODE v50 ALL FASTA.gz for either GENCODE reference')
     args = parser.parse_args()
     try:
         roots = {'gencode50': 'data/srr-small',
+                 'gencode50-protein-coding': 'data/gencode50-protein-coding',
                  'official-nac': 'data/official-human-nac'}
         out = (args.out or Path(roots[args.reference])).resolve()
         out.mkdir(parents=True, exist_ok=True)
@@ -77,15 +95,21 @@ def main():
             raise ValueError(f'Reference already prepared: {report}')
         if args.reference == 'official-nac':
             if args.transcripts:
-                raise ValueError('--transcripts applies only to gencode50')
+                raise ValueError('--transcripts applies only to GENCODE references')
             result = official_nac(out)
         else:
             transcripts = (args.transcripts or out / 'gencode.v50.transcripts.fa.gz').resolve()
             source = fetch(BASE + 'gencode.v50.transcripts.fa.gz', transcripts, TRANSCRIPTS_MD5)
             counts = read_fasta(transcripts)
+            fasta = transcripts
+            if args.reference == 'gencode50-protein-coding':
+                fasta, counts = protein_coding(transcripts, out)
             result = {'label': 'GENCODE v50 ALL transcripts', 'mature_targets': counts['targets'],
                       'nascent_targets': 0, 'total_targets': counts['targets'], 'sources': [source],
-                      'fasta': fingerprint(transcripts)}
+                      'fasta': fingerprint(fasta)}
+            if args.reference == 'gencode50-protein-coding':
+                result.update(label='GENCODE v50 protein-coding transcripts',
+                              definition='Transcript biotype protein_coding (eighth pipe-delimited header field); original IDs, sequences and order retained')
         write_json(report, {'schema_version': 1, 'reference': args.reference, **result})
         print(json.dumps(result, indent=2))
     except (OSError, ValueError, KeyError, RuntimeError) as error:

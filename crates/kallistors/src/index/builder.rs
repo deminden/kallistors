@@ -1,10 +1,13 @@
-use std::collections::HashSet;
+use super::workers::IndexWorkers;
+use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use flate2::read::GzDecoder;
+use rayon::prelude::*;
 
 use super::graph_build::build_kmer_unitig_graph_with_report;
 use super::writer::write_index_with_report;
@@ -42,6 +45,7 @@ pub struct IndexBuildReport {
     pub graph_build: Duration,
     pub minimizer_mphf: Duration,
     pub ec_build: Duration,
+    /// Serialization and file I/O, excluding MPHF construction.
     pub write: Duration,
     pub transcripts: usize,
     pub unitigs: usize,
@@ -54,6 +58,41 @@ pub(super) struct Transcript {
     pub(super) name: String,
     pub(super) original_len: u32,
     pub(super) seq: Vec<u8>,
+}
+
+#[derive(Default)]
+struct TranscriptNames {
+    first: HashMap<u64, usize>,
+    collisions: HashMap<u64, Vec<usize>>,
+}
+
+impl TranscriptNames {
+    fn insert(&mut self, name: &str, transcripts: &[Transcript]) -> bool {
+        let mut hasher = DefaultHasher::new();
+        name.hash(&mut hasher);
+        self.insert_hashed(hasher.finish(), name, transcripts)
+    }
+    fn insert_hashed(&mut self, hash: u64, name: &str, transcripts: &[Transcript]) -> bool {
+        if let Some(&first) = self.first.get(&hash) {
+            // Hashes select candidates only. Full equality decides membership,
+            // including every distinct name sharing the same complete hash.
+            if transcripts[first].name == name
+                || self
+                    .collisions
+                    .get(&hash)
+                    .is_some_and(|ids| ids.iter().any(|&id| transcripts[id].name == name))
+            {
+                return false;
+            }
+            self.collisions
+                .entry(hash)
+                .or_default()
+                .push(transcripts.len());
+        } else {
+            self.first.insert(hash, transcripts.len());
+        }
+        true
+    }
 }
 
 pub fn build_index(
@@ -75,37 +114,71 @@ pub fn build_index_with_report(
     let g = options.g.unwrap_or_else(|| default_minimizer_len(k));
     validate_k_g(k, g)?;
 
-    let fasta_start = Instant::now();
-    let transcripts = load_transcripts(fasta_paths, options.make_unique, options.aa)?;
-    let fasta_parse = fasta_start.elapsed();
+    let workers = IndexWorkers::new(options.threads)?;
+    workers.install(|| {
+        // Keep FASTA allocations on the same requested worker pool that owns
+        // normalization, mapping and disposal, allowing allocator reuse there.
+        let fasta_start = Instant::now();
+        let transcripts = load_transcripts(
+            fasta_paths,
+            options.make_unique,
+            options.aa,
+            options.threads,
+        )?;
+        let fasta_parse = fasta_start.elapsed();
 
-    let (graph, graph_report) = build_kmer_unitig_graph_with_report(
-        &transcripts,
-        k,
-        g,
-        options.ec_max_size,
-        options.threads,
-    )?;
-    let write_report = write_index_with_report(output, &graph)?;
-    let unitigs = graph.unitigs.len() + graph.km_unitigs.len();
-    let kmers = graph
-        .unitigs
-        .iter()
-        .map(|seq| seq.len().saturating_sub(graph.k) + 1)
-        .sum::<usize>()
-        + graph.km_unitigs.len();
-    let minimizers = graph.minimizer_keys.len();
-    Ok(IndexBuildReport {
-        total: total_start.elapsed(),
-        fasta_parse,
-        graph_build: graph_report.graph_build,
-        minimizer_mphf: graph_report.minimizer_index + write_report.mphf,
-        ec_build: graph_report.ec_build,
-        write: write_report.total,
-        transcripts: graph.transcript_names.len(),
-        unitigs,
-        kmers,
-        minimizers,
+        let (graph, graph_report) = build_kmer_unitig_graph_with_report(
+            transcripts,
+            k,
+            g,
+            options.ec_max_size,
+            options.threads,
+        )?;
+        let write_report = write_index_with_report(output, &graph, options.threads)?;
+        let unitigs = graph.unitigs.len() + graph.km_unitigs.len();
+        let kmers = graph
+            .unitigs
+            .iter()
+            .map(|seq| seq.len().saturating_sub(graph.k) + 1)
+            .sum::<usize>()
+            + graph.km_unitigs.len();
+        let minimizers = graph.minimizer_keys.len();
+        let mut report = IndexBuildReport {
+            total: total_start.elapsed(),
+            fasta_parse,
+            graph_build: graph_report.graph_build,
+            minimizer_mphf: graph_report.minimizer_index + write_report.mphf,
+            ec_build: graph_report.ec_build,
+            write: write_report.total - write_report.mphf,
+            transcripts: graph.transcript_names.len(),
+            unitigs,
+            kmers,
+            minimizers,
+        };
+        if options.threads > 1 {
+            // Materialization and payload workers own many of these allocations.
+            // Keep disposal bounded by the same requested worker pool.
+            rayon::join(
+                || graph.unitigs.into_par_iter().for_each(drop),
+                || {
+                    rayon::join(
+                        || graph.nodes.into_par_iter().for_each(drop),
+                        || graph.transcript_names.into_par_iter().for_each(drop),
+                    )
+                },
+            );
+            drop((
+                graph.km_unitigs,
+                graph.minimizer_keys,
+                graph.unitig_bitmap_blocks,
+                graph.km_bitmap_blocks,
+                graph.transcript_lengths,
+            ));
+        } else {
+            drop(graph);
+        }
+        report.total = total_start.elapsed();
+        Ok(report)
     })
 }
 
@@ -163,75 +236,166 @@ fn load_transcripts(
     fasta_paths: &[PathBuf],
     make_unique: bool,
     aa: bool,
+    threads: usize,
 ) -> Result<Vec<Transcript>> {
     let mut out = Vec::new();
-    let mut names = HashSet::new();
+    let mut names = TranscriptNames::default();
     let mut rng = Mt19937::new(42);
 
     for path in fasta_paths {
-        let mut reader = open_fasta_reader(path)?;
-        let mut line = String::new();
-        let mut current_name: Option<String> = None;
-        let mut current_seq = Vec::new();
-
-        loop {
-            line.clear();
-            let n = reader.read_line(&mut line)?;
-            if n == 0 {
-                break;
-            }
-            let trimmed = line.trim_end_matches(['\n', '\r']);
-            if let Some(rest) = trimmed.strip_prefix('>') {
-                flush_transcript(
-                    &mut out,
-                    &mut names,
-                    &mut rng,
-                    current_name.take(),
-                    &mut current_seq,
-                    make_unique,
-                    aa,
-                )?;
-                let name = rest.split_whitespace().next().unwrap_or("").to_string();
-                current_name = Some(name);
-            } else {
-                current_seq.extend_from_slice(trimmed.as_bytes());
+        let file = File::open(path).map_err(|_| Error::MissingFile(path.to_path_buf()))?;
+        let is_gz = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"));
+        if is_gz {
+            read_transcript_file(
+                BufReader::with_capacity(256 * 1024, GzDecoder::new(file)),
+                &mut out,
+                &mut names,
+                &mut rng,
+                make_unique,
+                aa,
+                threads > 1,
+            )?;
+        } else {
+            read_transcript_file(
+                BufReader::with_capacity(256 * 1024, file),
+                &mut out,
+                &mut names,
+                &mut rng,
+                make_unique,
+                aa,
+                threads > 1,
+            )?;
+        }
+    }
+    if threads > 1 {
+        let workers = IndexWorkers::new(threads)?;
+        let needs_masking = workers.install(|| {
+            out.par_iter_mut()
+                .map(|transcript| {
+                    if aa {
+                        transcript.seq = crate::util::aa_to_comma_free(&transcript.seq);
+                        transcript.original_len = transcript.seq.len() as u32;
+                        trim_poly_a(&mut transcript.seq);
+                        false
+                    } else {
+                        transcript.seq.make_ascii_uppercase();
+                        let ambiguous = transcript
+                            .seq
+                            .chunks(32)
+                            .any(|chunk| crate::dna::encode_kmer_pair(chunk).is_none());
+                        if !ambiguous {
+                            trim_poly_a(&mut transcript.seq);
+                        }
+                        ambiguous
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
+        // Random substitutions consume the same RNG in transcript/base order.
+        for (transcript, mask) in out.iter_mut().zip(needs_masking) {
+            if mask {
+                for base in &mut transcript.seq {
+                    match *base {
+                        b'A' | b'C' | b'G' | b'T' => {}
+                        b'U' => *base = b'T',
+                        _ => *base = dna_from_mt(rng.next_u32()),
+                    }
+                }
+                trim_poly_a(&mut transcript.seq);
             }
         }
-        flush_transcript(
-            &mut out,
-            &mut names,
-            &mut rng,
-            current_name.take(),
-            &mut current_seq,
-            make_unique,
-            aa,
-        )?;
     }
-
     Ok(out)
 }
 
-fn open_fasta_reader(path: &Path) -> Result<Box<dyn BufRead>> {
-    let file = File::open(path).map_err(|_| Error::MissingFile(path.to_path_buf()))?;
-    let is_gz = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"));
-    if is_gz {
-        Ok(Box::new(BufReader::new(GzDecoder::new(file))))
-    } else {
-        Ok(Box::new(BufReader::new(file)))
+fn read_transcript_file<R: BufRead>(
+    mut reader: R,
+    out: &mut Vec<Transcript>,
+    names: &mut TranscriptNames,
+    rng: &mut Mt19937,
+    make_unique: bool,
+    aa: bool,
+    defer_normalization: bool,
+) -> Result<()> {
+    let mut current_name: Option<String> = None;
+    let mut current_seq = Vec::new();
+    let mut process_line = |bytes: &[u8]| -> Result<()> {
+        let line = std::str::from_utf8(bytes).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            )
+        })?;
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if let Some(rest) = trimmed.strip_prefix('>') {
+            flush_transcript(
+                out,
+                names,
+                rng,
+                current_name.take(),
+                &mut current_seq,
+                make_unique,
+                aa,
+                defer_normalization,
+            )?;
+            let name = rest.split_whitespace().next().unwrap_or("").to_string();
+            current_name = Some(name);
+        } else {
+            current_seq.extend_from_slice(trimmed.as_bytes());
+        }
+        Ok(())
+    };
+    let mut pending = Vec::new();
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            if !pending.is_empty() {
+                process_line(&pending)?;
+            }
+            break;
+        }
+        let mut start = 0;
+        for end in memchr::memchr_iter(b'\n', buffer) {
+            let part = &buffer[start..=end];
+            if pending.is_empty() {
+                process_line(part)?;
+            } else {
+                pending.extend_from_slice(part);
+                process_line(&pending)?;
+                pending.clear();
+            }
+            start = end + 1;
+        }
+        pending.extend_from_slice(&buffer[start..]);
+        let consumed = buffer.len();
+        reader.consume(consumed);
     }
+    flush_transcript(
+        out,
+        names,
+        rng,
+        current_name.take(),
+        &mut current_seq,
+        make_unique,
+        aa,
+        defer_normalization,
+    )?;
+    Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn flush_transcript(
     out: &mut Vec<Transcript>,
-    names: &mut HashSet<String>,
+    names: &mut TranscriptNames,
     rng: &mut Mt19937,
     name: Option<String>,
     seq: &mut Vec<u8>,
     make_unique: bool,
     aa: bool,
+    defer_normalization: bool,
 ) -> Result<()> {
     let Some(mut name) = name else {
         return Ok(());
@@ -239,7 +403,7 @@ fn flush_transcript(
     if name.is_empty() {
         name = out.len().to_string();
     }
-    if !names.insert(name.clone()) {
+    if !names.insert(&name, out) {
         if !make_unique {
             return Err(Error::InvalidFormat(format!(
                 "repeated name in FASTA file: {name}; rerun with --make-unique"
@@ -249,7 +413,7 @@ fn flush_transcript(
         let mut suffix = 1usize;
         loop {
             let candidate = format!("{base}_{suffix}");
-            if names.insert(candidate.clone()) {
+            if names.insert(&candidate, out) {
                 name = candidate;
                 break;
             }
@@ -257,29 +421,30 @@ fn flush_transcript(
         }
     }
 
-    let mut normalized = if aa {
+    let mut normalized = if defer_normalization {
+        seq.clone()
+    } else if aa {
         crate::util::aa_to_comma_free(seq)
     } else {
-        let mut normalized = Vec::with_capacity(seq.len());
-        for &base in seq.iter() {
-            let b = base.to_ascii_uppercase();
-            match b {
-                b'A' | b'C' | b'G' | b'T' => normalized.push(b),
-                b'U' => normalized.push(b'T'),
-                _ => normalized.push(dna_from_mt(rng.next_u32())),
+        let mut normalized = seq.clone();
+        normalized.make_ascii_uppercase();
+        for chunk in normalized.chunks_mut(32) {
+            if crate::dna::encode_kmer_pair(chunk).is_some() {
+                continue;
+            }
+            for base in chunk {
+                match *base {
+                    b'A' | b'C' | b'G' | b'T' => {}
+                    b'U' => *base = b'T',
+                    _ => *base = dna_from_mt(rng.next_u32()),
+                }
             }
         }
         normalized
     };
     let original_len = normalized.len() as u32;
-    if normalized.len() >= 10
-        && normalized[normalized.len() - 10..]
-            .iter()
-            .all(|&b| b == b'A')
-    {
-        while normalized.last() == Some(&b'A') {
-            normalized.pop();
-        }
+    if !defer_normalization {
+        trim_poly_a(&mut normalized);
     }
     out.push(Transcript {
         name,
@@ -288,6 +453,14 @@ fn flush_transcript(
     });
     seq.clear();
     Ok(())
+}
+
+fn trim_poly_a(seq: &mut Vec<u8>) {
+    if seq.len() >= 10 && seq[seq.len() - 10..].iter().all(|&b| b == b'A') {
+        while seq.last() == Some(&b'A') {
+            seq.pop();
+        }
+    }
 }
 
 fn dna_from_mt(v: u32) -> u8 {
@@ -341,11 +514,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn transcript_name_hash_collisions_retain_exact_membership() {
+        let mut names = TranscriptNames::default();
+        let mut transcripts = Vec::new();
+        for name in ["alpha", "beta", "alpha_1"] {
+            assert!(names.insert_hashed(7, name, &transcripts));
+            transcripts.push(Transcript {
+                name: name.into(),
+                original_len: 0,
+                seq: Vec::new(),
+            });
+        }
+        for name in ["alpha", "beta", "alpha_1"] {
+            assert!(!names.insert_hashed(7, name, &transcripts));
+        }
+        assert!(names.insert_hashed(7, "gamma", &transcripts));
+    }
+
+    #[test]
     fn minimizer_defaults_match_kallisto() {
         assert_eq!(default_minimizer_len(31), 23);
         assert_eq!(default_minimizer_len(19), 13);
         assert_eq!(default_minimizer_len(17), 13);
         assert_eq!(default_minimizer_len(13), 11);
+    }
+
+    #[test]
+    fn buffered_fasta_lines_preserve_boundaries_and_utf8_errors() {
+        let input =
+            ">alpha\u{2003}description\r\nacguNN\r\n\r\n>beta\nCCGTA\r\r\n>\nTGCA".as_bytes();
+        let mut expected = None;
+        for capacity in [65536, 1, 2, 3, 7, 64] {
+            let mut out = Vec::new();
+            let mut names = TranscriptNames::default();
+            let mut rng = Mt19937::new(42);
+            read_transcript_file(
+                BufReader::with_capacity(capacity, input),
+                &mut out,
+                &mut names,
+                &mut rng,
+                false,
+                false,
+                false,
+            )
+            .unwrap();
+            let actual = out
+                .into_iter()
+                .map(|tr| (tr.name, tr.original_len, tr.seq))
+                .collect::<Vec<_>>();
+            assert_eq!(actual.len(), 3);
+            assert_eq!(actual[0].0, "alpha");
+            assert_eq!(actual[2].0, "2");
+            if let Some(expected) = &expected {
+                assert_eq!(&actual, expected, "capacity={capacity}");
+            } else {
+                expected = Some(actual);
+            }
+            for invalid in [b">bad\xff\nACGT".as_slice(), b">good\nAC\xffGT".as_slice()] {
+                let mut out = Vec::new();
+                let mut names = TranscriptNames::default();
+                let mut rng = Mt19937::new(42);
+                assert!(
+                    read_transcript_file(
+                        BufReader::with_capacity(capacity, invalid),
+                        &mut out,
+                        &mut names,
+                        &mut rng,
+                        false,
+                        false,
+                        false
+                    )
+                    .is_err()
+                );
+            }
+        }
     }
 
     #[test]

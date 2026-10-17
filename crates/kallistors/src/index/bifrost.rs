@@ -352,6 +352,12 @@ pub fn minimizer_hash(key: &[u8; 8], seed: u64) -> u64 {
 }
 
 fn encode_word_pair(seq: &[u8]) -> Option<(u64, u64)> {
+    if (1..=32).contains(&seq.len()) {
+        let (forward, reverse) = crate::dna::encode_kmer_pair(seq)?;
+        let shift = 64 - 2 * seq.len();
+        return Some((forward << shift, reverse << shift));
+    }
+
     if seq.is_empty() {
         return Some((0, 0));
     }

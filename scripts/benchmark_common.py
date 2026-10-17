@@ -172,6 +172,14 @@ def run_process(command, prefix, memory=True, markers=None, environment=None):
 
     sampler = threading.Thread(target=sample, daemon=True)
     sampler.start()
+    previous_sigterm = None
+    if threading.current_thread() is threading.main_thread():
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+        def terminate(signum, _frame):
+            raise SystemExit(128 + signum)
+
+        signal.signal(signal.SIGTERM, terminate)
     try:
         pending = b''
         with prefix.with_suffix('.log').open('wb') as log:
@@ -196,6 +204,8 @@ def run_process(command, prefix, memory=True, markers=None, environment=None):
             else:
                 process.kill()
             process.wait()
+        if previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
     if code:
         raise RuntimeError(f'Command failed ({code}); see {prefix.with_suffix(".log")}')
     result = {'command': list(map(str, command)), 'wall_seconds': elapsed,
@@ -244,6 +254,9 @@ def summarize(rows):
         if all('stages_seconds' in row for row in measured):
             item['median_stages_seconds'] = {key: statistics.median(row['stages_seconds'][key] for row in measured)
                                              for key in measured[0]['stages_seconds']}
+        if all('build_stages_seconds' in row for row in measured):
+            item['median_build_stages_seconds'] = {key: statistics.median(row['build_stages_seconds'][key] for row in measured)
+                                                  for key in measured[0]['build_stages_seconds']}
         result['tools'][tool] = item
     result['total_speedup'] = result['tools']['kallisto']['median_seconds'] / result['tools']['kallistors']['median_seconds']
     result['all_measured_runs_uninterrupted'] = all(not row['timing_interrupted'] for row in rows if row['phase'] == 'measured')

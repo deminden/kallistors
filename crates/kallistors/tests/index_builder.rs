@@ -40,6 +40,15 @@ TTGACCGTAGCTAGGATCCGATCGTACGATCGTAGCTAGCTAACGTTAGCTAGGCTACGATCGATCGT
     assert_eq!(report.transcripts, 2);
     assert!(report.unitigs < report.kmers);
     assert!(report.minimizers > 0);
+    assert!(
+        report.fasta_parse
+            + report.graph_build
+            + report.ec_build
+            + report.minimizer_mphf
+            + report.write
+            <= report.total,
+        "reported build stages must not overlap"
+    );
 
     let meta = Index::load(&index).expect("load metadata");
     assert_eq!(meta.index_version, 13);
@@ -237,13 +246,13 @@ ttttccccaaaaggggNNNNACGTACGTACGTACGTACGTACGTACGTACGT
 }
 
 #[test]
-fn repetitive_duplicate_transcripts_are_deduplicated_into_loadable_graph() {
+fn repetitive_transcripts_preserve_parallel_builder_bytes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let fasta = dir.path().join("repetitive.fa");
     let index = dir.path().join("repetitive.idx");
     let mut fasta_text = String::new();
     for i in 0..24 {
-        fasta_text.push_str(&format!(">dup\n{}\n", "ACGT".repeat(32 + (i % 3))));
+        fasta_text.push_str(&format!(">dup\n{}\n", "ACGT".repeat(11_000 + (i % 3))));
     }
     fasta_text.push_str(">homopolymer\n");
     fasta_text.push_str(&"A".repeat(96));
@@ -252,7 +261,7 @@ fn repetitive_duplicate_transcripts_are_deduplicated_into_loadable_graph() {
 
     let report = build_index_with_report(
         &index,
-        &[fasta],
+        std::slice::from_ref(&fasta),
         IndexBuildOptions {
             k: 31,
             make_unique: true,
@@ -261,6 +270,22 @@ fn repetitive_duplicate_transcripts_are_deduplicated_into_loadable_graph() {
         },
     )
     .expect("build repetitive index");
+
+    // More than one million input windows exercise parallel collection, while
+    // repetition keeps the resulting graph and this regression small.
+    let serial_index = dir.path().join("serial.idx");
+    build_index(
+        &serial_index,
+        &[fasta],
+        IndexBuildOptions {
+            k: 31,
+            make_unique: true,
+            threads: 1,
+            ..IndexBuildOptions::default()
+        },
+    )
+    .expect("serial repetitive index");
+    assert_eq!(fs::read(&index).unwrap(), fs::read(serial_index).unwrap());
 
     assert_eq!(report.transcripts, 25);
     assert!(report.kmers > 0);

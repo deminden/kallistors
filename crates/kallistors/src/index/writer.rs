@@ -1,7 +1,11 @@
+use super::workers::IndexWorkers;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
+
+use rayon::prelude::*;
+use strength_reduce::StrengthReducedU64;
 
 use croaring_sys::{
     roaring_bitmap_add_many, roaring_bitmap_add_range, roaring_bitmap_create, roaring_bitmap_free,
@@ -28,20 +32,25 @@ pub(super) struct IndexWriteReport {
     pub(super) mphf: Duration,
 }
 
-pub(super) fn write_index_with_report(path: &Path, graph: &BuildGraph) -> Result<IndexWriteReport> {
+pub(super) fn write_index_with_report(
+    path: &Path,
+    graph: &BuildGraph,
+    threads: usize,
+) -> Result<IndexWriteReport> {
     let total_start = Instant::now();
     let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
+    let mut writer = BufWriter::with_capacity(1024 * 1024, file);
     write_u64(&mut writer, INDEX_VERSION)?;
 
     let mut graph_section = Vec::new();
     write_bifrost_graph_and_meta(&mut graph_section, graph)?;
     write_u64(&mut writer, graph_section.len() as u64)?;
     writer.write_all(&graph_section)?;
+    super::scratch_pages::retire(graph_section);
 
     let mphf_start = Instant::now();
     let mut mphf = Vec::new();
-    write_boo_mphf(&mut mphf, &graph.minimizer_keys)?;
+    write_boo_mphf(&mut mphf, &graph.minimizer_keys, threads)?;
     write_u64(&mut writer, mphf.len() as u64)?;
     writer.write_all(&mphf)?;
     let mphf = mphf_start.elapsed();
@@ -49,7 +58,7 @@ pub(super) fn write_index_with_report(path: &Path, graph: &BuildGraph) -> Result
     write_u64(&mut writer, 0)?;
     write_u64(&mut writer, 1)?;
 
-    write_nodes(&mut writer, graph)?;
+    write_nodes(&mut writer, graph, threads)?;
     write_transcript_metadata(&mut writer, graph)?;
     writer.flush()?;
     Ok(IndexWriteReport {
@@ -64,18 +73,24 @@ fn write_bifrost_graph_and_meta(out: &mut Vec<u8>, graph: &BuildGraph) -> Result
     write_i32(out, graph.g as i32)?;
 
     write_u64(out, graph.unitigs.len() as u64)?;
+    let mut checksum = wyhash(&(graph.k as u64).to_le_bytes(), 0);
+    checksum = wyhash(&(graph.g as u64).to_le_bytes(), checksum);
     for seq in &graph.unitigs {
-        write_compressed_sequence(out, seq)?;
+        write_u64(out, seq.len() as u64)?;
+        let range = append_compressed_sequence(out, seq);
+        checksum = wyhash(&out[range], checksum);
     }
 
     write_u64(out, graph.km_unitigs.len() as u64)?;
     for seq in &graph.km_unitigs {
-        write_kmer_word(out, encode_kmer(seq)?)?;
+        let word = encode_kmer(seq)?;
+        write_kmer_word(out, word)?;
+        checksum = wyhash(&word.to_le_bytes(), checksum);
     }
     write_u64(out, 0)?;
 
     write_u64(out, (BFG_METABIN_FORMAT_HEADER << 32) | BFG_FORMAT_VERSION)?;
-    write_u64(out, graph_checksum(graph)?)?;
+    write_u64(out, checksum)?;
     write_u64(out, graph.unitigs.len() as u64)?;
     write_u64(out, graph.km_unitigs.len() as u64)?;
     write_u64(out, 0)?;
@@ -95,19 +110,6 @@ fn write_bifrost_graph_and_meta(out: &mut Vec<u8>, graph: &BuildGraph) -> Result
     write_bitcontainer(out, &[])?;
     write_bitcontainer(out, &[])?;
     Ok(())
-}
-
-fn graph_checksum(graph: &BuildGraph) -> Result<u64> {
-    let mut checksum = wyhash(&(graph.k as u64).to_le_bytes(), 0);
-    checksum = wyhash(&(graph.g as u64).to_le_bytes(), checksum);
-    for seq in &graph.unitigs {
-        checksum = wyhash(&compressed_sequence_bytes(seq), checksum);
-    }
-    for seq in &graph.km_unitigs {
-        let word = encode_kmer(seq)?;
-        checksum = wyhash(&word.to_le_bytes(), checksum);
-    }
-    Ok(checksum)
 }
 
 struct BooBitVector {
@@ -161,35 +163,165 @@ impl BooBitVector {
     }
 }
 
-fn write_boo_mphf(out: &mut Vec<u8>, keys: &[[u8; 8]]) -> Result<()> {
+trait MphfIndex: Copy + Send + Sync {
+    fn from_index(index: usize) -> Self;
+    fn index(self) -> usize;
+}
+impl MphfIndex for u32 {
+    fn from_index(index: usize) -> Self {
+        index as u32
+    }
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+impl MphfIndex for usize {
+    fn from_index(index: usize) -> Self {
+        index
+    }
+    fn index(self) -> usize {
+        self
+    }
+}
+
+trait MphfBucket: Copy + Send + Sync {
+    fn from_bucket(bucket: u64) -> Self;
+    fn bucket(self) -> u64;
+}
+impl MphfBucket for u32 {
+    fn from_bucket(bucket: u64) -> Self {
+        bucket as u32
+    }
+    fn bucket(self) -> u64 {
+        self as u64
+    }
+}
+impl MphfBucket for u64 {
+    fn from_bucket(bucket: u64) -> Self {
+        bucket
+    }
+    fn bucket(self) -> u64 {
+        self
+    }
+}
+
+fn write_boo_mphf(out: &mut Vec<u8>, keys: &[u64], threads: usize) -> Result<()> {
+    if boo_level_domains(keys.len())?
+        .iter()
+        .all(|&domain| domain <= u32::MAX as u64)
+    {
+        write_boo_mphf_ids::<u32, u32>(out, keys, threads)
+    } else if keys.len() <= u32::MAX as usize {
+        write_boo_mphf_ids::<u32, u64>(out, keys, threads)
+    } else {
+        write_boo_mphf_ids::<usize, u64>(out, keys, threads)
+    }
+}
+
+fn write_boo_mphf_ids<Id: MphfIndex, Bucket: MphfBucket>(
+    out: &mut Vec<u8>,
+    keys: &[u64],
+    threads: usize,
+) -> Result<()> {
+    let pool = if threads > 1 && keys.len() >= 1024 {
+        Some(IndexWorkers::new(threads)?)
+    } else {
+        None
+    };
     let domains = boo_level_domains(keys.len())?;
-    let mut survivors: Vec<usize> = (0..keys.len()).collect();
+    let mut survivors: Vec<Id> = (0..keys.len()).map(Id::from_index).collect();
     let mut bitvectors = Vec::with_capacity(BOO_LEVELS);
     let mut offset = 0u64;
 
     for (level, &domain) in domains.iter().enumerate() {
         let mut bitvector = BooBitVector::new(domain)?;
         if level + 1 < BOO_LEVELS && !survivors.is_empty() {
-            let domain_usize = usize::try_from(domain)
-                .map_err(|_| Error::InvalidFormat("MPHF domain too large".into()))?;
-            let mut counts = vec![0u8; domain_usize];
-            let mut buckets = Vec::with_capacity(survivors.len());
-            for &key_idx in &survivors {
-                let bucket = boo_level_hash(&keys[key_idx], level) % domain;
-                let count = &mut counts[bucket as usize];
-                *count = count.saturating_add(1).min(2);
-                buckets.push(bucket);
-            }
-
-            let mut next_survivors = Vec::new();
-            for (&key_idx, bucket) in survivors.iter().zip(buckets) {
-                if counts[bucket as usize] == 1 {
-                    bitvector.set(bucket);
-                } else {
-                    next_survivors.push(key_idx);
+            if let Some(pool) = pool.as_ref().filter(|_| survivors.len() >= 1024) {
+                let chunk = survivors
+                    .len()
+                    .div_ceil(threads.min(survivors.len().div_ceil(256)).max(1));
+                let reduced = StrengthReducedU64::new(domain);
+                let shards = pool.install(|| {
+                    survivors
+                        .par_chunks(chunk)
+                        .map(|ids| {
+                            let mut seen = vec![0u64; bitvector.words.len()];
+                            let mut collisions = vec![0u64; bitvector.words.len()];
+                            let buckets = ids
+                                .iter()
+                                .map(|&key_idx| {
+                                    let bucket =
+                                        boo_level_hash(&keys[key_idx.index()].to_be_bytes(), level)
+                                            % reduced;
+                                    let word = (bucket >> 6) as usize;
+                                    let mask = 1 << (bucket & 63);
+                                    collisions[word] |= seen[word] & mask;
+                                    seen[word] |= mask;
+                                    Bucket::from_bucket(bucket)
+                                })
+                                .collect::<Vec<_>>();
+                            (seen, collisions, buckets)
+                        })
+                        .collect::<Vec<_>>()
+                });
+                pool.install(|| {
+                    bitvector
+                        .words
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(word, dest)| {
+                            let mut seen = 0;
+                            let mut collisions = 0;
+                            for (local_seen, local_collisions, _) in &shards {
+                                collisions |= local_collisions[word] | (seen & local_seen[word]);
+                                seen |= local_seen[word];
+                            }
+                            *dest = seen & !collisions;
+                        })
+                });
+                let next = pool.install(|| {
+                    survivors
+                        .par_chunks(chunk)
+                        .zip(shards.par_iter())
+                        .map(|(ids, (_, _, buckets))| {
+                            ids.iter()
+                                .zip(buckets)
+                                .filter_map(|(&key_idx, &bucket)| {
+                                    let bucket = bucket.bucket();
+                                    (bitvector.words[(bucket >> 6) as usize] & (1 << (bucket & 63))
+                                        == 0)
+                                        .then_some(key_idx)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>()
+                });
+                survivors = next.into_iter().flatten().collect();
+            } else {
+                let domain_usize = usize::try_from(domain)
+                    .map_err(|_| Error::InvalidFormat("MPHF domain too large".into()))?;
+                let mut counts = vec![0u8; domain_usize];
+                let mut buckets = Vec::with_capacity(survivors.len());
+                let reduced_domain = StrengthReducedU64::new(domain);
+                for &key_idx in &survivors {
+                    let bucket = boo_level_hash(&keys[key_idx.index()].to_be_bytes(), level)
+                        % reduced_domain;
+                    let count = &mut counts[bucket as usize];
+                    *count = count.saturating_add(1).min(2);
+                    buckets.push(Bucket::from_bucket(bucket));
                 }
+
+                let mut next_survivors = Vec::new();
+                for (&key_idx, bucket) in survivors.iter().zip(buckets) {
+                    let bucket = bucket.bucket();
+                    if counts[bucket as usize] == 1 {
+                        bitvector.set(bucket);
+                    } else {
+                        next_survivors.push(key_idx);
+                    }
+                }
+                survivors = next_survivors;
             }
-            survivors = next_survivors;
         }
         offset = bitvector.build_ranks(offset);
         bitvectors.push(bitvector);
@@ -205,7 +337,7 @@ fn write_boo_mphf(out: &mut Vec<u8>, keys: &[[u8; 8]]) -> Result<()> {
 
     write_u64(out, survivors.len() as u64)?;
     for (idx, &key_idx) in survivors.iter().enumerate() {
-        out.write_all(&keys[key_idx])?;
+        out.write_all(&keys[key_idx.index()].to_be_bytes())?;
         write_u64(out, idx as u64)?;
     }
     Ok(())
@@ -256,8 +388,45 @@ fn xorshift_next(s0: &mut u64, s1: &mut u64) -> u64 {
     s1.wrapping_add(y)
 }
 
-fn write_nodes<W: Write>(writer: &mut W, graph: &BuildGraph) -> Result<()> {
+fn write_nodes<W: Write>(writer: &mut W, graph: &BuildGraph, threads: usize) -> Result<()> {
     write_u64(writer, graph.nodes.len() as u64)?;
+    if threads > 1 && graph.nodes.len() >= 1024 {
+        let pool = IndexWorkers::new(threads)?;
+        // Keep only a bounded ordered batch of serialized nodes in memory.
+        for first in (0..graph.nodes.len()).step_by(256 * threads) {
+            let end = (first + 256 * threads).min(graph.nodes.len());
+            let records = pool.install(|| {
+                graph.nodes[first..end]
+                    .par_chunks(32)
+                    .enumerate()
+                    .map(|(chunk, nodes)| {
+                        let mut record = Vec::with_capacity(nodes.len() * (graph.k + 128));
+                        for (relative, node) in nodes.iter().enumerate() {
+                            let idx = first + chunk * 32 + relative;
+                            let seq = if idx < graph.unitigs.len() {
+                                &graph.unitigs[idx]
+                            } else {
+                                &graph.km_unitigs[idx - graph.unitigs.len()]
+                            };
+                            record.extend_from_slice(&seq[..graph.k]);
+                            let length_offset = record.len();
+                            record.extend_from_slice(&[0; 4]);
+                            write_u32(&mut record, node.id)?;
+                            write_block_array(&mut record, node)?;
+                            let length = (record.len() - length_offset - 4) as u32;
+                            record[length_offset..length_offset + 4]
+                                .copy_from_slice(&length.to_le_bytes());
+                        }
+                        Ok::<_, Error>(record)
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })?;
+            for record in records {
+                writer.write_all(&record)?;
+            }
+        }
+        return Ok(());
+    }
     for (seq, node) in graph
         .unitigs
         .iter()
@@ -297,13 +466,29 @@ fn write_block_array(out: &mut Vec<u8>, node: &NodePayload) -> Result<()> {
 }
 
 fn write_block_sparse_vector(out: &mut Vec<u8>, block: &NodeBlock) -> Result<()> {
-    let ec_bitmap = serialize_roaring(&block.ec, false, false)?;
-    write_u64(out, ec_bitmap.len() as u64)?;
-    out.write_all(&ec_bitmap)?;
-
+    write_prefixed_bitmap(out, &block.ec, false)?;
     write_u64(out, block.positions.len() as u64)?;
-    for vals in &block.positions {
-        let bitmap = serialize_roaring(vals, true, false)?;
+    for vals in block.positions.iter() {
+        write_prefixed_bitmap(out, vals, true)?;
+    }
+    Ok(())
+}
+
+fn write_prefixed_bitmap(out: &mut Vec<u8>, values: &[u32], run_optimize: bool) -> Result<()> {
+    // CRoaring chooses its plain uint32 array for these cardinalities, including
+    // after run optimization. The sorted-unique guard preserves set semantics.
+    if cfg!(target_endian = "little")
+        && (values.len() <= 2 || (!run_optimize && values.len() <= 6))
+        && values.windows(2).all(|pair| pair[0] < pair[1])
+    {
+        write_u64(out, (5 + 4 * values.len()) as u64)?;
+        write_u8(out, 1)?;
+        write_u32(out, values.len() as u32)?;
+        for &value in values {
+            write_u32(out, value)?;
+        }
+    } else {
+        let bitmap = serialize_roaring(values, run_optimize, false)?;
         write_u64(out, bitmap.len() as u64)?;
         out.write_all(&bitmap)?;
     }
@@ -335,24 +520,71 @@ fn write_bitcontainer(out: &mut Vec<u8>, values: &[u32]) -> Result<()> {
     Ok(())
 }
 
-fn write_compressed_sequence<W: Write>(writer: &mut W, seq: &[u8]) -> Result<()> {
-    write_u64(writer, seq.len() as u64)?;
-    writer.write_all(&compressed_sequence_bytes(seq))?;
-    Ok(())
+fn append_compressed_sequence(out: &mut Vec<u8>, seq: &[u8]) -> std::ops::Range<usize> {
+    let start = out.len();
+    out.reserve(seq.len().div_ceil(4));
+    let code = |base| match base {
+        b'A' => 0u8,
+        b'C' => 1,
+        b'G' => 2,
+        _ => 3,
+    };
+    #[cfg(target_arch = "aarch64")]
+    let seq = {
+        let (chunks, remainder) = seq.as_chunks::<16>();
+        for chunk in chunks {
+            if let Some(packed) = pack_sixteen(chunk) {
+                out.extend_from_slice(&packed);
+            } else {
+                out.extend(chunk.as_chunks::<4>().0.iter().map(|b| {
+                    code(b[0]) | (code(b[1]) << 2) | (code(b[2]) << 4) | (code(b[3]) << 6)
+                }));
+            }
+        }
+        remainder
+    };
+    let (chunks, remainder) = seq.as_chunks::<4>();
+    out.extend(chunks.iter().map(|bases| {
+        code(bases[0]) | (code(bases[1]) << 2) | (code(bases[2]) << 4) | (code(bases[3]) << 6)
+    }));
+    if !remainder.is_empty() {
+        let mut tail = 0u8;
+        for (i, &base) in remainder.iter().enumerate() {
+            tail |= code(base) << (2 * i);
+        }
+        out.push(tail);
+    }
+    start..out.len()
 }
 
-fn compressed_sequence_bytes(seq: &[u8]) -> Vec<u8> {
-    let mut data = vec![0u8; seq.len().div_ceil(4)];
-    for (idx, &base) in seq.iter().enumerate() {
-        let code = match base {
-            b'A' => 0,
-            b'C' => 1,
-            b'G' => 2,
-            _ => 3,
-        };
-        data[idx >> 2] |= code << ((idx & 0x3) << 1);
+#[cfg(target_arch = "aarch64")]
+fn pack_sixteen(bases: &[u8]) -> Option<[u8; 4]> {
+    use std::arch::aarch64::*;
+    debug_assert_eq!(bases.len(), 16);
+    // The slice contains16bytes. These NEON operations are available on every
+    // aarch64 target; reject non-ACGT bytes before applying the compact mapping.
+    unsafe {
+        let x = vld1q_u8(bases.as_ptr());
+        let valid = vorrq_u8(
+            vorrq_u8(vceqq_u8(x, vdupq_n_u8(b'A')), vceqq_u8(x, vdupq_n_u8(b'C'))),
+            vorrq_u8(vceqq_u8(x, vdupq_n_u8(b'G')), vceqq_u8(x, vdupq_n_u8(b'T'))),
+        );
+        if vminvq_u8(valid) == 0 {
+            return None;
+        }
+        let codes = vandq_u8(
+            veorq_u8(vshrq_n_u8::<1>(x), vshrq_n_u8::<2>(x)),
+            vdupq_n_u8(3),
+        );
+        let weights = [1, 4, 16, 64, 1, 4, 16, 64, 1, 4, 16, 64, 1, 4, 16, 64];
+        let groups = vpaddlq_u16(vpaddlq_u8(vmulq_u8(codes, vld1q_u8(weights.as_ptr()))));
+        Some([
+            vgetq_lane_u32::<0>(groups) as u8,
+            vgetq_lane_u32::<1>(groups) as u8,
+            vgetq_lane_u32::<2>(groups) as u8,
+            vgetq_lane_u32::<3>(groups) as u8,
+        ])
     }
-    data
 }
 
 fn serialize_roaring(values: &[u32], run_optimize: bool, portable: bool) -> Result<Vec<u8>> {
@@ -448,20 +680,99 @@ mod tests {
     use crate::index::bifrost::BooPhf;
 
     #[test]
+    fn compressed_sequence_append_preserves_native_bits_and_tail() {
+        for len in 0..128 {
+            let sequence = b"ACGTNacgu-"
+                .iter()
+                .copied()
+                .cycle()
+                .take(len)
+                .collect::<Vec<_>>();
+            let mut expected = vec![0u8; len.div_ceil(4)];
+            for (i, &base) in sequence.iter().enumerate() {
+                let code = match base {
+                    b'A' => 0u8,
+                    b'C' => 1,
+                    b'G' => 2,
+                    _ => 3,
+                };
+                expected[i / 4] |= code << (2 * (i % 4));
+            }
+            let mut actual = vec![0x12, 0x34];
+            let range = append_compressed_sequence(&mut actual, &sequence);
+            assert_eq!(&actual[..2], &[0x12, 0x34]);
+            assert_eq!(&actual[range], expected);
+        }
+    }
+
+    #[test]
+    fn small_bitmap_records_match_croaring() {
+        for values in [
+            vec![],
+            vec![0],
+            vec![u32::MAX],
+            vec![0, u32::MAX],
+            vec![1, 1],
+            vec![2, 1],
+            vec![1, 2, 3],
+            (0..6).collect(),
+            (0..7).collect(),
+            vec![0, 65536, 131072, 196608, 262144, 327680],
+        ] {
+            for optimize in [false, true] {
+                let mut actual = Vec::new();
+                write_prefixed_bitmap(&mut actual, &values, optimize).unwrap();
+                let native = serialize_roaring(&values, optimize, false).unwrap();
+                let mut expected = (native.len() as u64).to_le_bytes().to_vec();
+                expected.extend(native);
+                assert_eq!(actual, expected, "values={values:?}, optimize={optimize}");
+            }
+        }
+    }
+
+    #[test]
     fn boo_mphf_roundtrips_all_keys_without_all_final_hash() {
         let keys = (0..2000u64)
-            .map(|i| i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_le_bytes())
+            .map(|i| u64::from_be_bytes(i.wrapping_mul(0x9e37_79b9_7f4a_7c15).to_le_bytes()))
             .collect::<Vec<_>>();
 
         let mut buf = Vec::new();
-        write_boo_mphf(&mut buf, &keys).expect("write mphf");
+        write_boo_mphf(&mut buf, &keys, 1).expect("write mphf");
+        let mut parallel = Vec::new();
+        write_boo_mphf(&mut parallel, &keys, 8).expect("parallel mphf");
+        assert_eq!(parallel, buf);
+        for threads in [1, 8] {
+            let mut wide = Vec::new();
+            write_boo_mphf_ids::<usize, u64>(&mut wide, &keys, threads).expect("wide survivor IDs");
+            assert_eq!(wide, buf);
+            let mut wide_buckets = Vec::new();
+            write_boo_mphf_ids::<u32, u64>(&mut wide_buckets, &keys, threads).unwrap();
+            assert_eq!(wide_buckets, buf);
+        }
+        assert_eq!(
+            <u32 as MphfBucket>::from_bucket(u32::MAX as u64).bucket(),
+            u32::MAX as u64
+        );
+        assert_eq!(
+            <u64 as MphfBucket>::from_bucket(u64::MAX).bucket(),
+            u64::MAX
+        );
+        assert_eq!(
+            <u32 as MphfIndex>::from_index(u32::MAX as usize).index(),
+            u32::MAX as usize
+        );
+        assert_eq!(
+            <usize as MphfIndex>::from_index(usize::MAX).index(),
+            usize::MAX
+        );
+
         let mphf = BooPhf::load(&mut Cursor::new(buf)).expect("load mphf");
         assert_eq!(mphf.size(), keys.len() as u64);
         assert!(mphf.final_hash_entries().len() < keys.len());
 
         let mut ranks = HashSet::new();
         for key in &keys {
-            let rank = mphf.lookup(key).expect("lookup key");
+            let rank = mphf.lookup(&key.to_be_bytes()).expect("lookup key");
             assert!(rank < keys.len() as u64);
             assert!(ranks.insert(rank), "duplicate rank {rank}");
         }

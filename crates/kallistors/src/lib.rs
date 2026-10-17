@@ -1,6 +1,7 @@
 //! Core library for kallistors.
 
 pub mod bias;
+mod dna;
 pub mod ec;
 pub mod error;
 pub mod index;

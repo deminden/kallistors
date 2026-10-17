@@ -133,11 +133,8 @@ fn filter_ec_for_hit(
             filtered.push(tr);
         }
     }
-    if filtered.is_empty() {
-        None
-    } else {
-        Some(filtered)
-    }
+    // An empty result rejects this strand; None means metadata was unavailable.
+    Some(filtered)
 }
 
 pub(super) fn find_positions_in_transcript(
