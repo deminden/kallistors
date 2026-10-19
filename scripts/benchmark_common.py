@@ -55,7 +55,7 @@ def executable(value):
     return Path(found).absolute()
 
 
-def fetch(url, path, md5=None, size=None):
+def fetch(url, path, md5=None, size=None, sha256=None, gzip_check=True):
     path = Path(path)
     url = url if '://' in url else 'https://' + url
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -68,9 +68,12 @@ def fetch(url, path, md5=None, size=None):
         raise ValueError(f'Download size mismatch: {path}')
     if md5 and digest(path, 'md5') != md5:
         raise ValueError(f'Download MD5 mismatch: {path}')
-    with gzip.open(path, 'rb') as handle:
-        while handle.read(4 * 1024 * 1024):
-            pass
+    if sha256 and digest(path) != sha256:
+        raise ValueError(f'Download SHA-256 mismatch: {path}')
+    if gzip_check:
+        with gzip.open(path, 'rb') as handle:
+            while handle.read(4 * 1024 * 1024):
+                pass
     return {**fingerprint(path), 'url': url, **({'md5': md5} if md5 else {})}
 
 
@@ -93,7 +96,7 @@ def datasets(path=DATASETS):
 
 
 def prepared_reads(row, data, subset=False):
-    root = Path(data) / row.get('data_directory', row['run_accession'].lower()) / 'trimmed-fasterp'
+    root = Path(data) / row.get('data_directory', row['run_accession'].lower()) / 'trimmed-fastp'
     names = [f'subset/mate{i}.fastq.gz' if subset else f'{row["run_accession"]}_{i}.trimmed.fastq.gz'
              for i in (1, 2)]
     return [root / name for name in names]

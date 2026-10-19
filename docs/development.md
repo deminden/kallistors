@@ -206,7 +206,8 @@ For a mismatch, create a seeded paired subset with `subsample_benchmark_pairs.py
 Use `benchmark_reads.py --stages` for complete paired/single runs, phase timing and peak RSS.
 It checks every counted EC before timing. `benchmark_index.py --threads 8 --keep-last-index`
 measures construction and retains the final indexes for cross-loading checks. Both tools use
-one warmup and three measured runs by default. Keep input, executable and output hashes;
+one warmup and three measured runs by default. For current construction measurements, select
+`--runs 2 --warmups 0` and report their arithmetic mean. Keep input, executable and output hashes;
 compare identical reads and references, retain CPU-activity flags and use a new result directory
 after changing an executable. Native HDF5 checks and abundance comparisons follow timing.
 See the benchmark guide for runnable commands, manifests, trimming and reporting.
@@ -223,6 +224,8 @@ See the benchmark guide for runnable commands, manifests, trimming and reporting
 | Fragment models, EM and bootstraps | `quant/mod.rs`, `quant/components.rs` |
 | Abundance TSV/HDF5 and run metadata | `quant/output/{tsv,hdf5,metadata}.rs` |
 | BUS input, records and technology definitions | `commands/bus/{input,output,technology}.rs` |
+| BUS packed input, ordered parallel counting and bounded reader shutdown | `commands/bus/fast.rs` |
+| Exact shared cDNA reuse and collision/replacement regression | `commands/bus/fast/query_cache.rs` |
 | BUS genome projection and BAM output | `commands/bus/{genome,pseudobam}.rs` |
 | BUS unit/integration tests | `commands/bus/tests.rs`, `tests/bus.rs` |
 
@@ -254,11 +257,28 @@ and memory with alternating controls. Use the same executable for all validation
   remain borrowed through mate counting; filtering or divergent intersections materialize owned
   vectors. Per-worker counts share collision-checked EC keys. Bounded queues and rendezvous
   dispatch retain all reads and release blocked producers on input failure.
+- **BUS counting:** simple single-cDNA layouts use the compact count-only scanner. A bounded
+  mapping/output queue preserves input and first-seen EC order. The shared sequence cache
+  uses two-way replacement and verifies both a hash and full bytes under a short shard lock;
+  mapping runs outside locks. Its answers belong
+  to one immutable index/options invocation, borrowed ECs retain index lifetimes, and owned
+  intersection storage is capped. Equal-length unequal ECs skip the impossible subset proof;
+  count-only scanning stops once the final EC fold has irreversibly rejected a read. Full
+  diagnostics and placement paths retain their existing behavior. Positive/negative collisions
+  and concurrent replacement are
+  covered by a focused native-index regression. Decoders honor the remaining input limit before
+  forming each batch; interleaved limits count complete record groups.
 - **EM:** graph storage is released first; bootstrap input is retained when needed. Independent
-  components run in parallel without changing each transcript's contribution order. Only bitwise
-  fixed components skip repeated work. Mandatory iterations, convergence and the final threshold
-  update remain intact; bias correction uses the general path. Work is partitioned by connected
-  component, so a large component can limit EM parallelism.
+  components run in parallel without changing each transcript's contribution order. Scheduling
+  adapts to the counted EC graph: a component larger than one worker's fair share and 262,144
+  edges shares its independent EC denominators and transcript updates across the same pool.
+  All component denominators finish before alpha updates; scalar additions stay ordered, and only
+  integer change counts and fixed-point flags are reduced. Smaller components keep local
+  iterations for cache reuse and lower synchronization cost. Single-thread and bias paths retain
+  their existing kernels. Only bitwise fixed components skip repeated work. Mandatory iterations,
+  convergence and the final threshold update remain intact; bias correction uses the general path. Work is partitioned by connected
+  component and within dominant components, so a large connected graph can use the requested
+  threads without splitting or approximating its ECs.
 - **Output:** bounded ordered TSV chunks preserve serial bytes. Threaded output overlaps TSV
   and HDF5. DEFLATE level 6 and chunks of at most 16,384 elements preserve dataset names,
   types and shapes; native HDF5 readback independently verifies interoperability.
@@ -279,9 +299,45 @@ full-width/scalar fallbacks. Important boundaries:
 4. Compact ranks, oriented starts, joins and locations retain complete-domain fallbacks. Counted
    disjoint fills and contiguous transcript/EC position storage bound temporary allocations.
    Identifier bytes share an arena until owned names can be restored exactly.
+   Location scratch selects an exact representation from graph bounds: the existing direct
+   32-bit layout covers at most 2^22 unitigs and 2^30−1 positions. When that layout no longer fits,
+   graphs with at most 2^31−1 positions use a global position plus strand bit in 32 bits. Ordered
+   starts and one unitig bucket per 64 positions recover the full coordinate. Remaining graphs
+   use the full-width layout. These are transient build layouts; graph membership, ordered claims,
+   decoded coordinates and serialized v13 data are preserved.
+   Above 2^28 keys, bounded collection avoids long-transcript worker buffers growing without
+   limit. When prefix and rank bounds permit, four-byte edge pairs encode exact 14-bit relative
+   ranks. Ten-base roots split only overfull ranges through a sparse prefix trie; the oriented
+   word and outgoing base recover strand and complete rank. Wider layouts remain available.
+   Directions, outgoing codes and degree/non-self sentinels remain exact. Smaller graphs keep
+   their existing formats. `--timings` reports logical edge-scratch bytes separately from RSS.
+
+   Large graphs with suffixes fitting 40 bits pack keys in place from eight to five bytes
+   **before topology**. Disjoint parallel waves preserve unread words, original allocation
+   alignment and all live bytes. Complete prefix, suffix and padding checks establish membership.
+   A temporary prefix-owned filter is budgeted at 12 bits/key, rounded to power-of-two blocks;
+   three hash-derived bit positions share one word, reducing false admissions with one random
+   read. It rejects definite misses, and every positive still undergoes exact key verification.
+   Compact boxed blocks retain one owner per prefix and use a zero sentinel for empty ranges.
+   Completed worker scratch is collected before filter allocation; the filter is retired before
+   path construction.
+
+   Reference walks use sparse full-word landmarks when their conservative temporary memory
+   bound beats the dense layout. Unitig endpoints and every transcript-start k-mer cover forward,
+   reverse and interior-start walks. Prefix-owned hash tables retain full key equality and full
+   coordinates; dense direct/global layouts remain for other graph shapes. This allows full
+   topology keys to be retired before transcript-run mapping.
+
+   Batched exact probes reuse two complete prefix bounds and use compact rank results.
+   Residual path preparation uses larger batches for large graphs while serial claims retain original seed order. Join queries retain complete
+   words and 40-bit source identifiers in 13 bytes. Word-reconstruction hints are retired before
+   join probes, whose membership checks no longer need them.
+
 5. Minimizer hashing shares exact REP arithmetic with mapping and retains every tie. Parallel
-   MPHF collision merging preserves survivor order. Small bitmap serialization is byte-checked
-   against CRoaring, with the general serializer as fallback; node output remains ordered.
+   MPHF collision merging preserves survivor order, generates initial IDs implicitly on large
+   builds, compacts later survivors in place, reserves exact survivor capacity and retires
+   consumed shards. Serialized graph bitmaps are released before MPHF construction. Small bitmap
+   serialization is byte-checked against CRoaring, with the general serializer as fallback; node output remains ordered.
 6. Completed scratch is released before later allocations overlap. Page retirement on macOS/Linux
    touches only wholly unused page-aligned ranges and preserves allocator ownership/live bytes.
    The requested worker pool handles construction and independent cleanup.

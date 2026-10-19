@@ -34,8 +34,8 @@ KALLISTO_DIAGNOSTIC_ECS=1 KALLISTO_DIAGNOSTIC_MAPPING_ONLY=1 \
   target/tools/kallisto-src/build/src/kallisto quant \
   -i data/srr-small/gencode.v50.kallisto.idx -t 8 \
   -o target/validation/upstream-ec \
-  data/srr13638690/trimmed-fasterp/SRR13638690_1.trimmed.fastq.gz \
-  data/srr13638690/trimmed-fasterp/SRR13638690_2.trimmed.fastq.gz
+  data/srr13638690/trimmed-fastp/SRR13638690_1.trimmed.fastq.gz \
+  data/srr13638690/trimmed-fastp/SRR13638690_2.trimmed.fastq.gz
 ```
 
 This writes `diagnostic.ec_counts.tsv` and exits before fragment-model fitting and EM.

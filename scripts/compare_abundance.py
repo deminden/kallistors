@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import heapq
 import json
 import math
-import statistics
 from pathlib import Path
 from typing import Dict, Iterable, Tuple
 
@@ -38,6 +38,43 @@ def rel_error(a: float, b: float) -> float:
     return abs(a - b) / denom
 
 
+def quantiles(values):
+    """Linear interpolation at (N-1)*p, matching NumPy's default percentile rule."""
+    ordered = sorted(values)
+    probabilities = {"median": .5, "p90": .9, "p99": .99,
+                     "p99_9": .999, "p99_99": .9999, "max": 1.0}
+    if not ordered:
+        return dict.fromkeys(probabilities)
+    result = {}
+    for name, probability in probabilities.items():
+        position = probability * (len(ordered) - 1)
+        lower, upper = math.floor(position), math.ceil(position)
+        weight = position - lower
+        result[name] = ordered[lower] * (1 - weight) + ordered[upper] * weight
+    return result
+
+
+def load_hdf5_abundance(path):
+    """Use saved f64 counts/effective lengths; derive TPM before TSV rounding."""
+    import h5py
+    import numpy as np
+    with h5py.File(path, "r") as handle:
+        names = handle["aux/ids"].asstr()[()]
+        counts = handle["est_counts"][()]
+        lengths = handle["aux/eff_lengths"][()]
+    if (counts.shape != names.shape or lengths.shape != names.shape or not len(names)
+            or len(set(names)) != len(names) or not all(names)
+            or not np.isfinite(counts).all() or not np.isfinite(lengths).all()
+            or (counts < 0).any() or (lengths < 0).any()
+            or ((lengths == 0) & (counts > 0)).any()):
+        raise ValueError(f"{path}: invalid abundance arrays or transcript IDs")
+    rates = np.divide(counts, lengths, out=np.zeros_like(counts), where=lengths > 0)
+    total = rates.sum()
+    tpm = rates * (1_000_000 / total) if total else rates
+    return {name: {"est_counts": float(count), "eff_length": float(length), "tpm": float(value)}
+            for name, count, length, value in zip(names, counts, lengths, tpm)}
+
+
 def audit_summary(
     kallisto: Dict[str, Dict[str, float]],
     kallistors: Dict[str, Dict[str, float]],
@@ -51,33 +88,27 @@ def audit_summary(
     def rounded(value):
         return float(format(value, f".{significant_digits}g"))
 
-    def quantiles(values):
-        ordered = sorted(values)
-        if not ordered:
-            return {"median": None, "p90": None, "p99": None, "max": None}
-        return {
-            "median": statistics.median(ordered),
-            "p90": ordered[int(0.9 * (len(ordered) - 1))],
-            "p99": ordered[int(0.99 * (len(ordered) - 1))],
-            "max": ordered[-1],
-        }
-
     result = {
         "shared_transcripts": len(shared),
         "missing_from_kallistors": sorted(kallisto.keys() - kallistors.keys()),
         "missing_from_kallisto": sorted(kallistors.keys() - kallisto.keys()),
         "comparison_significant_digits": significant_digits,
+        "percentile_method": "linear interpolation at (N-1)*p; zeros included",
         "metrics": {},
     }
+    expressed = [t for t in shared if kallisto[t]["est_counts"] > 0 or kallistors[t]["est_counts"] > 0]
     for metric in ("est_counts", "tpm", "eff_length"):
         errors = [abs(kallisto[t][metric] - kallistors[t][metric]) for t in shared]
-        worst = sorted(
+        worst = heapq.nlargest(
+            10,
             shared,
             key=lambda t: abs(kallisto[t][metric] - kallistors[t][metric]),
-            reverse=True,
-        )[:10]
+        )
         result["metrics"][metric] = {
             "absolute_errors": quantiles(errors),
+            "expressed_in_either_transcripts": len(expressed),
+            "expressed_in_either_absolute_errors": quantiles(
+                abs(kallisto[t][metric] - kallistors[t][metric]) for t in expressed),
             "sum_absolute_error": sum(errors),
             "unequal_after_rounding": sum(
                 rounded(kallisto[t][metric]) != rounded(kallistors[t][metric])
@@ -135,6 +166,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--kallisto", required=True, help="Path to kallisto abundance.tsv")
     parser.add_argument("--kallistors", required=True, help="Path to kallistors abundance.tsv")
+    parser.add_argument("--hdf5", action="store_true", help="Compare native HDF5 f64 values instead of TSV")
     parser.add_argument("--top", type=int, default=50, help="Rows per ranking (default: 50)")
     parser.add_argument(
         "--summary-json",
@@ -160,8 +192,9 @@ def main() -> None:
     k_path = Path(args.kallisto)
     o_path = Path(args.kallistors)
     try:
-        kallisto = load_abundance(k_path)
-        kallistors = load_abundance(o_path)
+        loader = load_hdf5_abundance if args.hdf5 else load_abundance
+        kallisto = loader(k_path)
+        kallistors = loader(o_path)
         if kallisto.keys() != kallistors.keys():
             raise ValueError("Transcript sets differ; the outputs do not share the same reference")
     except (OSError, ValueError, KeyError) as error:
@@ -169,6 +202,7 @@ def main() -> None:
 
     if args.summary_json:
         summary = audit_summary(kallisto, kallistors, args.significant_digits)
+        summary["source_precision"] = "native HDF5 f64; TPM derived from counts/effective lengths" if args.hdf5 else "TSV text"
         args.summary_json.parent.mkdir(parents=True, exist_ok=True)
         args.summary_json.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
         print(f"Wrote audit summary: {args.summary_json}")

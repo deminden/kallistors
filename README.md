@@ -19,26 +19,35 @@ runs per tool/library, versus original kallisto v0.52.0 (fasterp-trimmed reads):
 
 | Library | Pairs | Current / original time | Speedup | Current / original peak RSS |
 | --- | ---: | ---: | ---: | ---: |
-| SRR13638690 · muscle | 4,410,990 | 8.07 / 45.16 s | 5.60× | 1.22 / 2.85 GiB |
-| SRR1039508 · airway | 22,297,617 | 53.29 / 178.94 s | 3.36× | 1.34 / 3.13 GiB |
-| SRR307903 · fibroblast | 32,878,740 | 71.65 / 212.45 s | 2.97× | 1.33 / 3.09 GiB |
-| SRR10919051 · TT-seq | 10,261,737 | 47.92 / 98.34 s | 2.05× | 9.17 / 14.97 GiB |
+| SRR13638690 · muscle | 4,410,990 | 8.12 / 45.16 s | 5.56× | 1.23 / 2.85 GiB |
+| SRR1039508 · airway | 22,297,617 | 27.18 / 178.94 s | 6.58× | 1.34 / 3.13 GiB |
+| SRR307903 · fibroblast | 32,878,740 | 44.25 / 212.45 s | 4.80× | 1.32 / 3.09 GiB |
+| SRR10919051 · TT-seq | 10,261,737 | 44.31 / 98.34 s | 2.22× | 9.17 / 14.97 GiB |
 
 The first three libraries use GENCODE v50 ALL; TT-seq uses the official Pachter Lab
 mature-plus-nascent reference. Complete counted EC maps match original exactly for every case.
 Totals include loading, every pair, fragment estimation, EM and default TSV/HDF5 output.
 
-On the small library, current also takes **38.80 vs 93.97 s** at one thread
-(**2.42× faster**). An eight-thread build of full GENCODE v50 ALL takes
-**11.12 vs 123.81 s** (**11.14× faster**), with
-**5.76 vs 7.84 GiB** peak RSS. Original loads the current index with exact EC parity.
+On the small library, current also takes **38.86 vs 93.97 s** at one thread
+(**2.42× faster**). At eight threads, full GENCODE v50 ALL builds in **11.45 s**
+with **5.32 GiB** peak RSS. The official Pachter Lab mature-plus-nascent reference
+builds in **96.40 s**, with **18.40 GiB** peak RSS.
+Current construction numbers average two complete builds, with no warmup.
+
+The retained original controls take **123.81 s** for GENCODE and **903.51 s** for
+mature-plus-nascent: contextual speed ratios of **10.81×** and **9.37×**.
+The latter uses one original observation from an earlier session and is preliminary.
+All current index bytes match the fully cross-loaded indexes and preserve exact EC counts.
+See [construction measurements](docs/benchmarks.md#eight-thread-index-build-measurement)
+for individual times, memory, phases and comparison limits.
 
 Packed index storage, direct Rust `zlib-rs` decoding, cached exact matching, bounded input
-queues, parallel EM and buffered output improve quantification. Construction uses byte-proven
+queues, adaptive parallel EM and buffered output improve quantification. Construction uses byte-proven
 repeat exclusions, compact graph scratch, batched exact lookups and one requested worker pool.
 See [implementation details](docs/development.md#quantification).
 
 These are source-build measurements (`target-cpu=native`); release CI uses a generic CPU target.
+The evidence identifies the quantification build and latest adaptive index builder separately.
 Performance depends on the dataset, reference, build and hardware. The
 [benchmark guide](docs/benchmarks.md#eight-thread-quantification-measurement) reports memory,
 phase timings, the published v0.5.0 comparison, sampling/output caveats, individual observations
@@ -252,9 +261,16 @@ Notes:
   [docs/development.md](docs/development.md).
 - Instrumented upstream kallisto build notes are in
   [docs/kallisto_debug_build.md](docs/kallisto_debug_build.md).
-- Reproducible downloads, MD5/gzip checks, fasterp trimming, and repeated comparisons are documented
-  in [the benchmark guide](docs/benchmarks.md), including the pinned fasterp build.
+- Reproducible downloads, MD5/gzip checks, fastp trimming, and repeated comparisons are documented
+  in [the benchmark guide](docs/benchmarks.md), including the pinned fastp version.
   Quantification benchmarks require complete EC parity before timing and export JSON/TSV reports.
+- The [single-cell workflow](docs/benchmarks.md#single-cell-complete-10x-pbmc-1k-v3) preserves
+  barcode/UMI reads during fastp transcript trimming and checks exact BUS counts and corrected
+  gene/UMI matrices against original kallisto.
+  Ordinary single-cDNA layouts use packed batches, concurrent input decoding, the compact
+  counting index and ordered parallel mapping. Mapping overlaps ordered BUS writing, and a
+  bounded cache reuses exact cDNA answers across cells and lanes. Extended tagged, paired, BAM and diagnostic
+  modes retain their dedicated processing paths.
 
 ### As a Crate
 

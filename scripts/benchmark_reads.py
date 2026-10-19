@@ -275,7 +275,7 @@ def main():
             write_json(runs_path, rows)
             if not row['counters_match']:
                 raise RuntimeError(f'Quant counters disagree with the control or complete EC preflight: {key}')
-            if phase != 'measured' or replicate != args.runs:
+            if phase != 'measured':
                 shutil.rmtree(output)
             print(f'{config["id"]} {phase} {replicate} {tool}: {row["wall_seconds"]:.3f}s', flush=True)
             if args.pause_file and args.pause_file.exists():
@@ -295,18 +295,37 @@ def main():
         audits = {}
         for config in configs:
             folder = args.out / 'cases' / config['id']
-            validation = {}
+            replicates = []
+            for replicate in range(1, args.runs + 1):
+                validation, comparisons = {}, {}
+                for tool in tools:
+                    output = folder / f'measured-{replicate}-{tool}.output'
+                    destination = folder / f'{tool}-{replicate}.hdf5.json'
+                    subprocess.run([str(args.hdf_python), str(scripts / 'check_hdf5_output.py'), str(output),
+                                    '--json', str(destination), '--significant-digits', '6' if tool == 'kallisto' else '17'], check=True)
+                    validation[tool] = json.loads(destination.read_text())
+                for native in (False, True):
+                    kind, filename = ('native', 'abundance.h5') if native else ('tsv', 'abundance.tsv')
+                    destination = folder / f'abundance-{kind}-{replicate}.json'
+                    command = [str(args.hdf_python), str(scripts / 'compare_abundance.py'), '--kallisto',
+                               str(folder / f'measured-{replicate}-kallisto.output' / filename), '--kallistors',
+                               str(folder / f'measured-{replicate}-kallistors.output' / filename),
+                               '--summary-json', str(destination)]
+                    subprocess.run(command + (['--hdf5'] if native else []), check=True)
+                    comparisons[kind] = json.loads(destination.read_text())
+                replicates.append({'replicate': replicate, 'hdf5': validation, **comparisons})
+            within = {}
             for tool in tools:
-                output = folder / f'measured-{args.runs}-{tool}.output'
-                destination = folder / f'{tool}.hdf5.json'
-                subprocess.run([str(args.hdf_python), str(scripts / 'check_hdf5_output.py'), str(output),
-                                '--json', str(destination), '--significant-digits', '6' if tool == 'kallisto' else '17'], check=True)
-                validation[tool] = json.loads(destination.read_text())
-            subprocess.run([sys.executable, str(scripts / 'compare_abundance.py'), '--kallisto',
-                            str(folder / f'measured-{args.runs}-kallisto.output/abundance.tsv'), '--kallistors',
-                            str(folder / f'measured-{args.runs}-kallistors.output/abundance.tsv'),
-                            '--summary-json', str(folder / 'abundance.json')], check=True)
-            audits[config['id']] = {'hdf5': validation, 'abundance': json.loads((folder / 'abundance.json').read_text())}
+                within[tool] = []
+                for replicate in range(2, args.runs + 1):
+                    destination = folder / f'{tool}-replicate-1-vs-{replicate}.json'
+                    subprocess.run([str(args.hdf_python), str(scripts / 'compare_abundance.py'), '--hdf5',
+                                    '--kallisto', str(folder / f'measured-1-{tool}.output/abundance.h5'),
+                                    '--kallistors', str(folder / f'measured-{replicate}-{tool}.output/abundance.h5'),
+                                    '--summary-json', str(destination)], check=True)
+                    within[tool].append({'replicate': replicate, 'comparison': json.loads(destination.read_text())})
+            audits[config['id']] = {'hdf5': replicates[-1]['hdf5'], 'abundance': replicates[-1]['tsv'],
+                                    'replicates': replicates, 'within_tool_replicate_variation': within}
         summary = {'schema_version': 1, 'kind': 'quantification', 'complete': True, 'cases': []}
         for config in configs:
             summary['cases'].append({'id': config['id'], **summarize([r for r in rows if r['case'] == config['id']]),
