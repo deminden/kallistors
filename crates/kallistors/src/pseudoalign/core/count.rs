@@ -21,6 +21,7 @@ impl FinalHitFold {
         }
     }
 
+    #[inline(always)]
     pub(super) fn push(&mut self, index: &BifrostIndex, hit: Hit) {
         if self.rejected {
             return;

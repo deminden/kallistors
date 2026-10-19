@@ -1,6 +1,7 @@
 //! Stable layout of independent EM transcript/EC components.
 
 use super::{EmMultiEc, EmWork};
+use rayon::prelude::*;
 
 struct Components {
     parents: Vec<usize>,
@@ -40,6 +41,7 @@ impl Components {
 
 pub(super) struct EmComponent {
     fixed: bool,
+    parallel: bool,
     // Each stable recursion interval stores its bit on its first component.
     // Ancestors share that component but use a different depth bit.
     fixed_subtrees: u64,
@@ -91,6 +93,7 @@ impl EmWork {
             }
             components.push(EmComponent {
                 fixed: false,
+                parallel: false,
                 fixed_subtrees: 0,
                 transcripts: core::range::Range {
                     start: tr_start,
@@ -125,6 +128,24 @@ impl EmWork {
         self.multi_transcripts = transcripts;
         self.multi_weights = weights;
         components
+    }
+}
+
+/// Small components retain local iterations; a component larger than a worker's
+/// fair share exposes its independent EC rows and transcript sums to the pool.
+/// The absolute floor avoids barriers for tiny graphs, regardless of thread count.
+pub(super) fn configure_parallel(groups: &mut [EmComponent], work: &EmWork, threads: usize) {
+    let threshold = work
+        .multi_transcripts
+        .len()
+        .div_ceil(threads.max(1))
+        .max(262_144);
+    for group in groups {
+        let ecs = &work.multi_ecs[group.ecs];
+        let edges = ecs.first().zip(ecs.last()).map_or(0, |(first, last)| {
+            last.transcript_range.end - first.transcript_range.start
+        });
+        group.parallel = threads > 1 && edges > threshold;
     }
 }
 
@@ -234,6 +255,13 @@ fn step_range<I: super::IncomingEcId + Sync, const TRACK: bool>(
         let alpha = &mut alpha[group.transcripts.start - tr_base..group.transcripts.end - tr_base];
         let values = &mut values[group.ecs.start - ec_base..group.ecs.end - ec_base];
         let present = &mut present[group.ecs.start - ec_base..group.ecs.end - ec_base];
+        if group.parallel {
+            changes += step_parallel::<I, TRACK>(
+                group, work, incoming, ids, alpha, values, present, rounds,
+            );
+            all_fixed &= group.fixed;
+            continue;
+        }
         for _ in 0..rounds {
             let mut unchanged = true;
             for (ec, (scale, present)) in work.multi_ecs[group.ecs]
@@ -302,6 +330,92 @@ fn step_range<I: super::IncomingEcId + Sync, const TRACK: bool>(
     changes
 }
 
+#[allow(clippy::too_many_arguments)]
+fn step_parallel<I: super::IncomingEcId + Sync, const TRACK: bool>(
+    group: &mut EmComponent,
+    work: &EmWork,
+    incoming: &super::EmIncoming,
+    ids: &[I],
+    alpha: &mut [f64],
+    values: &mut [f64],
+    present: &mut [u8],
+    rounds: usize,
+) -> usize {
+    let tr_base = group.transcripts.start;
+    let ec_base = group.ecs.start;
+    let mut changes = 0;
+    for _ in 0..rounds {
+        // Complete every denominator before any alpha update. Each scalar sum
+        // retains the serial edge order; only independent results run together.
+        values
+            .par_iter_mut()
+            .zip(present.par_iter_mut())
+            .zip(&work.multi_ecs[group.ecs])
+            .for_each(|((scale, present), ec)| {
+                let mut denominator = 0.0;
+                for (&tr, &weight) in ids[ec.transcript_range]
+                    .iter()
+                    .zip(&work.multi_weights[ec.transcript_range])
+                {
+                    denominator += alpha[tr.as_usize() - tr_base] * weight;
+                }
+                if denominator < super::TOLERANCE {
+                    *present = 0;
+                    *scale = 0.0;
+                } else {
+                    *present = 1;
+                    *scale = ec.count / denominator;
+                }
+            });
+        let (changed, unchanged) = alpha
+            .par_iter_mut()
+            .enumerate()
+            .map(|(local, value)| {
+                let tr = tr_base + local;
+                let old = *value;
+                let range = incoming.offsets[tr]..incoming.offsets[tr + 1];
+                let weights = &incoming.weights[range.clone()];
+                let next = match &incoming.ec_indices {
+                    super::IncomingEcIds::Compact(ids) => sum_incoming(
+                        &ids[range],
+                        weights,
+                        values,
+                        present,
+                        ec_base,
+                        work.singleton_alpha[tr],
+                        old,
+                    ),
+                    super::IncomingEcIds::Wide(ids) => sum_incoming(
+                        &ids[range],
+                        weights,
+                        values,
+                        present,
+                        ec_base,
+                        work.singleton_alpha[tr],
+                        old,
+                    ),
+                };
+                *value = next;
+                let changed = usize::from(
+                    TRACK
+                        && next > super::ALPHA_CHANGE_LIMIT
+                        && (next - old).abs() / next > super::ALPHA_CHANGE,
+                );
+                (changed, next.to_bits() == old.to_bits())
+            })
+            .reduce(
+                || (0, true),
+                |(a, fixed_a), (b, fixed_b)| (a + b, fixed_a && fixed_b),
+            );
+        changes += changed;
+        if unchanged {
+            group.fixed = true;
+            break;
+        }
+    }
+    changes
+}
+
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn sum_incoming<I: super::IncomingEcId>(
@@ -338,84 +452,93 @@ mod tests {
 
     #[test]
     fn exact_fixed_components_resume_after_alpha_reset() {
-        let n = 70;
-        let classes: Vec<_> = (0..n)
-            .map(|i| vec![(i * 2) as u32, (i * 2 + 1) as u32])
-            .collect();
-        let lengths: Vec<_> = (0..n).flat_map(|_| [1.0, 2.0]).collect();
-        let mut work = super::super::prepare_em_work(&classes, &vec![1; n], &lengths);
-        let mut groups = work.group_components();
-        work.compact_transcript_ids();
-        let incoming = super::super::EmIncoming::new(&work, false);
-        let mut scales = super::super::EcScales::new(n);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(2)
-            .build()
-            .unwrap();
-        // Finish one complete branch while the other keeps changing. The
-        // cached branch must skip work without suppressing live neighbors.
-        let mut mixed: Vec<f64> = (0..n)
-            .flat_map(|i| if i < n / 2 { [1.0, 0.0] } else { [0.5, 0.5] })
-            .collect();
-        for _ in 0..3 {
-            let mut expected = mixed.clone();
-            for pair in expected.as_chunks_mut::<2>().0 {
-                let denominator = 0.0 + pair[0] * 1.0 + pair[1] * 0.5;
-                let scale = 1.0 / denominator;
-                let first = 0.0 + 1.0 * pair[0] * scale;
-                let second = 0.0 + 0.5 * pair[1] * scale;
-                pair.copy_from_slice(&[first, second]);
+        for (parallel, wide) in [(false, false), (true, false), (true, true)] {
+            let n = 70;
+            let classes: Vec<_> = (0..n)
+                .map(|i| vec![(i * 2) as u32, (i * 2 + 1) as u32])
+                .collect();
+            let lengths: Vec<_> = (0..n).flat_map(|_| [1.0, 2.0]).collect();
+            let mut work = super::super::prepare_em_work(&classes, &vec![1; n], &lengths);
+            let mut groups = work.group_components();
+            work.compact_transcript_ids();
+            for group in &mut groups {
+                group.parallel = parallel;
             }
+            let mut incoming = super::super::EmIncoming::new(&work, false);
+            if wide && let super::super::IncomingEcIds::Compact(ids) = &incoming.ec_indices {
+                incoming.ec_indices =
+                    super::super::IncomingEcIds::Wide(ids.iter().map(|&id| id as usize).collect());
+            }
+            let mut scales = super::super::EcScales::new(n);
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(2)
+                .build()
+                .unwrap();
+            // Finish one complete branch while the other keeps changing. The
+            // cached branch must skip work without suppressing live neighbors.
+            let mut mixed: Vec<f64> = (0..n)
+                .flat_map(|i| if i < n / 2 { [1.0, 0.0] } else { [0.5, 0.5] })
+                .collect();
+            for _ in 0..3 {
+                let mut expected = mixed.clone();
+                for pair in expected.as_chunks_mut::<2>().0 {
+                    let denominator = 0.0 + pair[0] * 1.0 + pair[1] * 0.5;
+                    let scale = 1.0 / denominator;
+                    let first = 0.0 + 1.0 * pair[0] * scale;
+                    let second = 0.0 + 0.5 * pair[1] * scale;
+                    pair.copy_from_slice(&[first, second]);
+                }
+                step::<_, true>(
+                    &pool,
+                    &mut groups,
+                    &work,
+                    &incoming,
+                    &work.multi_transcripts,
+                    &mut mixed,
+                    &mut scales,
+                    1,
+                );
+                assert_eq!(
+                    mixed.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                );
+                assert_ne!(groups[0].fixed_subtrees, 0);
+                assert_eq!(groups[0].fixed_subtrees & 1, 0);
+            }
+            reset_fixed(&mut groups);
+            let mut alpha: Vec<_> = (0..n).flat_map(|_| [1.0, 0.0]).collect();
             step::<_, true>(
                 &pool,
                 &mut groups,
                 &work,
                 &incoming,
                 &work.multi_transcripts,
-                &mut mixed,
+                &mut alpha,
+                &mut scales,
+                1,
+            );
+            assert!(groups.iter().all(|g| g.fixed));
+            assert_ne!(groups[0].fixed_subtrees & 1, 0);
+            alpha.fill(0.5);
+            reset_fixed(&mut groups);
+            assert!(groups.iter().all(|g| !g.fixed && g.fixed_subtrees == 0));
+            step::<_, true>(
+                &pool,
+                &mut groups,
+                &work,
+                &incoming,
+                &work.multi_transcripts,
+                &mut alpha,
                 &mut scales,
                 1,
             );
             assert_eq!(
-                mixed.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                alpha,
+                (0..n)
+                    .flat_map(|_| [2.0 / 3.0, 1.0 / 3.0])
+                    .collect::<Vec<_>>()
             );
-            assert_ne!(groups[0].fixed_subtrees, 0);
-            assert_eq!(groups[0].fixed_subtrees & 1, 0);
         }
-        reset_fixed(&mut groups);
-        let mut alpha: Vec<_> = (0..n).flat_map(|_| [1.0, 0.0]).collect();
-        step::<_, true>(
-            &pool,
-            &mut groups,
-            &work,
-            &incoming,
-            &work.multi_transcripts,
-            &mut alpha,
-            &mut scales,
-            1,
-        );
-        assert!(groups.iter().all(|g| g.fixed));
-        assert_ne!(groups[0].fixed_subtrees & 1, 0);
-        alpha.fill(0.5);
-        reset_fixed(&mut groups);
-        assert!(groups.iter().all(|g| !g.fixed && g.fixed_subtrees == 0));
-        step::<_, true>(
-            &pool,
-            &mut groups,
-            &work,
-            &incoming,
-            &work.multi_transcripts,
-            &mut alpha,
-            &mut scales,
-            1,
-        );
-        assert_eq!(
-            alpha,
-            (0..n)
-                .flat_map(|_| [2.0 / 3.0, 1.0 / 3.0])
-                .collect::<Vec<_>>()
-        );
     }
 
     #[test]

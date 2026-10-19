@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 
 use crate::index::bifrost::deserialize_roaring_to_vec;
 use crate::{Error, Result};
@@ -47,6 +47,35 @@ impl TranscriptNames {
             eager: Vec::new(),
             deferred: Some((file, start, count)),
         }
+    }
+    /// Stream selected transcript names without retaining a second name table.
+    pub fn write_lines(self, writer: &mut impl Write, onlist: Option<&[bool]>) -> Result<usize> {
+        let selected = |id: usize| onlist.is_none_or(|mask| mask.get(id).copied().unwrap_or(false));
+        let mut written = 0;
+        if let Some((file, start, count)) = self.deferred {
+            let mut reader = BufReader::with_capacity(1 << 20, file);
+            reader.seek(SeekFrom::Start(start))?;
+            let mut bytes = Vec::new();
+            for id in 0..count {
+                let len = read_u64_le(&mut reader)? as usize;
+                bytes.resize(len, 0);
+                reader.read_exact(&mut bytes)?;
+                if selected(id) {
+                    writer.write_all(String::from_utf8_lossy(&bytes).as_bytes())?;
+                    writer.write_all(b"\n")?;
+                    written += 1;
+                }
+            }
+        } else {
+            for (id, name) in self.eager.iter().enumerate() {
+                if selected(id) {
+                    writer.write_all(name.as_bytes())?;
+                    writer.write_all(b"\n")?;
+                    written += 1;
+                }
+            }
+        }
+        Ok(written)
     }
     pub fn load(self) -> Result<Vec<String>> {
         let Some((file, start, count)) = self.deferred else {
@@ -233,6 +262,35 @@ mod tests {
             }
             bytes.extend_from_slice(&0u64.to_le_bytes());
             let eager = read_onlist_with_lengths(&mut Cursor::new(&bytes)).unwrap();
+            let temp = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(temp.path(), &bytes).unwrap();
+            for mask in [None, Some(vec![]), Some(vec![true, false, true])] {
+                let expected: Vec<_> = eager
+                    .names
+                    .iter()
+                    .enumerate()
+                    .filter(|(id, _)| {
+                        mask.as_ref()
+                            .is_none_or(|mask| mask.get(*id).copied().unwrap_or(false))
+                    })
+                    .map(|(_, name)| name)
+                    .collect();
+                let text: String = expected.iter().map(|name| format!("{name}\n")).collect();
+                for source in [
+                    TranscriptNames::eager(eager.names.clone()),
+                    TranscriptNames::deferred(
+                        File::open(temp.path()).unwrap(),
+                        4 + 4 * names.len() as u64,
+                        names.len(),
+                    ),
+                ] {
+                    let mut actual = Vec::new();
+                    let count = source.write_lines(&mut actual, mask.as_deref()).unwrap();
+                    assert_eq!(actual, text.as_bytes());
+                    assert_eq!(count, expected.len());
+                }
+            }
+
             for capacity in [7, 1024] {
                 let mut reader = BufReader::with_capacity(capacity, Cursor::new(&bytes));
                 let (scanned, deferred) = read_onlist_scanned(&mut reader).unwrap();

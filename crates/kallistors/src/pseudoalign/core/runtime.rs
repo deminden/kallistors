@@ -33,6 +33,7 @@ pub(crate) struct MphfLookupCache {
     primary_cursor: super::super::minimizers::PrimaryMinimizerCursor,
     query_fingerprints: super::super::fingerprints::QueryFingerprintCache,
     pub(super) scan_scratch: super::fast::FastScannerScratch,
+    pub(super) slow_rev_buf: Vec<u8>,
 }
 
 impl Default for MphfLookupCache {
@@ -44,6 +45,7 @@ impl Default for MphfLookupCache {
             primary_cursor: Default::default(),
             query_fingerprints: super::super::fingerprints::QueryFingerprintCache::default(),
             scan_scratch: super::fast::FastScannerScratch::default(),
+            slow_rev_buf: Vec::new(),
         }
     }
 }

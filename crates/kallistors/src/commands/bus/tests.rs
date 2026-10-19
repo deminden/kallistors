@@ -2,8 +2,8 @@
 
 use super::{
     BusArgs, bus_pseudoalign_options, bus_query_quality, concat_sequence_slices, concat_slices,
-    mark_technology_paired, onlist_target_count, read_groups, string_to_binary, technology_spec,
-    total_len, write_batch_long_flens, write_matrix_ec, write_transcripts,
+    mark_technology_paired, read_groups, string_to_binary, technology_spec, total_len,
+    write_batch_long_flens, write_matrix_ec,
 };
 use kallistors::io::FastqRecord;
 use kallistors::pseudoalign::StrandSpecific;
@@ -309,25 +309,6 @@ fn matrix_ec_uses_comma_separated_transcript_lists() {
     write_matrix_ec(&path, &[vec![0, 2], vec![1]]).expect("write matrix.ec");
 
     assert_eq!(std::fs::read_to_string(path).unwrap(), "0\t0,2\n1\t1\n");
-}
-
-#[test]
-fn transcripts_sidecar_uses_only_onlist_targets() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("transcripts.txt");
-    let names = vec![
-        "tx0".to_string(),
-        "tx1".to_string(),
-        "d_list.0".to_string(),
-        "tx2".to_string(),
-    ];
-    let onlist = vec![true, true, false, true];
-
-    write_transcripts(&path, &names, Some(&onlist)).expect("write transcripts");
-
-    assert_eq!(std::fs::read_to_string(path).unwrap(), "tx0\ntx1\ntx2\n");
-    assert_eq!(onlist_target_count(&names, Some(&onlist)), 3);
-    assert_eq!(onlist_target_count(&names, None), 4);
 }
 
 #[test]

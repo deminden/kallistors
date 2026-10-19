@@ -184,9 +184,7 @@ fn match_kmer_at_pos_fast_uncached_precomputed(
                 });
             }
             let uid = unitig_id as usize;
-            if uid >= index.unitig_count() {
-                continue;
-            }
+            // The encoded matcher validates the node through its metadata lookup.
             if let Some((start, used_revcomp, matched_relaxed, forward_strand)) =
                 match_unitig_candidate_encoded(
                     index,
@@ -271,9 +269,7 @@ fn match_kmer_at_pos_fast_uncached_precomputed(
                 });
             }
             let uid = unitig_id as usize;
-            if uid >= index.unitig_count() {
-                continue;
-            }
+            // The encoded matcher validates the node through its metadata lookup.
             if let Some((start, used_revcomp, matched_relaxed, forward_strand)) =
                 match_unitig_candidate_encoded(
                     index,
@@ -405,14 +401,13 @@ fn match_kmer_at_pos_fast_uncached_with_candidates(
         })
     };
     if needs_slow_path {
-        let mut rev_buf = Vec::new();
         return match_kmer_at_pos(
             index,
             kmer,
             allow_forward,
             allow_rev,
             diff,
-            &mut rev_buf,
+            &mut cache.slow_rev_buf,
             false,
             false,
             false,
@@ -475,14 +470,13 @@ fn match_kmer_at_pos_fast_uncached_with_candidates(
                 .iter()
                 .any(|&pos_id| (pos_id >> 32) as u32 == u32::MAX && (pos_id & 0x8000_0000) != 0)
         {
-            let mut rev_buf = Vec::new();
             return match_kmer_at_pos(
                 index,
                 kmer,
                 allow_forward,
                 allow_rev,
                 diff,
-                &mut rev_buf,
+                &mut cache.slow_rev_buf,
                 false,
                 false,
                 false,
@@ -600,16 +594,66 @@ impl<'index> OnlineIntersection<'index, '_> {
     fn initialize(&mut self, ec: &'index [u32]) {
         self.initial = Some(ec);
     }
-    fn intersect(&mut self, ec: &[u32]) {
+    #[inline(always)]
+    fn intersect(&mut self, ec: &'index [u32]) {
         if let Some(initial) = self.initial {
             if initial == ec {
                 return;
             }
-            self.owned.extend_from_slice(initial);
+            // Nonoverlapping transcript ranges prove rejection before a copy.
+            if initial.is_empty()
+                || ec.is_empty()
+                || initial[0] > ec[ec.len() - 1]
+                || ec[0] > initial[initial.len() - 1]
+            {
+                self.initial = Some(&initial[..0]);
+                return;
+            }
+            let (shorter, longer) = if initial.len() <= ec.len() {
+                (initial, ec)
+            } else {
+                (ec, initial)
+            };
+            // Many adjacent transcript annotations add/remove alternatives. A
+            // subset is already the exact intersection and can remain borrowed.
+            if shorter.len() != longer.len() && sorted_subset(shorter, longer) {
+                self.initial = Some(shorter);
+                return;
+            }
+            self.owned.extend_from_slice(shorter);
             self.initial = None;
+            intersect_sorted_in_place(self.owned, longer);
+        } else {
+            intersect_sorted_in_place(self.owned, ec);
         }
-        intersect_sorted_in_place(self.owned, ec);
     }
+}
+
+fn sorted_subset(shorter: &[u32], longer: &[u32]) -> bool {
+    if shorter.is_empty() {
+        return true;
+    }
+    if longer.is_empty()
+        || shorter[0] < longer[0]
+        || shorter[shorter.len() - 1] > longer[longer.len() - 1]
+    {
+        return false;
+    }
+    let mut cursor = 0;
+    for &value in shorter {
+        if longer.len() / shorter.len() >= 16 {
+            cursor += longer[cursor..].partition_point(|&candidate| candidate < value);
+        } else {
+            while cursor < longer.len() && longer[cursor] < value {
+                cursor += 1;
+            }
+        }
+        if longer.get(cursor) != Some(&value) {
+            return false;
+        }
+        cursor += 1;
+    }
+    true
 }
 
 #[derive(Default)]
@@ -665,6 +709,7 @@ pub(crate) fn ec_for_read_bifrost_fast(
     })
 }
 
+#[inline(always)]
 pub(super) fn ec_for_read_bifrost_fast_counting_borrowed<'index>(
     index: &'index BifrostIndex,
     seq: &[u8],
@@ -963,6 +1008,17 @@ fn ec_for_read_bifrost_fast_with_cache<'index, const TRACE: bool, const COUNT_ON
                     super::count::FinalHitFold::from_online(online_intersection, last_online_block);
                 counted.push(index, hit);
                 counted_diverged = true;
+            }
+            if counted.rejected {
+                return Some(BorrowedReadEc::owned(ReadEc {
+                    ec: Vec::new(),
+                    best_match,
+                    first_hit,
+                    hits,
+                    had_offlist: false,
+                    shade_union: Vec::new(),
+                    hard_reject_pair: true,
+                }));
             }
         } else {
             hits.push(hit);
@@ -1357,6 +1413,17 @@ fn ec_for_read_bifrost_fast_with_cache<'index, const TRACE: bool, const COUNT_ON
                             counted.push(index, hit);
                             counted_diverged = true;
                         }
+                        if counted.rejected {
+                            return Some(BorrowedReadEc::owned(ReadEc {
+                                ec: Vec::new(),
+                                best_match,
+                                first_hit,
+                                hits,
+                                had_offlist: false,
+                                shade_union: Vec::new(),
+                                hard_reject_pair: true,
+                            }));
+                        }
                     } else {
                         hits.push(hit);
                     }
@@ -1564,5 +1631,34 @@ mod borrowed_prefix_tests {
         assert_eq!(&*online, &[3]);
         online.intersect(&[]);
         assert!(online.is_empty());
+        let mut multisets: Vec<Vec<u32>> = (0..81)
+            .map(|mut code| {
+                let mut values = Vec::new();
+                for value in 0..4 {
+                    for _ in 0..code % 3 {
+                        values.push(value);
+                    }
+                    code /= 3;
+                }
+                values
+            })
+            .collect();
+        multisets.extend([(0..256).collect(), vec![15, 15], vec![255], vec![254, 256]]);
+        for left in &multisets {
+            for right in &multisets {
+                let mut expected = Vec::new();
+                super::super::super::ec::intersect_sorted(left, right, &mut expected);
+                let mut scratch = Vec::new();
+                let mut intersection = OnlineIntersection {
+                    initial: Some(left),
+                    owned: &mut scratch,
+                };
+                intersection.intersect(right);
+                assert_eq!(&*intersection, &expected);
+                if expected == *left || expected == *right {
+                    assert!(intersection.initial.is_some());
+                }
+            }
+        }
     }
 }

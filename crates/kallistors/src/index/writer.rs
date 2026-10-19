@@ -33,7 +33,7 @@ pub(super) struct IndexWriteReport {
 
 pub(super) fn write_index_with_report(
     path: &Path,
-    graph: &BuildGraph,
+    graph: &mut BuildGraph,
     threads: usize,
 ) -> Result<IndexWriteReport> {
     let total_start = Instant::now();
@@ -46,6 +46,14 @@ pub(super) fn write_index_with_report(
     write_u64(&mut writer, graph_section.len() as u64)?;
     writer.write_all(&graph_section)?;
     super::scratch_pages::retire(graph_section);
+    // These positions are now completely serialized. Node rows use sequence
+    // prefixes, not the minimizer bitmaps, so they need not overlap the MPHF.
+    for block in std::mem::take(&mut graph.unitig_bitmap_blocks) {
+        super::scratch_pages::retire(block);
+    }
+    for block in std::mem::take(&mut graph.km_bitmap_blocks) {
+        super::scratch_pages::retire(block);
+    }
 
     let mphf_start = Instant::now();
     let mut mphf = Vec::new();
@@ -228,34 +236,63 @@ fn write_boo_mphf_ids<Id: MphfIndex, Bucket: MphfBucket>(
     keys: &[u64],
     threads: usize,
 ) -> Result<()> {
+    write_boo_mphf_ids_first::<Id, Bucket>(out, keys, threads, keys.len() > (1 << 28))
+}
+
+fn write_boo_mphf_ids_first<Id: MphfIndex, Bucket: MphfBucket>(
+    out: &mut Vec<u8>,
+    keys: &[u64],
+    threads: usize,
+    implicit_first: bool,
+) -> Result<()> {
     let pool = if threads > 1 && keys.len() >= 1024 {
         Some(IndexWorkers::new(threads)?)
     } else {
         None
     };
     let domains = boo_level_domains(keys.len())?;
-    let mut survivors: Vec<Id> = (0..keys.len()).map(Id::from_index).collect();
+    // The first level visits every key in numeric order. Generate those IDs
+    // instead of allocating and scanning a graph-sized identity vector.
+    // Subsequent levels retain their exact stable survivor order.
+    let mut survivors: Vec<Id> = if implicit_first {
+        Vec::new()
+    } else {
+        (0..keys.len()).map(Id::from_index).collect()
+    };
     let mut bitvectors = Vec::with_capacity(BOO_LEVELS);
     let mut offset = 0u64;
 
     for (level, &domain) in domains.iter().enumerate() {
         let mut bitvector = BooBitVector::new(domain)?;
-        if level + 1 < BOO_LEVELS && !survivors.is_empty() {
-            if let Some(pool) = pool.as_ref().filter(|_| survivors.len() >= 1024) {
-                let chunk = survivors
-                    .len()
-                    .div_ceil(threads.min(survivors.len().div_ceil(256)).max(1));
+        let all_keys = implicit_first && level == 0;
+        let count = if all_keys {
+            keys.len()
+        } else {
+            survivors.len()
+        };
+        let id_at = |index: usize| {
+            if all_keys {
+                Id::from_index(index)
+            } else {
+                survivors[index]
+            }
+        };
+        if level + 1 < BOO_LEVELS && count != 0 {
+            if let Some(pool) = pool.as_ref().filter(|_| count >= 1024) {
+                let chunk = count.div_ceil(threads.min(count.div_ceil(256)).max(1));
                 let reduced = ReducedDomain::new(domain);
                 let shards = pool.install(|| {
-                    survivors
-                        .par_chunks(chunk)
-                        .map(|ids| {
+                    (0..count.div_ceil(chunk))
+                        .into_par_iter()
+                        .map(|batch| {
+                            let first = batch * chunk;
+                            let end = (first + chunk).min(count);
                             // Both fields are touched for each hashed bit. Keep
                             // them on the same cache line without atomic updates.
                             let mut marks = vec![MphfMarks::default(); bitvector.words.len()];
-                            let buckets = ids
-                                .iter()
-                                .map(|&key_idx| {
+                            let buckets = (first..end)
+                                .map(|index| {
+                                    let key_idx = id_at(index);
                                     let bucket = reduced.remainder(boo_level_hash(
                                         &keys[key_idx.index()].to_be_bytes(),
                                         level,
@@ -288,31 +325,101 @@ fn write_boo_mphf_ids<Id: MphfIndex, Bucket: MphfBucket>(
                             *dest = seen & !collisions;
                         })
                 });
-                let next = pool.install(|| {
-                    survivors
-                        .par_chunks(chunk)
-                        .zip(shards.par_iter())
-                        .map(|(ids, (_, buckets))| {
-                            ids.iter()
-                                .zip(buckets)
-                                .filter_map(|(&key_idx, &bucket)| {
-                                    let bucket = bucket.bucket();
-                                    (bitvector.words[(bucket >> 6) as usize] & (1 << (bucket & 63))
-                                        == 0)
-                                        .then_some(key_idx)
-                                })
-                                .collect::<Vec<_>>()
+                // The merged bitvector owns every collision decision. Marks
+                // are dead now; release them before allocating survivor shards.
+                let shards = pool.install(|| {
+                    shards
+                        .into_par_iter()
+                        .map(|(marks, buckets)| {
+                            super::scratch_pages::retire(marks);
+                            buckets
                         })
                         .collect::<Vec<_>>()
                 });
-                survivors = next.into_iter().flatten().collect();
+                if !implicit_first || all_keys {
+                    let next = pool.install(|| {
+                        (0..count.div_ceil(chunk))
+                            .into_par_iter()
+                            .zip(shards.par_iter())
+                            .map(|(batch, buckets)| {
+                                buckets
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(local, &bucket)| {
+                                        let key_idx = id_at(batch * chunk + local);
+                                        let bucket = bucket.bucket();
+                                        (bitvector.words[(bucket >> 6) as usize]
+                                            & (1 << (bucket & 63))
+                                            == 0)
+                                            .then_some(key_idx)
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    // Every next ID has been copied. Neither original IDs nor
+                    // per-key buckets need to overlap the final concatenation.
+                    pool.install(|| {
+                        shards
+                            .into_par_iter()
+                            .for_each(super::scratch_pages::retire)
+                    });
+                    super::scratch_pages::retire(std::mem::take(&mut survivors));
+                    let mut combined = Vec::with_capacity(next.iter().map(Vec::len).sum());
+                    for mut shard in next {
+                        let written = shard.len();
+                        combined.append(&mut shard);
+                        super::scratch_pages::discard_unused(&mut shard, written);
+                    }
+                    survivors = combined;
+                } else {
+                    // Each disjoint source chunk compacts forward, never
+                    // overwriting an unread ID. Join before concatenating the
+                    // live prefixes in original chunk order within this same
+                    // allocation; both moves preserve stable survivor order.
+                    let counts = pool.install(|| {
+                        survivors
+                            .par_chunks_mut(chunk)
+                            .zip(shards.par_iter())
+                            .map(|(ids, buckets)| {
+                                let mut written = 0;
+                                for (read, &bucket) in buckets.iter().enumerate() {
+                                    let bucket = bucket.bucket();
+                                    if bitvector.words[(bucket >> 6) as usize]
+                                        & (1 << (bucket & 63))
+                                        == 0
+                                    {
+                                        ids[written] = ids[read];
+                                        written += 1;
+                                    }
+                                }
+                                written
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    pool.install(|| {
+                        shards
+                            .into_par_iter()
+                            .for_each(super::scratch_pages::retire)
+                    });
+                    let old_len = survivors.len();
+                    let mut written = 0;
+                    for (batch, count) in counts.into_iter().enumerate() {
+                        let first = batch * chunk;
+                        survivors.copy_within(first..first + count, written);
+                        written += count;
+                    }
+                    survivors.truncate(written);
+                    super::scratch_pages::discard_unused(&mut survivors, old_len);
+                }
             } else {
                 let domain_usize = usize::try_from(domain)
                     .map_err(|_| Error::InvalidFormat("MPHF domain too large".into()))?;
                 let mut counts = vec![0u8; domain_usize];
-                let mut buckets = Vec::with_capacity(survivors.len());
+                let mut buckets = Vec::with_capacity(count);
                 let reduced_domain = ReducedDomain::new(domain);
-                for &key_idx in &survivors {
+                for index in 0..count {
+                    let key_idx = id_at(index);
                     let bucket = reduced_domain
                         .remainder(boo_level_hash(&keys[key_idx.index()].to_be_bytes(), level));
                     let count = &mut counts[bucket as usize];
@@ -321,7 +428,8 @@ fn write_boo_mphf_ids<Id: MphfIndex, Bucket: MphfBucket>(
                 }
 
                 let mut next_survivors = Vec::new();
-                for (&key_idx, bucket) in survivors.iter().zip(buckets) {
+                for (index, bucket) in buckets.into_iter().enumerate() {
+                    let key_idx = id_at(index);
                     let bucket = bucket.bucket();
                     if counts[bucket as usize] == 1 {
                         bitvector.set(bucket);
@@ -848,6 +956,9 @@ mod tests {
         write_boo_mphf(&mut parallel, &keys, 8).expect("parallel mphf");
         assert_eq!(parallel, buf);
         for threads in [1, 8] {
+            let mut implicit = Vec::new();
+            write_boo_mphf_ids_first::<u32, u32>(&mut implicit, &keys, threads, true).unwrap();
+            assert_eq!(implicit, buf);
             let mut wide = Vec::new();
             write_boo_mphf_ids::<usize, u64>(&mut wide, &keys, threads).expect("wide survivor IDs");
             assert_eq!(wide, buf);

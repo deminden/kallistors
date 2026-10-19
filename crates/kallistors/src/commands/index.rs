@@ -42,6 +42,7 @@ fn print_timings(report: &kallistors::index::IndexBuildReport) {
     eprintln!("unitigs\t{}", report.unitigs);
     eprintln!("kmers\t{}", report.kmers);
     eprintln!("minimizers\t{}", report.minimizers);
+    eprintln!("edge_scratch_bytes\t{}", report.edge_scratch_bytes);
     eprintln!("[timings]");
     eprintln!("fasta_parse\t{:.6}", report.fasta_parse.as_secs_f64());
     eprintln!("graph_build\t{:.6}", report.graph_build.as_secs_f64());

@@ -52,6 +52,8 @@ pub struct IndexBuildReport {
     pub unitigs: usize,
     pub kmers: usize,
     pub minimizers: usize,
+    /// Logical edge-table scratch size, excluding allocator overhead and RSS.
+    pub edge_scratch_bytes: usize,
 }
 
 #[derive(Clone)]
@@ -147,14 +149,14 @@ pub fn build_index_with_report(
         )?;
         let fasta_parse = fasta_start.elapsed();
 
-        let (graph, graph_report) = build_kmer_unitig_graph_with_report(
+        let (mut graph, graph_report) = build_kmer_unitig_graph_with_report(
             transcripts,
             k,
             g,
             options.ec_max_size,
             options.threads,
         )?;
-        let write_report = write_index_with_report(output, &graph, options.threads)?;
+        let write_report = write_index_with_report(output, &mut graph, options.threads)?;
         let unitigs = graph.unitigs.len() + graph.km_unitigs.len();
         let kmers = graph
             .unitigs
@@ -174,6 +176,7 @@ pub fn build_index_with_report(
             unitigs,
             kmers,
             minimizers,
+            edge_scratch_bytes: graph_report.edge_scratch_bytes,
         };
         if options.threads > 1 {
             // Materialization and payload workers own many of these allocations.

@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use noodles_sam::alignment::record::data::field::Value as SamDataValue;
 
+mod fast;
 mod genome;
 mod input;
 mod output;
@@ -23,7 +24,7 @@ use input::{
 use output::{
     BusRecord, RunInfo, fake_barcode, write_batch_long_flens, write_batch_paired_flens,
     write_bus_header, write_bus_record, write_cells, write_long_flens, write_matrix_ec,
-    write_novel_read, write_paired_flens, write_run_info, write_sample_barcodes, write_transcripts,
+    write_novel_read, write_paired_flens, write_run_info, write_sample_barcodes,
     write_unmapped_ratios,
 };
 
@@ -481,10 +482,30 @@ pub fn run(args: BusArgs) -> Result<()> {
     }
 
     let start = Instant::now();
-    let index = if args.kallisto_direct_kmer {
+    let mut index = if args.kallisto_direct_kmer {
         kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(index_path, false)
     } else if args.kallisto_fallback {
         kallistors::pseudoalign::build_bifrost_index_with_kmer(index_path)
+    } else if !args.fr_stranded && !args.rf_stranded && fast::supports(&args, &spec) {
+        super::build_quant_index(
+            index_path,
+            false,
+            args.threads.max(1),
+            bus_pseudoalign_options(&args, None),
+        )
+        .and_then(|index| {
+            if index.use_shade {
+                // Shade filtering needs the full annotation representation.
+                drop(index);
+                kallistors::pseudoalign::build_bifrost_index_with_positions_threaded(
+                    index_path,
+                    false,
+                    args.threads.max(1),
+                )
+            } else {
+                Ok(index)
+            }
+        })
     } else {
         kallistors::pseudoalign::build_bifrost_index_with_positions_threaded(
             index_path,
@@ -564,16 +585,35 @@ pub fn run(args: BusArgs) -> Result<()> {
     let mut bc_len_hist = [0u64; 33];
     let mut umi_len_hist = [0u64; 33];
     let mut unmapped_ratios = Vec::new();
-    let mut long_len_sums = vec![0u64; index.transcript_names.len()];
-    let mut long_len_counts = vec![0u64; index.transcript_names.len()];
+    let long_targets = if args.long {
+        index.transcript_names.len()
+    } else {
+        0
+    };
+    let mut long_len_sums = vec![0u64; long_targets];
+    let mut long_len_counts = vec![0u64; long_targets];
     let mut paired_flens = vec![0u32; kallistors::pseudoalign::MAX_FRAG_LEN as usize];
     let batch_count = read_groups
         .iter()
         .map(|group| group.batch_index)
         .max()
         .map_or(0, |idx| idx + 1);
-    let mut batch_long_len_sums = vec![vec![0u64; index.transcript_names.len()]; batch_count];
-    let mut batch_long_len_counts = vec![vec![0u64; index.transcript_names.len()]; batch_count];
+    let mut batch_long_len_sums = vec![
+        vec![0u64; long_targets];
+        if args.long && args.batch.is_some() {
+            batch_count
+        } else {
+            0
+        }
+    ];
+    let mut batch_long_len_counts = vec![
+        vec![0u64; long_targets];
+        if args.long && args.batch.is_some() {
+            batch_count
+        } else {
+            0
+        }
+    ];
     let mut batch_paired_flens =
         vec![vec![0u32; kallistors::pseudoalign::MAX_FRAG_LEN as usize]; batch_count];
     let mut frame_clashes = 0u64;
@@ -605,6 +645,23 @@ pub fn run(args: BusArgs) -> Result<()> {
         aligned = bam_records.1;
         unique = bam_records.2;
         frame_clashes = bam_records.3;
+    } else if processing.options.strand_specific.is_none() && fast::supports(&args, &spec) {
+        (records, aligned, unique) = fast::process(
+            &args,
+            &spec,
+            &index,
+            &read_groups,
+            processing,
+            &mut BusWriteState {
+                writer: &mut bus_writer,
+                ec_map: &mut ec_map,
+                ec_list: &mut ec_list,
+                bc_len_hist: &mut bc_len_hist,
+                umi_len_hist: &mut umi_len_hist,
+                long_len_sums: &mut long_len_sums,
+                long_len_counts: &mut long_len_counts,
+            },
+        )?;
     } else {
         'groups: for group in &read_groups {
             let mut readers = group
@@ -883,18 +940,18 @@ pub fn run(args: BusArgs) -> Result<()> {
             )?;
         }
     }
-    write_transcripts(
-        &out_dir.join("transcripts.txt"),
-        &index.transcript_names,
-        index.onlist.as_deref(),
-    )?;
+    let mut transcripts_writer = BufWriter::new(File::create(out_dir.join("transcripts.txt"))?);
+    let targets = index
+        .take_transcript_names()
+        .write_lines(&mut transcripts_writer, index.onlist.as_deref())?;
+    transcripts_writer.flush()?;
     write_run_info(
         &out_dir.join("run_info.json"),
         RunInfo {
             processed: records,
             aligned,
             unique,
-            targets: onlist_target_count(&index.transcript_names, index.onlist.as_deref()),
+            targets,
             k: index.k,
             frame_clashes: args.aa.then_some(frame_clashes),
         },
@@ -1475,13 +1532,21 @@ fn pseudoalign_bus_read(
             options,
         );
         Ok(BusAlignment {
-            ec: trace.merged_ec,
+            ec: trace.merged_ec.filter(|ec| !ec.is_empty()),
             fragment_length: trace.estimated_fragment_length,
             placement: trace.placement,
             mate_placements: vec![trace.left.placement, trace.right.placement],
             mate_has_ec: vec![
-                trace.left.ec_after_strand_filter.is_some(),
-                trace.right.ec_after_strand_filter.is_some(),
+                trace
+                    .left
+                    .ec_after_strand_filter
+                    .as_ref()
+                    .is_some_and(|ec| !ec.is_empty()),
+                trace
+                    .right
+                    .ec_after_strand_filter
+                    .as_ref()
+                    .is_some_and(|ec| !ec.is_empty()),
             ],
             frame_clashes: 0,
         })
@@ -1498,7 +1563,9 @@ fn pseudoalign_bus_read(
             options,
         );
         Ok(BusAlignment {
-            ec: trace.ec_after_strand_filter,
+            // Traces retain an empty EC to explain a rejected intersection.
+            // BUS records require at least one compatible transcript.
+            ec: trace.ec_after_strand_filter.filter(|ec| !ec.is_empty()),
             fragment_length: None,
             placement: trace.placement,
             mate_placements: Vec::new(),
@@ -1599,17 +1666,6 @@ fn bus_query_quality(
         Ok(quality)
     } else {
         concat_quality_slices(batch, spec, tag_present)
-    }
-}
-
-fn onlist_target_count(names: &[String], onlist: Option<&[bool]>) -> usize {
-    match onlist {
-        Some(onlist) => names
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| onlist.get(*idx).copied().unwrap_or(false))
-            .count(),
-        None => names.len(),
     }
 }
 

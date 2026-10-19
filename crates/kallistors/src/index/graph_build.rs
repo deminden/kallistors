@@ -1,3 +1,15 @@
+mod adaptive_prefixes;
+mod keys;
+mod negative_filter;
+mod relative_edges;
+mod sparse_locations;
+use keys::{MappingKeys, PrefixKeys};
+type RelativeEdges = relative_edges::RelativeEdges<8>;
+type PackedRelativeEdges = relative_edges::RelativeEdges<7>;
+type DenseRelativeEdges = relative_edges::RelativeEdges<6>;
+const ADAPTIVE_EDGE_WIDTH: usize = 4;
+type AdaptiveRelativeEdges = relative_edges::RelativeEdges<ADAPTIVE_EDGE_WIDTH>;
+
 use super::block_positions::BlockPositions;
 use super::packed_transcripts::PackedSequence;
 use super::transcript_runs::{TRInfo, TrInfoShard, TranscriptLocations};
@@ -7,7 +19,7 @@ use core::range::RangeInclusive;
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{BuildHasherDefault, Hasher};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -94,16 +106,34 @@ pub(super) struct GraphBuildReport {
     pub(super) graph_build: Duration,
     pub(super) minimizer_index: Duration,
     pub(super) ec_build: Duration,
+    pub(super) edge_scratch_bytes: usize,
 }
 
 #[derive(Clone)]
 struct UnitigPath {
-    seq: Vec<u8>,
+    seq: Box<[u8]>,
     ends: [u32; 2],
 }
 
 #[derive(Clone, Copy, Default)]
 struct KmerLoc(u64);
+
+trait ReferenceKmerLocations: Sync {
+    fn find(&self, word: u64) -> Option<KmerLoc>;
+}
+struct DenseReferenceLocations<'a, K: MappingKeys + ?Sized> {
+    keys: &'a K,
+    lookup: &'a KmerLookup,
+    locations: &'a KmerLocations,
+}
+impl<K: MappingKeys + ?Sized> ReferenceKmerLocations for DenseReferenceLocations<'_, K> {
+    #[inline]
+    fn find(&self, word: u64) -> Option<KmerLoc> {
+        self.keys
+            .find(self.lookup, word)
+            .map(|rank| self.locations.get(rank))
+    }
+}
 
 enum KmerLocations {
     Compact {
@@ -112,6 +142,11 @@ enum KmerLocations {
         buckets: Vec<u32>,
     },
     Wide(Vec<KmerLoc>),
+    GlobalCompact {
+        positions: Vec<u32>,
+        starts: Vec<u32>,
+        buckets: Vec<u32>,
+    },
 }
 
 impl KmerLocations {
@@ -129,6 +164,23 @@ impl KmerLocations {
                     return KmerLoc((u64::from(encoded >> 9) << 32) | u64::from(encoded & 511));
                 }
                 let position = (encoded & !(1 << 31)) >> 1;
+                let mut unitig = buckets[(position >> 6) as usize] as usize;
+                while starts[unitig + 1] <= position {
+                    unitig += 1;
+                }
+                KmerLoc(
+                    ((unitig as u64) << 32)
+                        | (u64::from(position - starts[unitig]) << 1)
+                        | u64::from(encoded & 1),
+                )
+            }
+            Self::GlobalCompact {
+                positions,
+                starts,
+                buckets,
+            } => {
+                let encoded = positions[index];
+                let position = encoded >> 1;
                 let mut unitig = buckets[(position >> 6) as usize] as usize;
                 while starts[unitig + 1] <= position {
                     unitig += 1;
@@ -284,8 +336,8 @@ enum JoinCandidates {
     Wide(Vec<[usize; 2]>),
 }
 
-struct GraphTopology<'a> {
-    entries: &'a [u64],
+struct GraphTopology<'a, K: MappingKeys + ?Sized = [u64]> {
+    entries: &'a K,
     lookup: &'a KmerLookup,
     edge_states: &'a EdgeStateCache,
     k: usize,
@@ -316,6 +368,7 @@ enum KmerDirectory {
 }
 
 struct RankDirectory {
+    delta_bits: usize,
     bases: Vec<u32>,
     deltas: Vec<u8>,
     wide: Vec<u32>,
@@ -325,17 +378,25 @@ impl RankDirectory {
     fn new(offsets: Vec<u32>, parallel: bool) -> Self {
         if offsets.last().copied().unwrap_or(0) >= (1 << 31) {
             return Self {
+                delta_bits: 12,
                 bases: Vec::new(),
                 deltas: Vec::new(),
                 wide: offsets,
             };
         }
+        if offsets.last().copied().unwrap_or(0) > 1 << 28 {
+            Self::packed::<16>(offsets, parallel)
+        } else {
+            Self::packed::<12>(offsets, parallel)
+        }
+    }
+    fn packed<const BITS: usize>(offsets: Vec<u32>, parallel: bool) -> Self {
         let mut bases = Vec::with_capacity(offsets.len().div_ceil(256));
-        let mut deltas = vec![0u8; offsets.len().div_ceil(2) * 3 + 1];
+        let mut deltas = vec![0u8; offsets.len().div_ceil(2) * (BITS / 4) + 1];
         let mut wide = Vec::new();
         for chunk in offsets.chunks(256) {
             let base = chunk[0];
-            if chunk[chunk.len() - 1] - base <= 4095 {
+            if chunk[chunk.len() - 1] - base < (1 << BITS) {
                 bases.push(base);
             } else {
                 bases.push((1 << 31) | wide.len() as u32);
@@ -344,23 +405,23 @@ impl RankDirectory {
         }
         let fill = |(dest, source): (&mut [u8], &[u32])| {
             let base = source[0];
-            if source[source.len() - 1] - base <= 4095 {
-                for (dest, pair) in dest.chunks_mut(3).zip(source.chunks(2)) {
+            if source[source.len() - 1] - base < (1 << BITS) {
+                for (dest, pair) in dest.chunks_mut(BITS / 4).zip(source.chunks(2)) {
                     let first = pair[0] - base;
                     let second = pair.get(1).map_or(0, |value| value - base);
-                    let packed = (first | (second << 12)).to_le_bytes();
-                    dest.copy_from_slice(&packed[..3]);
+                    let packed = (first | (second << BITS)).to_le_bytes();
+                    dest.copy_from_slice(&packed[..BITS / 4]);
                 }
             }
         };
         if parallel {
             deltas
-                .par_chunks_mut(384)
+                .par_chunks_mut(256 * BITS / 8)
                 .zip(offsets.par_chunks(256))
                 .for_each(fill);
         } else {
             deltas
-                .chunks_mut(384)
+                .chunks_mut(256 * BITS / 8)
                 .zip(offsets.chunks(256))
                 .for_each(fill);
         }
@@ -368,9 +429,22 @@ impl RankDirectory {
         // Retire its initialized pages before allocating the edge cache.
         super::scratch_pages::retire(offsets);
         Self {
+            delta_bits: BITS,
             bases,
             deltas,
             wide,
+        }
+    }
+    #[inline]
+    fn prefetch(&self, bucket: usize) {
+        if !self.deltas.is_empty() {
+            let first = if self.delta_bits == 16 {
+                bucket * 2
+            } else {
+                (bucket >> 1) * 3
+            };
+            prefetch_rank_delta(&self.deltas[first]);
+            prefetch_rank_delta(&self.bases[bucket >> 8]);
         }
     }
     #[inline]
@@ -382,13 +456,22 @@ impl RankDirectory {
         if base & (1 << 31) != 0 {
             self.wide[(base & !(1 << 31)) as usize + (bucket & 255)] as usize
         } else {
-            let first = (bucket >> 1) * 3 + (bucket & 1);
+            let first = if self.delta_bits == 16 {
+                bucket * 2
+            } else {
+                (bucket >> 1) * 3 + (bucket & 1)
+            };
             let value = u16::from_le_bytes(
                 self.deltas[first..first + 2]
                     .try_into()
                     .expect("packed rank pair"),
             );
-            (base + u32::from((value >> ((bucket & 1) * 4)) & 4095)) as usize
+            let value = if self.delta_bits == 16 {
+                value
+            } else {
+                (value >> ((bucket & 1) * 4)) & 4095
+            };
+            (base + u32::from(value)) as usize
         }
     }
     #[inline(always)]
@@ -406,16 +489,25 @@ impl RankDirectory {
             let pair = &self.wide[index..index + 2];
             (pair[0] as usize, pair[1] as usize)
         } else {
-            let first = (bucket >> 1) * 3 + (bucket & 1);
+            let first = if self.delta_bits == 16 {
+                bucket * 2
+            } else {
+                (bucket >> 1) * 3 + (bucket & 1)
+            };
             let packed = u32::from_le_bytes(
                 self.deltas[first..first + 4]
                     .try_into()
                     .expect("packed rank range"),
             );
-            let shift = (bucket & 1) * 4;
+            let shift = if self.delta_bits == 16 {
+                0
+            } else {
+                (bucket & 1) * 4
+            };
+            let mask = (1 << self.delta_bits) - 1;
             (
-                (base + ((packed >> shift) & 4095)) as usize,
-                (base + ((packed >> (12 + shift)) & 4095)) as usize,
+                (base + ((packed >> shift) & mask)) as usize,
+                (base + ((packed >> (self.delta_bits + shift)) & mask)) as usize,
             )
         }
     }
@@ -426,9 +518,148 @@ struct CachedEdges {
     next: [u32; 2],
 }
 
+// Large graphs need 31 target bits. Non-singleton edges use unused ranks
+// above the graph size for their exact degree; bit31 then stores non-self.
+// Keeping both base codes separately preserves the cached graph walk.
+#[repr(C, packed)]
+struct RankedEdges {
+    links: u64,
+    codes: AtomicU8,
+}
+
+impl RankedEdges {
+    fn new(cached: CachedEdges, count: usize) -> Self {
+        debug_assert!(count <= (1 << 31) - 5);
+        let mut links = 0u64;
+        let mut codes = 0u8;
+        for orientation in 0..2 {
+            let bits =
+                (cached.packed >> (orientation * EDGE_STATE_BITS)) & ((1 << EDGE_STATE_BITS) - 1);
+            let degree = (bits >> EDGE_OUT_DEGREE_SHIFT) & 7;
+            let edge = if degree == 1 {
+                debug_assert!(cached.next[orientation] < count as u32);
+                cached.next[orientation]
+                    | (((cached.packed >> (2 * EDGE_STATE_BITS + orientation)) & 1) << 31)
+            } else {
+                (count as u32 + degree) | (((bits >> EDGE_HAS_NON_SELF_SHIFT) & 1) << 31)
+            };
+            links |= u64::from(edge) << (orientation * 32);
+            codes |= (((bits >> EDGE_OUT_CODE_SHIFT) & 3) as u8) << (orientation * 2);
+        }
+        Self {
+            links,
+            codes: AtomicU8::new(codes),
+        }
+    }
+
+    fn build(entries: &[u64], lookup: &KmerLookup, k: usize, parallel: bool) -> Vec<Self> {
+        let mut records = Vec::<Self>::with_capacity(entries.len());
+        let fill = |(words, slots): (&[u64], &mut [std::mem::MaybeUninit<Self>])| {
+            let mask = kmer_mask(k);
+            let mut queries = [0u64; 256];
+            for (words, slots) in words.chunks(32).zip(slots.chunks_mut(32)) {
+                for (i, &word) in words.iter().enumerate() {
+                    queries[i * 8..i * 8 + 8].copy_from_slice(&edge_neighbor_words(word, k, mask));
+                }
+                let found = lookup.find_many_count(entries, queries, words.len() * 8);
+                for (i, (&word, slot)) in words.iter().zip(slots).enumerate() {
+                    slot.write(Self::new(
+                        cached_edges_from_found(
+                            word,
+                            k,
+                            mask,
+                            queries[i * 8..i * 8 + 8]
+                                .try_into()
+                                .expect("eight neighbors"),
+                            found[i * 8..i * 8 + 8].try_into().expect("eight results"),
+                        ),
+                        entries.len(),
+                    ));
+                }
+            }
+        };
+        let destinations = &mut records.spare_capacity_mut()[..entries.len()];
+        if parallel {
+            entries
+                .par_chunks(1024)
+                .zip(destinations.par_chunks_mut(1024))
+                .for_each(fill);
+        } else {
+            entries
+                .chunks(1024)
+                .zip(destinations.chunks_mut(1024))
+                .for_each(fill);
+        }
+        // SAFETY: each input key has one disjoint output slot. Both iteration
+        // paths join after initializing every slot; on panic the length is zero
+        // and the records contain no resource-owning fields.
+        unsafe {
+            records.set_len(entries.len());
+        }
+        Self::mark_continuations(&records, parallel);
+        records
+    }
+
+    fn mark_continuations(records: &[Self], parallel: bool) {
+        // Only spare flag bits change. Atomic byte access permits neighboring
+        // records to be inspected concurrently without copying the edge table.
+        let batch = |batch: &[Self]| {
+            for record in batch {
+                for orientation in 0..2 {
+                    let target = (record.edge(orientation) & 0x7fff_ffff) as usize;
+                    if target < records.len() {
+                        prefetch_rank_delta(&records[target].codes);
+                    }
+                }
+            }
+            for record in batch {
+                let mut flags = 0;
+                for orientation in 0..2 {
+                    let edge = record.edge(orientation);
+                    let target = (edge & 0x7fff_ffff) as usize;
+                    if target < records.len() {
+                        let incoming = records[target].edge(usize::from(edge & (1 << 31) != 0));
+                        flags |= u8::from((incoming & 0x7fff_ffff) < records.len() as u32)
+                            << (4 + orientation);
+                    }
+                }
+                record.codes.store(
+                    record.codes.load(Ordering::Relaxed) | flags,
+                    Ordering::Relaxed,
+                );
+            }
+        };
+        if parallel {
+            records.par_chunks(32).for_each(batch);
+        } else {
+            records.chunks(32).for_each(batch);
+        }
+    }
+
+    #[inline]
+    fn edge(&self, orientation: usize) -> u32 {
+        (self.links >> (orientation * 32)) as u32
+    }
+
+    #[inline]
+    fn degree(edge: u32, count: usize) -> u32 {
+        let rank = edge & 0x7fff_ffff;
+        if rank < count as u32 {
+            1
+        } else {
+            rank - count as u32
+        }
+    }
+}
+
 enum EdgeStorage {
     Compact(Vec<u64>),
     Follow(Vec<u64>),
+    Ranked(Vec<RankedEdges>),
+    Relative(RelativeEdges),
+    Relative7(PackedRelativeEdges),
+    Relative6(DenseRelativeEdges),
+    Adaptive(AdaptiveRelativeEdges),
     Wide(Vec<CachedEdges>),
 }
 
@@ -491,38 +722,64 @@ pub(super) fn build_kmer_unitig_graph_with_report(
     let transcript_lengths = transcripts.iter().map(|tr| tr.original_len).collect();
     super::scratch_pages::retire(transcripts);
     let lookup = KmerLookup::with_threads(&kmers.sorted, threads, k)?;
-    let paths = {
-        let edge_states = EdgeStateCache::build(&kmers.sorted, &lookup, k, threads)?;
-        let topology = GraphTopology::new(&kmers.sorted, &lookup, &edge_states, k);
-        let paths = compact_unitigs(&kmers.sorted, &topology, threads)?;
-        // Path workers have released their preparation scratch; collect those
-        // owner heaps before allocating oriented starts and join metadata.
-        IndexWorkers::new(threads)?.collect_unused(&kmers.sorted);
-        let queries = collect_join_queries(&paths, &topology, threads)?;
-        // These are the last topology queries. Endpoint sorting and joined
-        // sequence assembly no longer need the graph-sized edge allocation.
-        edge_states.retire();
-        join_unitig_paths_with_queries(paths, queries, k, threads)?
+    let early_prefixes = if PrefixKeys::supports(kmers.sorted.len(), &lookup)
+        && kmers.sorted.len() <= (1usize << 31) - 5
+    {
+        Some(AdaptiveRelativeEdges::adaptive_prefixes(
+            &kmers.sorted,
+            &lookup,
+            k,
+        ))
+    } else {
+        None
     };
-    let kmer_locs = build_kmer_locs(&paths, &kmers.sorted, &lookup, k, threads)?;
-    let graph_build = graph_start.elapsed();
-
-    let ec_start = Instant::now();
-    let trinfo_shards = build_trinfos(
-        &mut packed,
-        k,
-        &kmers.sorted,
-        &lookup,
-        &kmer_locs,
-        &paths,
-        threads,
-    )?;
-    // Transcript runs own their IDs and coordinates; these lookup buffers are
-    // no longer needed while allocating EC payloads and minimizer storage.
+    let (edge_scratch_bytes, mapping) = if let Some(starts) = early_prefixes {
+        let keys = PrefixKeys::for_topology(kmers.sorted, &lookup, threads)?;
+        // Reclaim completed collection/packing scratch on its owners before
+        // allocating the temporary membership blocks; live keys stay intact.
+        IndexWorkers::new(threads)?.collect_unused(&packed);
+        let negative = negative_filter::NegativeFilter::build_mapped(&keys, &lookup, k, threads)?;
+        let build = || {
+            AdaptiveRelativeEdges::build_filtered(&keys, &lookup, k, starts, &negative, threads > 1)
+        };
+        let records = if threads > 1 {
+            IndexWorkers::new(threads)?.install(build)
+        } else {
+            build()
+        };
+        negative.retire();
+        IndexWorkers::new(threads)?.collect_unused(&records.words);
+        let edges = EdgeStateCache {
+            packed: EdgeStorage::Adaptive(records),
+        };
+        let bytes = edges.scratch_bytes();
+        (
+            bytes,
+            finish_graph_mapping(keys, edges, &lookup, &mut packed, k, threads, graph_start)?,
+        )
+    } else {
+        let edges = EdgeStateCache::build(&kmers.sorted, &lookup, k, threads)?;
+        let bytes = edges.scratch_bytes();
+        let mapping = if PrefixKeys::supports(kmers.sorted.len(), &lookup) {
+            let keys = PrefixKeys::for_topology(kmers.sorted, &lookup, threads)?;
+            finish_graph_mapping(keys, edges, &lookup, &mut packed, k, threads, graph_start)?
+        } else {
+            finish_graph_mapping(
+                kmers.sorted,
+                edges,
+                &lookup,
+                &mut packed,
+                k,
+                threads,
+                graph_start,
+            )?
+        };
+        (bytes, mapping)
+    };
+    let (paths, trinfo_shards, graph_build, ec_start) = mapping;
+    // Keys and locations are retired by the mapping helper before EC payloads.
     drop(packed);
-    drop(kmer_locs);
     drop(lookup);
-    drop(kmers);
     // Mapping is complete. Move identifiers and lengths out, releasing sequence
     // buffers before EC payloads and minimizer records are allocated.
     let copy_name = |bounds: &[usize]| identifiers[bounds[0]..bounds[1]].to_owned();
@@ -543,7 +800,7 @@ pub(super) fn build_kmer_unitig_graph_with_report(
     let nodes = build_node_payloads(&paths, trinfos, ec_threshold, k, threads)?;
     let ec_build = ec_start.elapsed();
 
-    let unitigs: Vec<Vec<u8>> = paths.into_iter().map(|path| path.seq).collect();
+    let unitigs: Vec<Vec<u8>> = paths.into_iter().map(|path| path.seq.into_vec()).collect();
     let minimizer_start = Instant::now();
     let (minimizer_keys, unitig_bitmap_blocks) =
         build_unitig_minimizer_index(&unitigs, k, g, threads)?;
@@ -566,8 +823,68 @@ pub(super) fn build_kmer_unitig_graph_with_report(
             graph_build,
             minimizer_index,
             ec_build,
+            edge_scratch_bytes,
         },
     ))
+}
+
+fn finish_graph_mapping<K: MappingKeys>(
+    mut keys: K,
+    edge_states: EdgeStateCache,
+    lookup: &KmerLookup,
+    packed: &mut [PackedSequence],
+    k: usize,
+    threads: usize,
+    graph_start: Instant,
+) -> Result<(Vec<UnitigPath>, TrInfoShards, Duration, Instant)> {
+    let paths = {
+        let topology = GraphTopology::new(&keys, lookup, &edge_states, k);
+        compact_unitigs(&keys, &topology, threads)?
+    };
+    // Join probes already carry complete endpoint words and ranks. Only
+    // exact suffix membership remains, so rank-to-word hints can retire now.
+    keys.retire_word_hints();
+    let topology = GraphTopology::new(&keys, lookup, &edge_states, k);
+    // Collect only retired worker allocations while the immutable keys remain live.
+    IndexWorkers::new(threads)?.collect_unused(&paths);
+    let queries = collect_join_queries(&paths, &topology, threads)?;
+
+    edge_states.retire();
+    let paths = join_unitig_paths_with_queries(paths, queries, k, threads)?;
+    let (trinfos, graph_build, ec_start) =
+        map_transcript_runs(keys, packed, &paths, lookup, k, threads, graph_start)?;
+    Ok((paths, trinfos, graph_build, ec_start))
+}
+
+fn map_transcript_runs<K: MappingKeys>(
+    keys: K,
+    packed: &mut [PackedSequence],
+    paths: &[UnitigPath],
+    lookup: &KmerLookup,
+    k: usize,
+    threads: usize,
+    graph_start: Instant,
+) -> Result<(TrInfoShards, Duration, Instant)> {
+    if sparse_locations::worthwhile(keys.len(), paths.len(), packed.len()) {
+        // Full-word landmarks replace both the key directory search and the
+        // dense rank-to-location table, so graph-sized keys can retire now.
+        drop(keys);
+        let locations = sparse_locations::SparseLocations::build(paths, packed, k, threads)?;
+        let graph_build = graph_start.elapsed();
+        let ec_start = Instant::now();
+        let shards = build_trinfos(packed, k, &locations, paths, threads)?;
+        return Ok((shards, graph_build, ec_start));
+    }
+    let kmer_locs = build_kmer_locs(paths, &keys, lookup, k, threads)?;
+    let graph_build = graph_start.elapsed();
+    let ec_start = Instant::now();
+    let locations = DenseReferenceLocations {
+        keys: &keys,
+        lookup,
+        locations: &kmer_locs,
+    };
+    let shards = build_trinfos(packed, k, &locations, paths, threads)?;
+    Ok((shards, graph_build, ec_start))
 }
 
 // Keep the private word oracle independent of destructive scratch retirement.
@@ -597,7 +914,9 @@ fn collect_kmers_and_pack(
             let collected = std::sync::Mutex::new(&mut sorted);
             // Moving disjoint chunks out of this iterator is safe; workers do
             // all packing only after their group's borrowed anchors are gone.
-            let groups = std::sync::Mutex::new(transcripts.chunks_mut(2048).enumerate());
+            let groups = std::sync::Mutex::new(
+                bounded_transcript_groups(transcripts, k, 1 << 24).enumerate(),
+            );
             pool.install(|| {
                 rayon::broadcast(|_| -> Result<Scratch> {
                     let mut words = Vec::new();
@@ -931,13 +1250,36 @@ fn insert_transcript_kmers(entries: &mut Vec<u64>, seq: &[u8], k: usize) -> Resu
     Ok(())
 }
 
+// Keep ordinary groups at their established target count while bounding raw
+// scratch for long transcripts. A single oversized transcript remains intact,
+// preserving every seam window; the bound is budget plus one transcript.
+fn bounded_transcript_groups(
+    transcripts: &mut [Transcript],
+    k: usize,
+    position_budget: usize,
+) -> impl Iterator<Item = &mut [Transcript]> {
+    let mut targets = 0usize;
+    let mut positions = 0usize;
+    transcripts.split_inclusive_mut(move |transcript| {
+        targets += 1;
+        positions = positions.saturating_add(kmer_position_count(transcript.seq.len(), k));
+        if targets >= 2048 || positions >= position_budget {
+            targets = 0;
+            positions = 0;
+            true
+        } else {
+            false
+        }
+    })
+}
+
 fn kmer_position_count(seq_len: usize, k: usize) -> usize {
     if seq_len >= k { seq_len - k + 1 } else { 0 }
 }
 
 fn compact_unitigs(
-    entries: &[u64],
-    topology: &GraphTopology<'_>,
+    entries: &(impl MappingKeys + ?Sized),
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
     threads: usize,
 ) -> Result<Vec<UnitigPath>> {
     if threads > 1 && entries.len() >= PARALLEL_KMER_COLLECTION_MIN {
@@ -947,7 +1289,8 @@ fn compact_unitigs(
     let mut out = Vec::new();
 
     // Branch starts produce maximal paths; the second pass catches isolated cycles.
-    for (idx, &word) in entries.iter().enumerate() {
+    for idx in 0..entries.len() {
+        let word = entries.word(topology.lookup, idx);
         if visited.contains_index(idx) {
             continue;
         }
@@ -966,8 +1309,8 @@ fn compact_unitigs(
 }
 
 fn finish_unitig_cycles(
-    entries: &[u64],
-    topology: &GraphTopology<'_>,
+    entries: &(impl MappingKeys + ?Sized),
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
     visited: &mut VisitedKmers,
     out: &mut Vec<UnitigPath>,
 ) -> Result<()> {
@@ -981,7 +1324,8 @@ fn finish_unitig_cycles(
             if idx >= entries.len() {
                 break;
             }
-            let start = choose_any_start_orientation(entries[idx], idx, topology);
+            let start =
+                choose_any_start_orientation(entries.word(topology.lookup, idx), idx, topology);
             out.push(walk_unitig(start, idx, topology, visited)?);
         }
     }
@@ -1029,8 +1373,8 @@ struct PreparedPath<Step: PathStep> {
 }
 
 fn compact_unitigs_parallel(
-    entries: &[u64],
-    topology: &GraphTopology<'_>,
+    entries: &(impl MappingKeys + ?Sized),
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
     threads: usize,
 ) -> Result<Vec<UnitigPath>> {
     if entries.len() <= 1 << 30 {
@@ -1087,23 +1431,23 @@ impl PathChunks {
 }
 
 fn compact_unitigs_parallel_steps<Step: PathStep>(
-    entries: &[u64],
-    topology: &GraphTopology<'_>,
+    entries: &(impl MappingKeys + ?Sized),
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
     threads: usize,
 ) -> Result<Vec<UnitigPath>> {
     let pool = IndexWorkers::new(threads)?;
     let starts = pool.install(|| {
-        entries
-            .par_chunks(65536)
-            .enumerate()
-            .map(|(chunk, words)| {
-                words
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(relative, &word)| {
-                        let idx = chunk * 65536 + relative;
-                        choose_branch_start_orientation(word, idx, topology)
-                            .map(|word| Step::pack(idx, u64::from(word == entries[idx])))
+        (0..entries.len().div_ceil(65536))
+            .into_par_iter()
+            .map(|chunk| {
+                (chunk * 65536..((chunk + 1) * 65536).min(entries.len()))
+                    .filter_map(|idx| {
+                        if topology.edge_states.is_internal(idx) {
+                            return None;
+                        }
+                        let canonical = entries.word(topology.lookup, idx);
+                        choose_branch_start_orientation(canonical, idx, topology)
+                            .map(|word| Step::pack(idx, u64::from(word == canonical)))
                     })
                     .collect::<Vec<_>>()
             })
@@ -1122,7 +1466,7 @@ fn compact_unitigs_parallel_steps<Step: PathStep>(
             .iter()
             .map(|&seed| {
                 let index = seed.index();
-                let canonical = entries[index];
+                let canonical = entries.word(topology.lookup, index);
                 let word = if seed.base() != 0 {
                     canonical
                 } else {
@@ -1220,7 +1564,7 @@ fn materialize_prepared_path<Step: PathStep>(
             .map(|step| code_to_base(step.base())),
     );
     UnitigPath {
-        seq,
+        seq: seq.into_boxed_slice(),
         ends: [
             path.steps[0].index() as u32,
             path.steps[count - 1].index() as u32,
@@ -1229,7 +1573,7 @@ fn materialize_prepared_path<Step: PathStep>(
 }
 fn commit_prepared_path<Step: PathStep>(
     path: &PreparedPath<Step>,
-    topology: &GraphTopology<'_>,
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
     visited: &mut VisitedKmers,
 ) -> Option<UnitigPath> {
     let count = claim_prepared_path(path, visited);
@@ -1237,22 +1581,38 @@ fn commit_prepared_path<Step: PathStep>(
 }
 
 fn finish_unitig_cycles_parallel<Step: PathStep>(
-    entries: &[u64],
-    topology: &GraphTopology<'_>,
+    entries: &(impl MappingKeys + ?Sized),
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
     visited: &mut VisitedKmers,
     out: &mut PathChunks,
     pool: &IndexWorkers,
     threads: usize,
 ) -> Result<()> {
+    let batch = if entries.len() > 1 << 28 {
+        512 * threads
+    } else {
+        64 * threads
+    };
+    finish_unitig_cycles_batched::<Step>(entries, topology, visited, out, pool, batch)
+}
+
+fn finish_unitig_cycles_batched<Step: PathStep>(
+    entries: &(impl MappingKeys + ?Sized),
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
+    visited: &mut VisitedKmers,
+    out: &mut PathChunks,
+    pool: &IndexWorkers,
+    batch: usize,
+) -> Result<()> {
     let mut cursor = 0;
-    let mut buffers = (0..64 * threads)
+    let mut buffers = (0..batch)
         .map(|_| Vec::<Step>::with_capacity(64))
         .collect::<Vec<_>>();
     while cursor < entries.len() {
-        let mut seeds = Vec::with_capacity(64 * threads);
+        let mut seeds = Vec::with_capacity(batch);
         // Select the next unvisited entries in the same ascending order as the
         // serial sweep. Earlier commits can only remove later candidates.
-        while cursor < entries.len() && seeds.len() < 64 * threads {
+        while cursor < entries.len() && seeds.len() < batch {
             let word = cursor >> 6;
             let remaining = !visited.words[word] & (u64::MAX << (cursor & 63));
             if remaining == 0 {
@@ -1267,7 +1627,7 @@ fn finish_unitig_cycles_parallel<Step: PathStep>(
             cursor = idx + 1;
             seeds.push((
                 idx,
-                choose_any_start_orientation(entries[idx], idx, topology),
+                choose_any_start_orientation(entries.word(topology.lookup, idx), idx, topology),
             ));
         }
         let prepared = pool.install(|| {
@@ -1318,34 +1678,90 @@ struct PreparingPath<Step: PathStep> {
 fn prepare_path_group<Step: PathStep, const RESIDUAL: bool>(
     seeds: &[(usize, u64)],
     buffers: &mut [Vec<Step>],
-    topology: &GraphTopology<'_>,
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
     visited: &VisitedKmers,
 ) -> [Option<PreparedPath<Step>>; 32] {
     if let EdgeStorage::Follow(follow) = &topology.edge_states.packed {
-        prepare_path_group_inner::<Step, RESIDUAL, true>(seeds, buffers, topology, visited, follow)
+        prepare_path_group_inner::<Step, RESIDUAL, true, false, 8>(
+            seeds, buffers, topology, visited, follow, None,
+        )
+    } else if let EdgeStorage::Relative(relative) = &topology.edge_states.packed {
+        prepare_path_group_inner::<Step, RESIDUAL, false, true, 8>(
+            seeds,
+            buffers,
+            topology,
+            visited,
+            &[],
+            Some(relative),
+        )
+    } else if let EdgeStorage::Relative7(relative) = &topology.edge_states.packed {
+        prepare_path_group_inner::<Step, RESIDUAL, false, true, 7>(
+            seeds,
+            buffers,
+            topology,
+            visited,
+            &[],
+            Some(relative),
+        )
+    } else if let EdgeStorage::Adaptive(relative) = &topology.edge_states.packed {
+        prepare_path_group_inner::<Step, RESIDUAL, false, true, ADAPTIVE_EDGE_WIDTH>(
+            seeds,
+            buffers,
+            topology,
+            visited,
+            &[],
+            Some(relative),
+        )
+    } else if let EdgeStorage::Relative6(relative) = &topology.edge_states.packed {
+        prepare_path_group_inner::<Step, RESIDUAL, false, true, 6>(
+            seeds,
+            buffers,
+            topology,
+            visited,
+            &[],
+            Some(relative),
+        )
     } else {
-        prepare_path_group_inner::<Step, RESIDUAL, false>(seeds, buffers, topology, visited, &[])
+        prepare_path_group_inner::<Step, RESIDUAL, false, false, 8>(
+            seeds,
+            buffers,
+            topology,
+            visited,
+            &[],
+            None,
+        )
     }
 }
 
-fn prepare_path_group_inner<Step: PathStep, const RESIDUAL: bool, const FOLLOW: bool>(
+fn prepare_path_group_inner<
+    Step: PathStep,
+    const RESIDUAL: bool,
+    const FOLLOW: bool,
+    const RELATIVE: bool,
+    const WIDTH: usize,
+>(
     seeds: &[(usize, u64)],
     buffers: &mut [Vec<Step>],
-    topology: &GraphTopology<'_>,
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
     visited: &VisitedKmers,
     follow: &[u64],
+    relative: Option<&relative_edges::RelativeEdges<WIDTH>>,
 ) -> [Option<PreparedPath<Step>>; 32] {
     let mut output = std::array::from_fn(|_| None);
     let mut pending: [Option<PreparingPath<Step>>; 4] = std::array::from_fn(|_| None);
     let mut cursor = 0;
+    let mut oriented = [0u64; 4];
     loop {
-        for lane in &mut pending {
+        for (lane_id, lane) in pending.iter_mut().enumerate() {
             while lane.is_none() && cursor < seeds.len() {
                 let slot = cursor;
                 cursor += 1;
                 let (idx, start) = seeds[slot];
                 if visited.contains_index(idx) {
                     continue;
+                }
+                if RELATIVE {
+                    oriented[lane_id] = start;
                 }
                 *lane = Some(PreparingPath {
                     path: PreparedPath {
@@ -1355,7 +1771,11 @@ fn prepare_path_group_inner<Step: PathStep, const RESIDUAL: bool, const FOLLOW: 
                     start_idx: idx,
                     slot,
                     index: idx,
-                    forward: start == topology.entries[idx],
+                    forward: if RELATIVE && WIDTH <= 6 {
+                        start <= reverse_complement_word(start, topology.k, topology.mask)
+                    } else {
+                        start == topology.entries.word(topology.lookup, idx)
+                    },
                     base: topology.last_base_code(start),
                 });
             }
@@ -1365,7 +1785,7 @@ fn prepare_path_group_inner<Step: PathStep, const RESIDUAL: bool, const FOLLOW: 
         }
         // Interleave independent streams so outgoing and incoming metadata loads
         // from several paths can be in flight together on each worker.
-        let next: [Option<(usize, bool, u64)>; 4] = std::array::from_fn(|i| {
+        let mut next: [Option<(usize, bool, u64)>; 4] = std::array::from_fn(|i| {
             let cur = pending[i].as_mut()?;
             cur.path.steps.push(Step::pack(cur.index, cur.base));
             if FOLLOW {
@@ -1375,12 +1795,36 @@ fn prepare_path_group_inner<Step: PathStep, const RESIDUAL: bool, const FOLLOW: 
                     edge & (1 << 30) != 0,
                     u64::from((edge >> 28) & 3),
                 ))
+            } else if RELATIVE {
+                let relative = relative.expect("relative walk");
+                if WIDTH < 8 {
+                    let next = relative.outgoing(cur.index, cur.forward, oriented[i]);
+                    if let Some((index, forward, _)) = next {
+                        relative.prefetch_incoming(index, forward);
+                        if RESIDUAL {
+                            prefetch_rank_delta(&visited.words[index >> 6]);
+                        }
+                    }
+                    next
+                } else {
+                    relative.continuation(cur.index, cur.forward, oriented[i])
+                }
             } else {
                 topology
                     .edge_states
-                    .outgoing_continuation(cur.index, cur.forward)
+                    .outgoing_continuation(cur.index, cur.forward, 0)
             }
         });
+        if RELATIVE && WIDTH < 8 {
+            let relative = relative.expect("relative walk");
+            for next in &mut next {
+                if let Some((index, forward, _)) = *next
+                    && relative.incoming_degree(index, forward) != 1
+                {
+                    *next = None;
+                }
+            }
+        }
         let advance: [bool; 4] = std::array::from_fn(|i| match (pending[i].as_ref(), next[i]) {
             (Some(cur), Some((idx, _, _))) => {
                 idx != cur.start_idx && (!RESIDUAL || !visited.contains_index(idx))
@@ -1398,6 +1842,9 @@ fn prepare_path_group_inner<Step: PathStep, const RESIDUAL: bool, const FOLLOW: 
             } else if advance[i] {
                 let (idx, forward, base) = next[i].unwrap();
                 let cur = pending[i].as_mut().unwrap();
+                if RELATIVE {
+                    oriented[i] = shift_append_word(oriented[i], base, topology.k, topology.mask);
+                }
                 cur.index = idx;
                 cur.forward = forward;
                 cur.base = base;
@@ -1413,13 +1860,13 @@ fn prepare_path_group_inner<Step: PathStep, const RESIDUAL: bool, const FOLLOW: 
 fn choose_branch_start_orientation(
     word: u64,
     idx: usize,
-    topology: &GraphTopology<'_>,
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
 ) -> Option<u64> {
     if topology.edge_states.is_internal(idx) {
         return None;
     }
-    let forward_bits = topology.edge_states.state_bits(idx, true);
-    let reverse_bits = topology.edge_states.state_bits(idx, false);
+    let forward_bits = topology.edge_states.state_bits(idx, true, word);
+    let reverse_bits = topology.edge_states.state_bits(idx, false, word);
     let starts = |bits: u32| {
         (bits & EDGE_IN_DEGREE_MASK) != 1
             && ((bits >> EDGE_OUT_DEGREE_SHIFT) & EDGE_IN_DEGREE_MASK) > 0
@@ -1436,9 +1883,13 @@ fn choose_branch_start_orientation(
     }
 }
 
-fn choose_any_start_orientation(word: u64, idx: usize, topology: &GraphTopology<'_>) -> u64 {
-    let forward = topology.edge_states.state_bits(idx, true);
-    let reverse = topology.edge_states.state_bits(idx, false);
+fn choose_any_start_orientation(
+    word: u64,
+    idx: usize,
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
+) -> u64 {
+    let forward = topology.edge_states.state_bits(idx, true, word);
+    let reverse = topology.edge_states.state_bits(idx, false, word);
     if forward & (1 << EDGE_HAS_NON_SELF_SHIFT) != 0 {
         word
     } else if reverse & (1 << EDGE_HAS_NON_SELF_SHIFT) != 0 {
@@ -1455,18 +1906,20 @@ fn choose_any_start_orientation(word: u64, idx: usize, topology: &GraphTopology<
 fn walk_unitig(
     start: u64,
     start_idx: usize,
-    topology: &GraphTopology<'_>,
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
     visited: &mut VisitedKmers,
 ) -> Result<UnitigPath> {
     let mut seq = decode_kmer_word(start, topology.k);
     let mut index = start_idx;
-    let mut forward = start == topology.entries[start_idx];
+    let mut oriented = start;
+    let mut forward = start == topology.entries.word(topology.lookup, start_idx);
     loop {
         if !visited.insert_index(index) {
             break;
         }
-        let Some((next, next_forward, base)) =
-            topology.edge_states.outgoing_continuation(index, forward)
+        let Some((next, next_forward, base)) = topology
+            .edge_states
+            .outgoing_continuation(index, forward, oriented)
         else {
             break;
         };
@@ -1474,11 +1927,12 @@ fn walk_unitig(
             break;
         }
         seq.push(code_to_base(base));
+        oriented = shift_append_word(oriented, base, topology.k, topology.mask);
         index = next;
         forward = next_forward;
     }
     Ok(UnitigPath {
-        seq,
+        seq: seq.into_boxed_slice(),
         ends: [start_idx as u32, index as u32],
     })
 }
@@ -1486,21 +1940,44 @@ fn walk_unitig(
 #[cfg(test)]
 fn join_unitig_paths(
     paths: Vec<UnitigPath>,
-    topology: &GraphTopology<'_>,
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
     threads: usize,
 ) -> Result<Vec<UnitigPath>> {
     let queries = collect_join_queries(&paths, topology, threads)?;
     join_unitig_paths_with_queries(paths, queries, topology.k, threads)
 }
 
+#[repr(C)]
 struct JoinQuery {
-    source: usize,
-    word: u64,
+    word: [u8; 8],
+    source: [u8; 5],
+}
+impl JoinQuery {
+    fn new(source: usize, word: u64) -> Result<Self> {
+        let source = source as u64;
+        if source >= 1 << 40 {
+            return Err(Error::InvalidFormat(
+                "join source exceeds packed range".into(),
+            ));
+        }
+        Ok(Self {
+            word: word.to_ne_bytes(),
+            source: source.to_le_bytes()[..5].try_into().unwrap(),
+        })
+    }
+    fn word(&self) -> u64 {
+        u64::from_ne_bytes(self.word)
+    }
+    fn source(&self) -> usize {
+        let mut bytes = [0; 8];
+        bytes[..5].copy_from_slice(&self.source);
+        u64::from_le_bytes(bytes) as usize
+    }
 }
 
 fn collect_join_queries(
     paths: &[UnitigPath],
-    topology: &GraphTopology<'_>,
+    topology: &GraphTopology<'_, impl MappingKeys + ?Sized>,
     threads: usize,
 ) -> Result<Vec<Vec<JoinQuery>>> {
     let collect = |(chunk, paths): (usize, &[UnitigPath])| {
@@ -1512,21 +1989,24 @@ fn collect_join_queries(
                 let rank = path.ends[usize::from(forward)];
                 let index = if rank == u32::MAX {
                     topology
-                        .lookup
-                        .find(topology.entries, canonical)
+                        .entries
+                        .find(topology.lookup, canonical)
                         .expect("known endpoint")
                 } else {
                     let index = rank as usize;
-                    debug_assert_eq!(topology.entries[index], canonical);
+                    debug_assert_eq!(
+                        topology.entries.find(topology.lookup, canonical),
+                        Some(index)
+                    );
                     index
                 };
                 if let Some(next) = topology.outgoing_neighbor(end, index, end == canonical)
                     && topology.incoming_degree(next.index, next.forward) == 1
                 {
-                    out.push(JoinQuery {
-                        source: state_id(chunk * 512 + relative, forward),
-                        word: next.oriented,
-                    });
+                    out.push(JoinQuery::new(
+                        state_id(chunk * 512 + relative, forward),
+                        next.oriented,
+                    )?);
                 }
             }
         }
@@ -1566,7 +2046,7 @@ fn join_unitig_paths_with_queries(
         let start = rewind_join_start(state_id(unitig_id, true), &prev);
         let seq = joined_sequence_from_state(start, &mut paths, &next, &mut used, k);
         out.push(UnitigPath {
-            seq,
+            seq: seq.into_boxed_slice(),
             ends: [u32::MAX; 2],
         });
     }
@@ -1705,10 +2185,10 @@ fn resolve_join_queries_typed<State: Copy + Send + Sync>(
         queries
             .into_iter()
             .filter_map(|query| {
-                let target = lookup.find(query.word)?;
-                (target.unitig_id() != query.source / 2).then(|| {
+                let target = lookup.find(query.word())?;
+                (target.unitig_id() != query.source() / 2).then(|| {
                     [
-                        encode(query.source),
+                        encode(query.source()),
                         encode(state_id(target.unitig_id(), target.forward())),
                     ]
                 })
@@ -1789,7 +2269,7 @@ fn joined_sequence_from_state(
 ) -> Vec<u8> {
     let mut state = start;
     let (unitig_id, forward) = state_parts(state);
-    let mut seq = std::mem::take(&mut paths[unitig_id].seq);
+    let mut seq = std::mem::take(&mut paths[unitig_id].seq).into_vec();
     if !forward {
         seq.reverse();
         for base in &mut seq {
@@ -1864,9 +2344,9 @@ fn oriented_end_word(seq: &[u8], forward: bool, k: usize, mask: u64) -> Result<u
     }
 }
 
-fn build_kmer_locs(
+fn build_kmer_locs<K: MappingKeys + ?Sized>(
     paths: &[UnitigPath],
-    sorted_kmers: &[u64],
+    sorted_kmers: &K,
     lookup: &KmerLookup,
     k: usize,
     threads: usize,
@@ -1887,7 +2367,7 @@ fn build_kmer_locs(
             .map(|_| AtomicU32::new(0))
             .collect::<Vec<_>>();
         let store = |(group, paths): (usize, &[UnitigPath])| {
-            store_location_group::<64, _, _>(
+            store_location_group::<64, _, _, _>(
                 paths,
                 group * 64,
                 k,
@@ -1953,6 +2433,71 @@ fn build_kmer_locs(
             buckets,
         });
     }
+    // Large graphs can outgrow the direct unitig/offset encoding while still
+    // fitting a global position and orientation in one word. Keeping this
+    // scratch table narrow avoids random writes to an additional eight-byte
+    // table for every k-mer. Smaller graphs retain their direct lookup path.
+    if positions <= u64::from(u32::MAX >> 1) {
+        let starts = starts
+            .into_iter()
+            .map(|value| value as u32)
+            .collect::<Vec<_>>();
+        let locations = (0..sorted_kmers.len())
+            .map(|_| AtomicU32::new(0))
+            .collect::<Vec<_>>();
+        let store = |(group, paths): (usize, &[UnitigPath])| {
+            store_location_group::<64, _, _, _>(
+                paths,
+                group * 64,
+                k,
+                sorted_kmers,
+                lookup,
+                |index| prefetch_location(&locations[index]),
+                |index, loc| {
+                    let position = starts[loc.unitig_id()] + loc.offset() as u32;
+                    locations[index].store(
+                        (position << 1) | u32::from(loc.unitig_is_canonical()),
+                        Ordering::Relaxed,
+                    );
+                },
+            )
+        };
+        if threads > 1 && paths.len() > 1 && sorted_kmers.len() >= PARALLEL_TRINFO_COLLECTION_MIN {
+            IndexWorkers::new(threads)?
+                .install(|| paths.par_chunks(64).enumerate().try_for_each(store))?;
+        } else {
+            for (unitig, path) in paths.iter().enumerate() {
+                store_unitig_locations(
+                    path,
+                    unitig,
+                    k,
+                    sorted_kmers,
+                    lookup,
+                    |index| prefetch_location(&locations[index]),
+                    |index, loc| {
+                        let position = starts[unitig] + loc.offset() as u32;
+                        locations[index].store(
+                            (position << 1) | u32::from(loc.unitig_is_canonical()),
+                            Ordering::Relaxed,
+                        );
+                    },
+                )?;
+            }
+        }
+        let mut buckets = Vec::with_capacity((positions as usize).div_ceil(64));
+        let mut unitig = 0;
+        for base in (0..positions as u32).step_by(64) {
+            while starts[unitig + 1] <= base {
+                unitig += 1;
+            }
+            buckets.push(unitig as u32);
+        }
+        return Ok(KmerLocations::GlobalCompact {
+            positions: locations.into_iter().map(AtomicU32::into_inner).collect(),
+            starts,
+            buckets,
+        });
+    }
     if threads > 1 && paths.len() > 1 && sorted_kmers.len() >= PARALLEL_TRINFO_COLLECTION_MIN {
         let out = (0..sorted_kmers.len())
             .map(|_| AtomicU64::new(0))
@@ -1963,7 +2508,7 @@ fn build_kmer_locs(
                 .par_chunks(64)
                 .enumerate()
                 .try_for_each(|(group, paths)| {
-                    store_location_group::<64, _, _>(
+                    store_location_group::<64, _, _, _>(
                         paths,
                         group * 64,
                         k,
@@ -2008,11 +2553,11 @@ fn prefetch_location<T>(slot: &T) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn store_unitig_locations<P, F>(
+fn store_unitig_locations<K: MappingKeys + ?Sized, P, F>(
     path: &UnitigPath,
     unitig_id: usize,
     k: usize,
-    sorted_kmers: &[u64],
+    sorted_kmers: &K,
     lookup: &KmerLookup,
     prefetch: P,
     mut emit: F,
@@ -2024,7 +2569,7 @@ where
     KmerLoc::new(unitig_id, path.seq.len() - k, true)?;
     let mask = kmer_mask(k);
     let mut flush = |batch: [u64; 16], count: usize, first: usize| -> Result<()> {
-        let found = lookup.find_many_count(sorted_kmers, batch.map(|word| word & mask), count);
+        let found = sorted_kmers.find_many_count(lookup, batch.map(|word| word & mask), count);
         for &index in found[..count].iter().flatten() {
             prefetch(index);
         }
@@ -2061,11 +2606,11 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn store_location_group<const N: usize, P, F>(
+fn store_location_group<const N: usize, K: MappingKeys + ?Sized, P, F>(
     paths: &[UnitigPath],
     first_unitig: usize,
     k: usize,
-    sorted_kmers: &[u64],
+    sorted_kmers: &K,
     lookup: &KmerLookup,
     prefetch: P,
     mut emit: F,
@@ -2075,7 +2620,7 @@ where
     F: FnMut(usize, KmerLoc),
 {
     let mut flush = |keys: [u64; N], locations: &[KmerLoc; N], count: usize| -> Result<()> {
-        let found = lookup.find_many_count(sorted_kmers, keys, count);
+        let found = sorted_kmers.find_many_count(lookup, keys, count);
         for &index in found[..count].iter().flatten() {
             prefetch(index);
         }
@@ -2140,12 +2685,10 @@ fn pack_transcript_sequences(
     Ok(concatenate_shards(shards))
 }
 
-fn build_trinfos(
+fn build_trinfos<L: ReferenceKmerLocations + ?Sized>(
     transcripts: &mut [PackedSequence],
     k: usize,
-    sorted_kmers: &[u64],
-    lookup: &KmerLookup,
-    kmer_locs: &KmerLocations,
+    locations: &L,
     paths: &[UnitigPath],
     threads: usize,
 ) -> Result<TrInfoShards> {
@@ -2164,15 +2707,8 @@ fn build_trinfos(
                 .par_iter_mut()
                 .enumerate()
                 .map(|(tr_id, transcript)| {
-                    let records = collect_transcript_trinfos(
-                        tr_id as u32,
-                        transcript,
-                        k,
-                        sorted_kmers,
-                        lookup,
-                        kmer_locs,
-                        paths,
-                    )?;
+                    let records =
+                        collect_transcript_trinfos(tr_id as u32, transcript, k, locations, paths)?;
                     transcript.clear();
                     Ok(records)
                 })
@@ -2185,9 +2721,7 @@ fn build_trinfos(
             tr_id as u32,
             transcript,
             k,
-            sorted_kmers,
-            lookup,
-            kmer_locs,
+            locations,
             paths,
             |unitig_id, info| {
                 records.push(unitig_id, info, (paths[unitig_id].seq.len() - k + 1) as u32)
@@ -2198,40 +2732,26 @@ fn build_trinfos(
     Ok(vec![records])
 }
 
-fn collect_transcript_trinfos(
+fn collect_transcript_trinfos<L: ReferenceKmerLocations + ?Sized>(
     trid: u32,
     transcript: &PackedSequence,
     k: usize,
-    sorted_kmers: &[u64],
-    lookup: &KmerLookup,
-    kmer_locs: &KmerLocations,
+    locations: &L,
     paths: &[UnitigPath],
 ) -> Result<TrInfoShard> {
     let mut out = TrInfoShard::new(paths.len() <= (1 << 31));
-    scan_transcript_trinfos(
-        trid,
-        transcript,
-        k,
-        sorted_kmers,
-        lookup,
-        kmer_locs,
-        paths,
-        |unitig_id, info| {
-            out.push(unitig_id, info, (paths[unitig_id].seq.len() - k + 1) as u32);
-        },
-    )?;
+    scan_transcript_trinfos(trid, transcript, k, locations, paths, |unitig_id, info| {
+        out.push(unitig_id, info, (paths[unitig_id].seq.len() - k + 1) as u32);
+    })?;
     Ok(out)
 }
 
 // The mapping context is shared by serial and parallel transcript collection.
-#[allow(clippy::too_many_arguments)]
-fn scan_transcript_trinfos<F>(
+fn scan_transcript_trinfos<L: ReferenceKmerLocations + ?Sized, F>(
     trid: u32,
     transcript: &PackedSequence,
     k: usize,
-    sorted_kmers: &[u64],
-    lookup: &KmerLookup,
-    kmer_locs: &KmerLocations,
+    locations: &L,
     paths: &[UnitigPath],
     mut emit: F,
 ) -> Result<()>
@@ -2248,8 +2768,7 @@ where
     let mut pos = 0;
     loop {
         let mut advance = 1;
-        if let Some(idx) = lookup.find(sorted_kmers, fwd.min(rev)) {
-            let loc = kmer_locs.get(idx);
+        if let Some(loc) = locations.find(fwd.min(rev)) {
             let same_strand = (fwd <= rev) == loc.unitig_is_canonical();
             let unitig = &paths[loc.unitig_id()].seq;
             let offset = loc.offset();
@@ -2673,7 +3192,9 @@ fn build_unitig_minimizer_index(
     } else {
         keys.sort_unstable();
     }
+    let written = keys.len();
     keys.dedup();
+    super::scratch_pages::discard_unused(&mut keys, written);
     Ok((keys, bitmap_blocks))
 }
 
@@ -3364,13 +3885,8 @@ impl KmerLookup {
                 }
             }
             KmerDirectory::Ranks(offsets) => {
-                if !offsets.deltas.is_empty() {
-                    for &word in &words[..count] {
-                        prefetch_rank_delta(
-                            &offsets.deltas[(((word >> self.shift) as usize) >> 1) * 3],
-                        );
-                        prefetch_rank_delta(&offsets.bases[((word >> self.shift) as usize) >> 8]);
-                    }
+                for &word in &words[..count] {
+                    offsets.prefetch((word >> self.shift) as usize);
                 }
                 let mut bounds = [(0usize, 0usize); N];
                 for i in 0..count {
@@ -3533,11 +4049,28 @@ fn follow_degree(record: u32, count: usize) -> u32 {
 }
 
 impl EdgeStateCache {
+    fn scratch_bytes(&self) -> usize {
+        match &self.packed {
+            EdgeStorage::Relative6(records) => records.scratch_bytes(),
+            EdgeStorage::Adaptive(records) => records.scratch_bytes(),
+            EdgeStorage::Compact(records) | EdgeStorage::Follow(records) => records.len() * 8,
+            EdgeStorage::Ranked(records) => records.len() * std::mem::size_of::<RankedEdges>(),
+            EdgeStorage::Relative(records) => records.scratch_bytes(),
+            EdgeStorage::Relative7(records) => records.scratch_bytes(),
+            EdgeStorage::Wide(records) => records.len() * std::mem::size_of::<CachedEdges>(),
+        }
+    }
+
     fn retire(self) {
         match self.packed {
+            EdgeStorage::Relative6(records) => super::scratch_pages::retire(records.words),
+            EdgeStorage::Adaptive(records) => super::scratch_pages::retire(records.words),
+            EdgeStorage::Relative7(records) => super::scratch_pages::retire(records.words),
+            EdgeStorage::Relative(records) => super::scratch_pages::retire(records.words),
             EdgeStorage::Compact(records) | EdgeStorage::Follow(records) => {
                 super::scratch_pages::retire(records)
             }
+            EdgeStorage::Ranked(records) => super::scratch_pages::retire(records),
             EdgeStorage::Wide(records) => super::scratch_pages::retire(records),
         }
     }
@@ -3572,6 +4105,22 @@ impl EdgeStateCache {
                     entries.chunks(4096).enumerate().for_each(visit);
                 }
                 finish_atomic_edge_records(result, parallel)
+            } else if entries.len() <= (1 << 31) - 5 {
+                if let Some(starts) = DenseRelativeEdges::prefixes(entries, lookup, k) {
+                    EdgeStorage::Relative6(DenseRelativeEdges::build(
+                        entries, lookup, k, starts, parallel,
+                    ))
+                } else if let Some(starts) = PackedRelativeEdges::prefixes(entries, lookup, k) {
+                    EdgeStorage::Relative7(PackedRelativeEdges::build(
+                        entries, lookup, k, starts, parallel,
+                    ))
+                } else if let Some(starts) = RelativeEdges::prefixes(entries, lookup, k) {
+                    EdgeStorage::Relative(RelativeEdges::build(
+                        entries, lookup, k, starts, parallel,
+                    ))
+                } else {
+                    EdgeStorage::Ranked(RankedEdges::build(entries, lookup, k, parallel))
+                }
             } else {
                 let encode = |&word| cache_edge_states(word, entries, lookup, k, mask);
                 EdgeStorage::Wide(if parallel {
@@ -3593,6 +4142,15 @@ impl EdgeStateCache {
     #[inline]
     fn is_internal(&self, idx: usize) -> bool {
         match &self.packed {
+            EdgeStorage::Relative6(records) => records.is_internal(idx),
+            EdgeStorage::Adaptive(records) => records.is_internal(idx),
+            EdgeStorage::Relative7(records) => records.is_internal(idx),
+            EdgeStorage::Relative(records) => records.is_internal(idx),
+            EdgeStorage::Ranked(entries) => {
+                let links = entries[idx].links;
+                ((links as u32) & 0x7fff_ffff) < entries.len() as u32
+                    && (((links >> 32) as u32) & 0x7fff_ffff) < entries.len() as u32
+            }
             EdgeStorage::Follow(entries) => {
                 let value = entries[idx];
                 ((value as u32) & 0x0fff_ffff) < entries.len() as u32
@@ -3605,9 +4163,28 @@ impl EdgeStateCache {
         }
     }
 
-    fn state_bits(&self, idx: usize, forward: bool) -> u32 {
+    fn state_bits(&self, idx: usize, forward: bool, canonical: u64) -> u32 {
         let orientation = usize::from(!forward);
         match &self.packed {
+            EdgeStorage::Relative6(records) => records.state_bits(idx, forward, canonical),
+            EdgeStorage::Adaptive(records) => records.state_bits(idx, forward, canonical),
+            EdgeStorage::Relative7(records) => records.state_bits(idx, forward, canonical),
+            EdgeStorage::Relative(records) => records.state_bits(idx, forward, canonical),
+            EdgeStorage::Ranked(entries) => {
+                let record = &entries[idx];
+                let edge = record.edge(orientation);
+                let rank = edge & 0x7fff_ffff;
+                let non_self = if rank < entries.len() as u32 {
+                    rank as usize != idx
+                } else {
+                    edge & (1 << 31) != 0
+                };
+                RankedEdges::degree(record.edge(1 - orientation), entries.len())
+                    | (RankedEdges::degree(edge, entries.len()) << EDGE_OUT_DEGREE_SHIFT)
+                    | (u32::from((record.codes.load(Ordering::Relaxed) >> (orientation * 2)) & 3)
+                        << EDGE_OUT_CODE_SHIFT)
+                    | (u32::from(non_self) << EDGE_HAS_NON_SELF_SHIFT)
+            }
             EdgeStorage::Follow(entries) => {
                 let edge = (entries[idx] >> (orientation * 32)) as u32;
                 let incoming = (entries[idx] >> ((1 - orientation) * 32)) as u32;
@@ -3646,6 +4223,13 @@ impl EdgeStateCache {
     fn incoming_degree(&self, idx: usize, forward: bool) -> u8 {
         let orientation = usize::from(!forward);
         match &self.packed {
+            EdgeStorage::Relative6(records) => records.incoming_degree(idx, forward),
+            EdgeStorage::Adaptive(records) => records.incoming_degree(idx, forward),
+            EdgeStorage::Relative7(records) => records.incoming_degree(idx, forward),
+            EdgeStorage::Relative(records) => records.incoming_degree(idx, forward),
+            EdgeStorage::Ranked(entries) => {
+                RankedEdges::degree(entries[idx].edge(1 - orientation), entries.len()) as u8
+            }
             EdgeStorage::Follow(entries) => follow_degree(
                 (entries[idx] >> ((1 - orientation) * 32)) as u32,
                 entries.len(),
@@ -3665,9 +4249,23 @@ impl EdgeStateCache {
     }
 
     #[inline]
-    fn outgoing(&self, idx: usize, forward: bool) -> Option<(usize, bool, u64)> {
+    fn outgoing(&self, idx: usize, forward: bool, oriented: u64) -> Option<(usize, bool, u64)> {
         let orientation = usize::from(!forward);
         match &self.packed {
+            EdgeStorage::Relative6(records) => records.outgoing(idx, forward, oriented),
+            EdgeStorage::Adaptive(records) => records.outgoing(idx, forward, oriented),
+            EdgeStorage::Relative7(records) => records.outgoing(idx, forward, oriented),
+            EdgeStorage::Relative(records) => records.outgoing(idx, forward, oriented),
+            EdgeStorage::Ranked(entries) => {
+                let record = &entries[idx];
+                let edge = record.edge(orientation);
+                let rank = edge & 0x7fff_ffff;
+                (rank < entries.len() as u32).then_some((
+                    rank as usize,
+                    edge & (1 << 31) != 0,
+                    u64::from((record.codes.load(Ordering::Relaxed) >> (orientation * 2)) & 3),
+                ))
+            }
             EdgeStorage::Follow(entries) => {
                 let edge = (entries[idx] >> (orientation * 32)) as u32;
                 let rank = edge & 0x0fff_ffff;
@@ -3701,7 +4299,35 @@ impl EdgeStateCache {
     }
 
     #[inline]
-    fn outgoing_continuation(&self, idx: usize, forward: bool) -> Option<(usize, bool, u64)> {
+    fn outgoing_continuation(
+        &self,
+        idx: usize,
+        forward: bool,
+        oriented: u64,
+    ) -> Option<(usize, bool, u64)> {
+        if let EdgeStorage::Relative6(records) = &self.packed {
+            return records.continuation(idx, forward, oriented);
+        }
+        if let EdgeStorage::Adaptive(records) = &self.packed {
+            return records.continuation(idx, forward, oriented);
+        }
+        if let EdgeStorage::Relative7(records) = &self.packed {
+            return records.continuation(idx, forward, oriented);
+        }
+        if let EdgeStorage::Relative(records) = &self.packed {
+            return records.continuation(idx, forward, oriented);
+        }
+        if let EdgeStorage::Ranked(entries) = &self.packed {
+            let record = &entries[idx];
+            let orientation = usize::from(!forward);
+            let codes = record.codes.load(Ordering::Relaxed);
+            let edge = record.edge(orientation);
+            return (codes & (1 << (4 + orientation)) != 0).then_some((
+                (edge & 0x7fff_ffff) as usize,
+                edge & (1 << 31) != 0,
+                u64::from((codes >> (orientation * 2)) & 3),
+            ));
+        }
         if let EdgeStorage::Follow(entries) = &self.packed {
             let edge = (entries[idx] >> (usize::from(!forward) * 32)) as u32;
             return (edge & (1 << 31) != 0).then_some((
@@ -3710,14 +4336,42 @@ impl EdgeStateCache {
                 u64::from((edge >> 28) & 3),
             ));
         }
-        self.outgoing(idx, forward)
+        self.outgoing(idx, forward, oriented)
             .filter(|&(next, orientation, _)| self.incoming_degree(next, orientation) == 1)
     }
 
     #[cfg(test)]
-    fn neighbor(&self, idx: usize, forward: bool) -> (usize, bool) {
+    fn neighbor(&self, idx: usize, forward: bool, oriented: u64) -> (usize, bool) {
         let orientation = usize::from(!forward);
         match &self.packed {
+            EdgeStorage::Adaptive(records) => {
+                let (index, forward, _) = records
+                    .outgoing(idx, forward, oriented)
+                    .expect("single edge");
+                (index, forward)
+            }
+            EdgeStorage::Relative6(records) => {
+                let (index, forward, _) = records
+                    .outgoing(idx, forward, oriented)
+                    .expect("single edge");
+                (index, forward)
+            }
+            EdgeStorage::Relative7(records) => {
+                let (index, forward, _) = records
+                    .outgoing(idx, forward, oriented)
+                    .expect("single edge");
+                (index, forward)
+            }
+            EdgeStorage::Relative(records) => {
+                let (index, forward, _) = records
+                    .outgoing(idx, forward, oriented)
+                    .expect("single edge");
+                (index, forward)
+            }
+            EdgeStorage::Ranked(entries) => {
+                let edge = entries[idx].edge(orientation);
+                ((edge & 0x7fff_ffff) as usize, edge & (1 << 31) != 0)
+            }
             EdgeStorage::Follow(entries) => {
                 let edge = (entries[idx] >> (orientation * 32)) as u32;
                 ((edge & 0x0fff_ffff) as usize, edge & (1 << 30) != 0)
@@ -3997,9 +4651,9 @@ fn pack_edge_states(word: u64, entries: &[u64], lookup: &KmerLookup, k: usize, m
     cache_edge_states(word, entries, lookup, k, mask).packed & ((1 << (2 * EDGE_STATE_BITS)) - 1)
 }
 
-impl<'a> GraphTopology<'a> {
+impl<'a, K: MappingKeys + ?Sized> GraphTopology<'a, K> {
     fn new(
-        entries: &'a [u64],
+        entries: &'a K,
         lookup: &'a KmerLookup,
         edge_states: &'a EdgeStateCache,
         k: usize,
@@ -4023,7 +4677,7 @@ impl<'a> GraphTopology<'a> {
         idx: usize,
         forward: bool,
     ) -> Option<OrientedNeighbor> {
-        let (index, forward, code) = self.edge_states.outgoing(idx, forward)?;
+        let (index, forward, code) = self.edge_states.outgoing(idx, forward, oriented)?;
         Some(OrientedNeighbor {
             oriented: shift_append_word(oriented, code, self.k, self.mask),
             index,
@@ -4271,7 +4925,7 @@ mod tests {
             }
             assert!(novel_transcript_region(previous, previous, k).is_empty());
         }
-        let transcripts = (0..3073)
+        let mut transcripts = (0..3073)
             .map(|id| {
                 let mut seq = b"ACGT".repeat(96);
                 seq[id % 384] = b"TGCA"[id & 3];
@@ -4282,7 +4936,48 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
+        for seq in [Vec::new(), b"ACG".to_vec()] {
+            transcripts.push(Transcript {
+                name: transcripts.len().to_string(),
+                original_len: seq.len() as u32,
+                seq,
+            });
+        }
         let expected = collect_kmers(&transcripts, 31, 1).unwrap().sorted;
+        for budget in [64, 65536, usize::MAX] {
+            let mut owned = transcripts.clone();
+            let mut actual = Vec::new();
+            let mut identifiers = Vec::new();
+            for group in bounded_transcript_groups(&mut owned, 31, budget) {
+                assert!(!group.is_empty() && group.len() <= 2048);
+                let before_last = group[..group.len() - 1]
+                    .iter()
+                    .map(|tr| kmer_position_count(tr.seq.len(), 31))
+                    .sum::<usize>();
+                assert!(before_last < budget);
+                let mut prefixes = AnchorMap::default();
+                let mut suffixes = AnchorMap::default();
+                let mut anchors = AnchorMap::default();
+                for (id, transcript) in group.iter().enumerate() {
+                    identifiers.push(transcript.name.clone());
+                    let sequence =
+                        anchored_transcript_region(group, id, 31, &mut prefixes, &mut suffixes);
+                    insert_interior_unique_kmers::<4>(&mut actual, sequence, 31, id, &mut anchors)
+                        .unwrap();
+                }
+            }
+            actual.sort_unstable();
+            actual.dedup();
+            assert_eq!(actual, expected, "bounded groups budget={budget}");
+            assert_eq!(
+                identifiers,
+                transcripts
+                    .iter()
+                    .map(|tr| tr.name.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+
         let mut owned = transcripts.clone();
         let (actual, packed) = collect_kmers_and_pack(&mut owned, 31, 8).unwrap();
         assert_eq!(actual.sorted, expected);
@@ -4366,17 +5061,20 @@ mod tests {
     #[test]
     fn bidirectional_edge_states_match_separate_orientation_oracle() {
         for parallel in [false, true] {
-            let offsets = (0u32..1025)
-                .map(|i| {
-                    (i / 256) * 100_000
-                        + (i % 256) * if (i / 256).is_multiple_of(2) { 1 } else { 300 }
-                })
-                .collect::<Vec<_>>();
-            let ranks = RankDirectory::new(offsets.clone(), parallel);
-            for (i, &expected) in offsets.iter().enumerate() {
-                assert_eq!(ranks.get(i), expected as usize);
-                if i + 1 < offsets.len() {
-                    assert_eq!(ranks.range(i), (expected as usize, offsets[i + 1] as usize));
+            for bias in [0, 1 << 28] {
+                let offsets = (0u32..1537)
+                    .map(|i| {
+                        bias + (i / 256) * 100_000
+                            + (i % 256) * [1, 20, 300][(i / 256) as usize % 3]
+                    })
+                    .collect::<Vec<_>>();
+                let ranks = RankDirectory::new(offsets.clone(), parallel);
+                assert_eq!(ranks.delta_bits, if bias == 0 { 12 } else { 16 });
+                for (i, &expected) in offsets.iter().enumerate() {
+                    assert_eq!(ranks.get(i), expected as usize);
+                    if i + 1 < offsets.len() {
+                        assert_eq!(ranks.range(i), (expected as usize, offsets[i + 1] as usize));
+                    }
                 }
             }
             let wide = [0, (1 << 31) - 1, 1 << 31, u32::MAX];
@@ -4467,8 +5165,8 @@ mod tests {
             let cache = EdgeStateCache {
                 packed: EdgeStorage::Compact(vec![compact_pair_word(compact)]),
             };
-            assert_eq!(cache.neighbor(0, true), (next as usize, true));
-            assert_eq!(cache.neighbor(0, false), (next as usize, false));
+            assert_eq!(cache.neighbor(0, true, 0), (next as usize, true));
+            assert_eq!(cache.neighbor(0, false, 0), (next as usize, false));
         }
         let wide = EdgeStateCache {
             packed: EdgeStorage::Wide(vec![CachedEdges {
@@ -4476,8 +5174,48 @@ mod tests {
                 next: [u32::MAX, 1 << 28],
             }]),
         };
-        assert_eq!(wide.neighbor(0, true), (u32::MAX as usize, false));
-        assert_eq!(wide.neighbor(0, false), (1 << 28, true));
+        assert_eq!(wide.neighbor(0, true, 0), (u32::MAX as usize, false));
+        assert_eq!(wide.neighbor(0, false, 0), (1 << 28, true));
+
+        assert_eq!(std::mem::size_of::<RankedEdges>(), 9);
+        for count in [(1usize << 28) + 1, (1usize << 31) - 5] {
+            for degrees in [[0u32, 4], [1, 1], [2, 3]] {
+                for flags in 0..4u32 {
+                    let cached = CachedEdges {
+                        packed: (degrees[0] << EDGE_OUT_DEGREE_SHIFT)
+                            | (degrees[1] << (EDGE_STATE_BITS + EDGE_OUT_DEGREE_SHIFT))
+                            | (3 << EDGE_OUT_CODE_SHIFT)
+                            | (2 << (EDGE_STATE_BITS + EDGE_OUT_CODE_SHIFT))
+                            | (1 << EDGE_HAS_NON_SELF_SHIFT)
+                            | (flags << (2 * EDGE_STATE_BITS)),
+                        next: [0, count as u32 - 1],
+                    };
+                    let ranked = RankedEdges::new(cached, count);
+                    for (orientation, &degree) in degrees.iter().enumerate() {
+                        let edge = ranked.edge(orientation);
+                        assert_eq!(RankedEdges::degree(edge, count), degree);
+                        assert_eq!(
+                            (ranked.codes.load(Ordering::Relaxed) >> (2 * orientation)) & 3,
+                            3 - orientation as u8
+                        );
+                        if degree == 1 {
+                            assert_eq!(
+                                edge & 0x7fff_ffff,
+                                if orientation == 0 {
+                                    0
+                                } else {
+                                    count as u32 - 1
+                                }
+                            );
+                            assert_eq!(edge >> 31, (flags >> orientation) & 1);
+                        } else {
+                            assert_eq!(edge & 0x7fff_ffff, count as u32 + degree);
+                            assert_eq!(edge >> 31, u32::from(orientation == 0));
+                        }
+                    }
+                }
+            }
+        }
 
         for k in (3..=31).step_by(2) {
             let mask = kmer_mask(k);
@@ -4502,6 +5240,18 @@ mod tests {
             let membership = entries.iter().copied().collect::<HashSet<_>>();
             let lookup = KmerLookup::with_threads(&entries, 1, k).unwrap();
             let symmetric_cache = EdgeStateCache::build(&entries, &lookup, k, 1).unwrap();
+            let ranked_cache = EdgeStateCache {
+                packed: EdgeStorage::Ranked(RankedEdges::build(&entries, &lookup, k, k % 4 == 1)),
+            };
+            let relative_cache = EdgeStateCache {
+                packed: EdgeStorage::Relative(RelativeEdges::build(
+                    &entries,
+                    &lookup,
+                    k,
+                    RelativeEdges::prefixes(&entries, &lookup, k).unwrap(),
+                    k % 4 == 1,
+                )),
+            };
             let mut fallback = KmerLookup::new(&entries).unwrap();
             fallback.directory = KmerDirectory::Ranks(RankDirectory::new(
                 (0..=(1usize << (64 - fallback.shift)))
@@ -4512,6 +5262,54 @@ mod tests {
                     .collect(),
                 false,
             ));
+            let packed_cache = EdgeStateCache {
+                packed: EdgeStorage::Relative7(PackedRelativeEdges::build(
+                    &entries,
+                    &fallback,
+                    k,
+                    PackedRelativeEdges::prefixes(&entries, &lookup, k).unwrap(),
+                    true,
+                )),
+            };
+            let dense_cache = EdgeStateCache {
+                packed: EdgeStorage::Relative6(DenseRelativeEdges::build(
+                    &entries,
+                    &fallback,
+                    k,
+                    DenseRelativeEdges::prefixes(&entries, &lookup, k).unwrap(),
+                    true,
+                )),
+            };
+            let adaptive_cache = EdgeStateCache {
+                packed: EdgeStorage::Adaptive(AdaptiveRelativeEdges::build_plan(
+                    &entries,
+                    &fallback,
+                    k,
+                    adaptive_prefixes::PrefixPlan::new(&entries, &fallback, k, 1, 4),
+                    true,
+                )),
+            };
+            let mut superset = entries.clone();
+            for &word in &entries {
+                superset.extend(edge_neighbor_words(word, k, mask));
+            }
+            superset.sort_unstable();
+            superset.dedup();
+            let filtered_caches = [&entries, &superset].map(|filter_keys| {
+                let filter = negative_filter::NegativeFilter::build(filter_keys, k, 1).unwrap();
+                let cache = EdgeStateCache {
+                    packed: EdgeStorage::Adaptive(AdaptiveRelativeEdges::build_filtered(
+                        &entries,
+                        &fallback,
+                        k,
+                        adaptive_prefixes::PrefixPlan::new(&entries, &fallback, k, 1, 4),
+                        &filter,
+                        true,
+                    )),
+                };
+                filter.retire();
+                cache
+            });
             for &word in &entries {
                 let queries = [
                     word,
@@ -4548,9 +5346,11 @@ mod tests {
                     let mut outgoing = 0;
                     let mut out_code = 0;
                     let mut non_self = false;
+                    let mut self_edges = 0;
                     for code in 0..4 {
                         let next = shift_append_word(oriented, code, k, mask);
                         let next = next.min(reverse_complement_word_slow(next, k));
+                        self_edges += usize::from(next == word);
                         if membership.contains(&next) {
                             outgoing += 1;
                             out_code = code as u32;
@@ -4560,6 +5360,7 @@ mod tests {
                         let prev = prev.min(reverse_complement_word_slow(prev, k));
                         incoming += u32::from(membership.contains(&prev));
                     }
+                    assert!(self_edges <= 1, "canonical self-edge bound k={k}");
                     incoming
                         | (outgoing << EDGE_OUT_DEGREE_SHIFT)
                         | (out_code << EDGE_OUT_CODE_SHIFT)
@@ -4585,20 +5386,66 @@ mod tests {
                     packed: EdgeStorage::Wide(wide_entries),
                 };
                 for forward in [true, false] {
+                    let oriented = if forward {
+                        word
+                    } else {
+                        reverse_complement_word_slow(word, k)
+                    };
                     assert_eq!(
-                        compact_cache.state_bits(idx, forward),
-                        wide_cache.state_bits(idx, forward)
+                        compact_cache.state_bits(idx, forward, word),
+                        wide_cache.state_bits(idx, forward, word)
                     );
-                    let bits = wide_cache.state_bits(idx, forward);
+                    let bits = wide_cache.state_bits(idx, forward, word);
+                    assert_eq!(ranked_cache.state_bits(idx, forward, word), bits);
+                    assert_eq!(relative_cache.state_bits(idx, forward, word), bits);
+                    assert_eq!(packed_cache.state_bits(idx, forward, word), bits);
+                    assert_eq!(dense_cache.state_bits(idx, forward, word), bits);
+                    assert_eq!(adaptive_cache.state_bits(idx, forward, word), bits);
+                    for filtered in &filtered_caches {
+                        assert_eq!(filtered.state_bits(idx, forward, word), bits);
+                        assert_eq!(
+                            filtered.outgoing(idx, forward, oriented),
+                            wide_cache.outgoing(idx, forward, oriented)
+                        );
+                    }
+
                     assert_eq!(
-                        symmetric_cache.state_bits(idx, forward),
+                        adaptive_cache.outgoing(idx, forward, oriented),
+                        wide_cache.outgoing(idx, forward, oriented)
+                    );
+
+                    assert_eq!(
+                        dense_cache.outgoing(idx, forward, oriented),
+                        relative_cache.outgoing(idx, forward, oriented)
+                    );
+                    assert_eq!(
+                        packed_cache.outgoing(idx, forward, oriented),
+                        relative_cache.outgoing(idx, forward, oriented)
+                    );
+                    assert_eq!(relative_cache.is_internal(idx), bits & 0x3f == 9);
+                    assert_eq!(
+                        relative_cache.incoming_degree(idx, forward),
+                        (bits & 7) as u8
+                    );
+                    assert_eq!(
+                        relative_cache.outgoing_continuation(idx, forward, oriented),
+                        symmetric_cache.outgoing_continuation(idx, forward, oriented)
+                    );
+                    assert_eq!(ranked_cache.incoming_degree(idx, forward), (bits & 7) as u8);
+                    assert_eq!(ranked_cache.is_internal(idx), bits & 0x3f == 9);
+                    assert_eq!(
+                        ranked_cache.outgoing_continuation(idx, forward, oriented),
+                        symmetric_cache.outgoing_continuation(idx, forward, oriented)
+                    );
+                    assert_eq!(
+                        symmetric_cache.state_bits(idx, forward, word),
                         bits,
                         "symmetric k={k}"
                     );
                     if (bits >> EDGE_OUT_DEGREE_SHIFT) & 7 == 1 {
                         assert_eq!(
-                            symmetric_cache.neighbor(idx, forward),
-                            wide_cache.neighbor(idx, forward)
+                            symmetric_cache.neighbor(idx, forward, oriented),
+                            wide_cache.neighbor(idx, forward, oriented)
                         );
                     }
 
@@ -4611,7 +5458,7 @@ mod tests {
                     );
                     assert_eq!(wide_cache.incoming_degree(idx, forward), (bits & 7) as u8);
                     let expected = if (bits >> EDGE_OUT_DEGREE_SHIFT) & 7 == 1 {
-                        let (index, orientation) = wide_cache.neighbor(idx, forward);
+                        let (index, orientation) = wide_cache.neighbor(idx, forward, oriented);
                         Some((
                             index,
                             orientation,
@@ -4620,23 +5467,25 @@ mod tests {
                     } else {
                         None
                     };
-                    assert_eq!(wide_cache.outgoing(idx, forward), expected);
-                    assert_eq!(compact_cache.outgoing(idx, forward), expected);
-                    assert_eq!(symmetric_cache.outgoing(idx, forward), expected);
+                    assert_eq!(wide_cache.outgoing(idx, forward, oriented), expected);
+                    assert_eq!(ranked_cache.outgoing(idx, forward, oriented), expected);
+                    assert_eq!(relative_cache.outgoing(idx, forward, oriented), expected);
+                    assert_eq!(compact_cache.outgoing(idx, forward, oriented), expected);
+                    assert_eq!(symmetric_cache.outgoing(idx, forward, oriented), expected);
                     assert_eq!(
-                        symmetric_cache.outgoing_continuation(idx, forward),
+                        symmetric_cache.outgoing_continuation(idx, forward, oriented),
                         expected.filter(|&(target, orientation, _)| symmetric_cache
                             .incoming_degree(target, orientation)
                             == 1)
                     );
 
-                    if ((wide_cache.state_bits(idx, forward) >> EDGE_OUT_DEGREE_SHIFT)
+                    if ((wide_cache.state_bits(idx, forward, word) >> EDGE_OUT_DEGREE_SHIFT)
                         & EDGE_IN_DEGREE_MASK)
                         == 1
                     {
                         assert_eq!(
-                            compact_cache.neighbor(idx, forward),
-                            wide_cache.neighbor(idx, forward)
+                            compact_cache.neighbor(idx, forward, oriented),
+                            wide_cache.neighbor(idx, forward, oriented)
                         );
                     }
                 }
@@ -4859,15 +5708,30 @@ mod tests {
 
     #[test]
     fn parallel_path_preparation_preserves_serial_claim_order() {
+        assert_eq!(std::mem::size_of::<JoinQuery>(), 13);
+        for source in [0u64, (1 << 33) - 1] {
+            if let Ok(source) = usize::try_from(source) {
+                let query = JoinQuery::new(source, u64::MAX).unwrap();
+                assert_eq!(query.source(), source);
+                assert_eq!(query.word(), u64::MAX);
+            }
+        }
+        if let Ok(overflow) = usize::try_from(1u64 << 40) {
+            assert!(JoinQuery::new(overflow, 0).is_err());
+        }
+
+        assert!(sparse_locations::worthwhile(1 << 30, 1 << 20, 1 << 20));
+        assert!(!sparse_locations::worthwhile(1 << 30, 1 << 29, 1));
+
         assert_eq!(join_state(&JoinLinks::Wide(vec![usize::MAX]), 0), None);
         assert_eq!(join_state(&JoinLinks::Wide(vec![0]), 0), Some(0));
         let paths = (0..1200)
             .map(|id| UnitigPath {
                 ends: [u32::MAX; 2],
                 seq: if id & 1 == 0 {
-                    b"ACGTTGCATGCA".to_vec()
+                    Box::from(&b"ACGTTGCATGCA"[..])
                 } else {
-                    b"TGCATGCAACGT".to_vec()
+                    Box::from(&b"TGCATGCAACGT"[..])
                 },
             })
             .collect::<Vec<_>>();
@@ -4982,6 +5846,43 @@ mod tests {
             .map(|path| path.seq)
             .collect::<Vec<_>>();
         assert_eq!(wide, serial, "wide bounded cycle fallback");
+        for batch in [512, 4096] {
+            let mut visited = VisitedKmers::new(words.sorted.len());
+            let mut paths = PathChunks::default();
+            let workers = IndexWorkers::new(8).unwrap();
+            finish_unitig_cycles_batched::<u64>(
+                &words.sorted,
+                &topology,
+                &mut visited,
+                &mut paths,
+                &workers,
+                batch,
+            )
+            .unwrap();
+            let actual = paths
+                .finish()
+                .into_iter()
+                .map(|path| path.seq)
+                .collect::<Vec<_>>();
+            assert_eq!(actual, serial, "ordered cycle batch {batch}");
+        }
+
+        let relative_edges = EdgeStateCache {
+            packed: EdgeStorage::Relative(RelativeEdges::build(
+                &words.sorted,
+                &lookup,
+                31,
+                RelativeEdges::prefixes(&words.sorted, &lookup, 31).unwrap(),
+                true,
+            )),
+        };
+        let relative_topology = GraphTopology::new(&words.sorted, &lookup, &relative_edges, 31);
+        let relative = compact_unitigs_parallel_steps::<u64>(&words.sorted, &relative_topology, 8)
+            .unwrap()
+            .into_iter()
+            .map(|path| path.seq)
+            .collect::<Vec<_>>();
+        assert_eq!(relative, serial, "relative bounded cycle fallback");
 
         let mut rng = 42u64;
         let mut transcripts = Vec::new();
@@ -5001,6 +5902,20 @@ mod tests {
             });
         }
         let first = transcripts[0].seq.clone();
+        for (id, seq) in [
+            first[7..83].to_vec(),
+            reverse_complement_seq(&first[11..89]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            transcripts.push(Transcript {
+                name: format!("contained-{id}"),
+                original_len: seq.len() as u32,
+                seq,
+            });
+        }
+
         transcripts.push(Transcript {
             name: "reverse".into(),
             original_len: first.len() as u32,
@@ -5021,6 +5936,123 @@ mod tests {
                 .into_iter()
                 .map(|path| path.seq)
                 .collect::<Vec<_>>();
+            let relative_edges = EdgeStateCache {
+                packed: EdgeStorage::Relative(RelativeEdges::build(
+                    &words.sorted,
+                    &lookup,
+                    k,
+                    RelativeEdges::prefixes(&words.sorted, &lookup, k).unwrap(),
+                    true,
+                )),
+            };
+            let packed_edges = EdgeStateCache {
+                packed: EdgeStorage::Relative7(PackedRelativeEdges::build(
+                    &words.sorted,
+                    &lookup,
+                    k,
+                    PackedRelativeEdges::prefixes(&words.sorted, &lookup, k).unwrap(),
+                    true,
+                )),
+            };
+            let dense_edges = EdgeStateCache {
+                packed: EdgeStorage::Relative6(DenseRelativeEdges::build(
+                    &words.sorted,
+                    &lookup,
+                    k,
+                    DenseRelativeEdges::prefixes(&words.sorted, &lookup, k).unwrap(),
+                    true,
+                )),
+            };
+            let relative_topology = GraphTopology::new(&words.sorted, &lookup, &relative_edges, k);
+            let packed_topology = GraphTopology::new(&words.sorted, &lookup, &packed_edges, k);
+            let dense_topology = GraphTopology::new(&words.sorted, &lookup, &dense_edges, k);
+            let adaptive_edges = EdgeStateCache {
+                packed: EdgeStorage::Adaptive(AdaptiveRelativeEdges::build_plan(
+                    &words.sorted,
+                    &lookup,
+                    k,
+                    adaptive_prefixes::PrefixPlan::new(&words.sorted, &lookup, k, 1, 15),
+                    true,
+                )),
+            };
+            let adaptive_topology = GraphTopology::new(&words.sorted, &lookup, &adaptive_edges, k);
+
+            if k >= 15 {
+                // Force the large exact key geometry on this serial-order oracle.
+                // Sparse and empty prefix ranges must reconstruct full words too.
+                let mut rank_lookup = KmerLookup::with_threads(&words.sorted, 1, k).unwrap();
+                let bits = (2 * k).saturating_sub(40).max(12);
+                rank_lookup.shift = 64 - bits;
+                let mut cursor = 0;
+                let offsets = (0..=(1usize << bits))
+                    .map(|bucket| {
+                        while cursor < words.sorted.len()
+                            && words.sorted[cursor] >> rank_lookup.shift < bucket as u64
+                        {
+                            cursor += 1;
+                        }
+                        cursor as u32
+                    })
+                    .collect();
+                rank_lookup.directory = KmerDirectory::Ranks(RankDirectory::new(offsets, false));
+                let mut keys =
+                    PrefixKeys::for_topology(words.sorted.clone(), &rank_lookup, 1).unwrap();
+                let filter =
+                    negative_filter::NegativeFilter::build_mapped(&keys, &rank_lookup, k, 8)
+                        .unwrap();
+                let packed_edges = EdgeStateCache {
+                    packed: EdgeStorage::Adaptive(AdaptiveRelativeEdges::build_filtered(
+                        &keys,
+                        &rank_lookup,
+                        k,
+                        adaptive_prefixes::PrefixPlan::new(&words.sorted, &rank_lookup, k, 1, 128),
+                        &filter,
+                        true,
+                    )),
+                };
+                filter.retire();
+                let packed_topology = GraphTopology::new(&keys, &rank_lookup, &packed_edges, k);
+                for threads in [1, 8] {
+                    let paths = if threads == 1 {
+                        compact_unitigs(&keys, &packed_topology, threads)
+                    } else {
+                        compact_unitigs_parallel(&keys, &packed_topology, threads)
+                    }
+                    .unwrap();
+                    assert_eq!(
+                        paths.iter().map(|path| &path.seq).collect::<Vec<_>>(),
+                        expected.iter().collect::<Vec<_>>(),
+                        "packed-key paths k={k}, threads={threads}"
+                    );
+                    let joined = join_unitig_paths(paths, &packed_topology, threads).unwrap();
+                    let raw_paths = compact_unitigs(&words.sorted, &topology, 1).unwrap();
+                    let raw_joined = join_unitig_paths(raw_paths, &topology, 1).unwrap();
+                    assert_eq!(
+                        joined.iter().map(|path| &path.seq).collect::<Vec<_>>(),
+                        raw_joined.iter().map(|path| &path.seq).collect::<Vec<_>>(),
+                        "packed-key joins k={k}, threads={threads}"
+                    );
+                }
+                let raw_paths = compact_unitigs(&words.sorted, &topology, 1).unwrap();
+                let normalize = |groups: Vec<Vec<JoinQuery>>| {
+                    groups
+                        .into_iter()
+                        .flatten()
+                        .map(|query| (query.source(), query.word()))
+                        .collect::<Vec<_>>()
+                };
+                let expected_probes =
+                    normalize(collect_join_queries(&raw_paths, &packed_topology, 1).unwrap());
+                keys.retire_word_hints();
+                let retired_topology = GraphTopology::new(&keys, &rank_lookup, &packed_edges, k);
+                let actual_probes =
+                    normalize(collect_join_queries(&raw_paths, &retired_topology, 1).unwrap());
+                assert_eq!(
+                    actual_probes, expected_probes,
+                    "joins after hint retirement"
+                );
+            }
+
             for threads in [2, 8] {
                 let actual = compact_unitigs_parallel(&words.sorted, &topology, threads)
                     .unwrap()
@@ -5028,6 +6060,53 @@ mod tests {
                     .map(|path| path.seq)
                     .collect::<Vec<_>>();
                 assert_eq!(actual, expected, "k={k}, threads={threads}");
+                let relative_paths = compact_unitigs_parallel_steps::<u64>(
+                    &words.sorted,
+                    &relative_topology,
+                    threads,
+                )
+                .unwrap();
+                assert_eq!(
+                    relative_paths
+                        .iter()
+                        .map(|path| &path.seq)
+                        .collect::<Vec<_>>(),
+                    expected.iter().collect::<Vec<_>>(),
+                    "relative paths k={k}, threads={threads}"
+                );
+                let packed_paths =
+                    compact_unitigs_parallel_steps::<u64>(&words.sorted, &packed_topology, threads)
+                        .unwrap();
+                assert_eq!(
+                    packed_paths
+                        .iter()
+                        .map(|path| &path.seq)
+                        .collect::<Vec<_>>(),
+                    expected.iter().collect::<Vec<_>>(),
+                    "packed paths k={k}, threads={threads}"
+                );
+                let dense_paths =
+                    compact_unitigs_parallel_steps::<u64>(&words.sorted, &dense_topology, threads)
+                        .unwrap();
+                assert_eq!(
+                    dense_paths.iter().map(|path| &path.seq).collect::<Vec<_>>(),
+                    expected.iter().collect::<Vec<_>>(),
+                    "dense paths k={k}, threads={threads}"
+                );
+                let adaptive_paths = compact_unitigs_parallel_steps::<u64>(
+                    &words.sorted,
+                    &adaptive_topology,
+                    threads,
+                )
+                .unwrap();
+                assert_eq!(
+                    adaptive_paths
+                        .iter()
+                        .map(|path| &path.seq)
+                        .collect::<Vec<_>>(),
+                    expected.iter().collect::<Vec<_>>(),
+                    "adaptive paths k={k}, threads={threads}"
+                );
                 let paths = expected
                     .iter()
                     .map(|seq| UnitigPath {
@@ -5040,6 +6119,42 @@ mod tests {
                     .into_iter()
                     .map(|path| path.seq)
                     .collect::<Vec<_>>();
+                let adaptive_join = join_unitig_paths(adaptive_paths, &adaptive_topology, threads)
+                    .unwrap()
+                    .into_iter()
+                    .map(|path| path.seq)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    adaptive_join, serial_join,
+                    "adaptive join k={k}, threads={threads}"
+                );
+                let relative_join = join_unitig_paths(relative_paths, &relative_topology, threads)
+                    .unwrap()
+                    .into_iter()
+                    .map(|path| path.seq)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    relative_join, serial_join,
+                    "relative join k={k}, threads={threads}"
+                );
+                let packed_join = join_unitig_paths(packed_paths, &packed_topology, threads)
+                    .unwrap()
+                    .into_iter()
+                    .map(|path| path.seq)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    packed_join, serial_join,
+                    "packed join k={k}, threads={threads}"
+                );
+                let dense_join = join_unitig_paths(dense_paths, &dense_topology, threads)
+                    .unwrap()
+                    .into_iter()
+                    .map(|path| path.seq)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    dense_join, serial_join,
+                    "dense join k={k}, threads={threads}"
+                );
                 let parallel_join = join_unitig_paths(paths, &topology, threads)
                     .unwrap()
                     .into_iter()
@@ -5072,7 +6187,7 @@ mod tests {
                     for group_size in [1, 63, 64, 65] {
                         let mut actual_locations = Vec::new();
                         for (group, paths) in joined.chunks(group_size).enumerate() {
-                            store_location_group::<64, _, _>(
+                            store_location_group::<64, _, _, _>(
                                 paths,
                                 group * group_size,
                                 k,
@@ -5092,16 +6207,45 @@ mod tests {
                 let locs = build_kmer_locs(&joined, &words.sorted, &lookup, k, threads).unwrap();
                 let mut inputs = transcripts.clone();
                 let mut packed = pack_transcript_sequences(&mut inputs, threads).unwrap();
-                build_trinfos(
-                    &mut packed,
-                    k,
-                    &words.sorted,
-                    &lookup,
-                    &locs,
-                    &joined,
-                    threads,
-                )
-                .unwrap();
+                let sparse =
+                    sparse_locations::SparseLocations::build(&joined, &packed, k, threads).unwrap();
+                assert!(
+                    sparse.find(u64::MAX).is_none(),
+                    "empty slot is not membership"
+                );
+                let dense = DenseReferenceLocations {
+                    keys: &words.sorted,
+                    lookup: &lookup,
+                    locations: &locs,
+                };
+                let dense_shards = build_trinfos(&mut packed, k, &dense, &joined, threads).unwrap();
+                let mut inputs = transcripts.clone();
+                let mut packed = pack_transcript_sequences(&mut inputs, threads).unwrap();
+                let sparse_shards =
+                    build_trinfos(&mut packed, k, &sparse, &joined, threads).unwrap();
+                let counts = joined
+                    .iter()
+                    .map(|path| (path.seq.len() - k + 1) as u32)
+                    .collect::<Vec<_>>();
+                let dense_rows = dense_shards
+                    .iter()
+                    .flat_map(|shard| shard.iter(&counts))
+                    .collect::<Vec<_>>();
+                let sparse_rows = sparse_shards
+                    .iter()
+                    .flat_map(|shard| shard.iter(&counts))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    sparse_rows, dense_rows,
+                    "sparse exact runs k={k}, threads={threads}"
+                );
+                for path in &joined {
+                    let word = encode_kmer(&path.seq[..k]).unwrap();
+                    assert!(
+                        sparse.find(word | 1).is_none(),
+                        "complete-key padding check"
+                    );
+                }
             }
         }
     }

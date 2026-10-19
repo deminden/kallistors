@@ -110,6 +110,7 @@ pub(crate) fn intersect_sorted(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
 }
 
 // Both inputs are sorted multisets. Writes never overtake the unread prefix.
+#[inline(always)]
 pub(crate) fn intersect_sorted_in_place(a: &mut Vec<u32>, b: &[u32]) {
     if a.is_empty() || b.is_empty() || a[0] > b[b.len() - 1] || b[0] > a[a.len() - 1] {
         a.clear();

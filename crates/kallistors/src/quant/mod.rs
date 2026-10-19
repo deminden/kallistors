@@ -476,7 +476,8 @@ fn em_quantify_input_threaded(
     };
     let compact = em_pool.is_some() && !options.bias && options.max_iter != 0;
     let mut components = if compact {
-        let components = em_work.group_components();
+        let mut components = em_work.group_components();
+        components::configure_parallel(&mut components, &em_work, threads);
         em_work.compact_transcript_ids();
         alpha.truncate(em_work.active_transcripts.len());
         // Compact updates use only their own previous alpha after the denominator barrier.

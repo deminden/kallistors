@@ -330,6 +330,29 @@ pub fn ec_for_sequence_bifrost(
     (!read_ec.ec.is_empty()).then_some(read_ec.ec)
 }
 
+/// Pseudoalign a sequence for counting without retaining placement/hit metadata.
+/// Unchanged equivalence classes borrow the index; intersections own their result.
+/// Strand-aware queries retain the full filtering path.
+#[inline(always)]
+pub fn ec_for_sequence_bifrost_counting<'index>(
+    index: &'index BifrostIndex,
+    seq: &[u8],
+    strand: Strand,
+    options: PseudoalignOptions,
+) -> Option<std::borrow::Cow<'index, [u32]>> {
+    if options.strand_specific.is_some() {
+        return ec_for_sequence_bifrost(index, seq, strand, options).map(std::borrow::Cow::Owned);
+    }
+    let read_ec = core::ec_for_read_bifrost_counting_borrowed(index, seq, strand, options)?;
+    if read_ec.ec().is_empty() {
+        return None;
+    }
+    Some(match read_ec.borrowed {
+        Some(ec) => std::borrow::Cow::Borrowed(ec),
+        None => std::borrow::Cow::Owned(read_ec.read.ec),
+    })
+}
+
 pub fn unmapped_kmer_ratio_bifrost(
     index: &BifrostIndex,
     seq: &[u8],

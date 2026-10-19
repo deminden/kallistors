@@ -246,15 +246,19 @@ impl PackedKmerRange {
                     };
                     let mask =
                         vcombine_u32(vmovn_u64(vorrq_u64(f0, r0)), vmovn_u64(vorrq_u64(f1, r1)));
-                    let offset = vminvq_u32(vbslq_u32(mask, indices, vdupq_n_u32(u32::MAX)));
-                    if offset < 4 {
-                        let mut codes = [0u64; 4];
-                        vst1q_u64(codes.as_mut_ptr(), first);
-                        vst1q_u64(codes.as_mut_ptr().add(2), second);
-                        return Some((
-                            self.next + offset as usize,
-                            !allow_forward || codes[offset as usize] != forward,
-                        ));
+                    // Most candidate windows miss. Reduce to an earliest lane
+                    // only when at least one of the four exact comparisons hit.
+                    if vmaxvq_u32(mask) != 0 {
+                        let offset = vminvq_u32(vbslq_u32(mask, indices, vdupq_n_u32(u32::MAX)));
+                        if offset < 4 {
+                            let mut codes = [0u64; 4];
+                            vst1q_u64(codes.as_mut_ptr(), first);
+                            vst1q_u64(codes.as_mut_ptr().add(2), second);
+                            return Some((
+                                self.next + offset as usize,
+                                !allow_forward || codes[offset as usize] != forward,
+                            ));
+                        }
                     }
                     self.high = (self.high << 8) | (self.low >> 56);
                     self.low <<= 8;

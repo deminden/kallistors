@@ -25,6 +25,7 @@ use super::runtime::{
 };
 
 // Counting callers have finished placement sampling and do not consume hit metadata.
+#[inline(always)]
 pub(crate) fn ec_for_read_bifrost_counting_borrowed<'index>(
     index: &'index BifrostIndex,
     seq: &[u8],

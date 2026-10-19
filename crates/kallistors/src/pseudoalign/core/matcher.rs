@@ -66,6 +66,7 @@ pub(crate) fn match_unitig_candidate(
     None
 }
 
+#[inline(always)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn match_unitig_candidate_encoded(
     index: &BifrostIndex,
@@ -397,7 +398,8 @@ pub(crate) fn match_kmer_at_pos(
                 .any(|&(min_bytes, min_pos)| min_bytes == tail_bytes && min_pos == tail_pos)
         {
             tried_tail_minimizer = true;
-            min_candidates = vec![(tail_bytes, tail_pos)];
+            min_candidates.clear();
+            min_candidates.push((tail_bytes, tail_pos));
             continue 'min_outer;
         }
         if !kallisto_bifrost_find {
@@ -409,7 +411,8 @@ pub(crate) fn match_kmer_at_pos(
                 minhash_next_after_hash(min_input, index.g, curr_hash)
         {
             min_hash_current = Some(next_hash);
-            min_candidates = vec![next_min];
+            min_candidates.clear();
+            min_candidates.push(next_min);
             continue 'min_outer;
         }
         break;

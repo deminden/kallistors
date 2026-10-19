@@ -385,6 +385,185 @@ fn build_aa_index_with_transcript(dir: &tempfile::TempDir, protein: &[u8]) -> st
 }
 
 #[test]
+fn bus_rejects_disjoint_transcript_hits_without_emitting_an_empty_ec() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let other = b"GTTCCATAGGACCTTGCGTATCAGTTCGGATACCTGACTTACCGGTATGGTCATGACCTTAGGACCTCGTACGAGTTCAG";
+    let fasta = dir.path().join("transcripts.fa");
+    let index = dir.path().join("transcripts.idx");
+    fs::write(
+        &fasta,
+        format!(
+            ">tx0\n{}\n>tx1\n{}\n",
+            std::str::from_utf8(TINY_TRANSCRIPT).unwrap(),
+            std::str::from_utf8(other).unwrap()
+        ),
+    )
+    .unwrap();
+    build_index(&index, &[fasta], IndexBuildOptions::default()).unwrap();
+    let chimera = [TINY_TRANSCRIPT[..40].to_vec(), other[..40].to_vec()].concat();
+    let r1 = dir.path().join("r1.fastq");
+    let r2 = dir.path().join("r2.fastq");
+    write_fastq(
+        &r1,
+        &[
+            ("valid", b"ACGTACGTACGTACGTTTTTTTTTTTTT"),
+            ("disjoint", b"TGCATGCATGCATGCATTTTTTTTTTTT"),
+        ],
+    );
+    write_fastq(&r2, &[("valid", TINY_TRANSCRIPT), ("disjoint", &chimera)]);
+    let out = dir.path().join("bus");
+    let output = bus_command(&index, &out)
+        .args(["-x", "10xv3"])
+        .args([r1, r2])
+        .output()
+        .unwrap();
+    assert_bus_success(&output, "disjoint transcript hits");
+    let (_, _, records) = read_bus_records(&out.join("output.bus"));
+    assert_eq!(
+        records.len(),
+        1,
+        "disjoint hits must not create a BUS record"
+    );
+    assert_eq!(records[0].barcode, encode_bus_seq(b"ACGTACGTACGTACGT"));
+    let info = fs::read_to_string(out.join("run_info.json")).unwrap();
+    assert_eq!(json_u64(&info, "n_processed"), Some(2));
+    assert_eq!(json_u64(&info, "n_pseudoaligned"), Some(1));
+    for line in fs::read_to_string(out.join("matrix.ec")).unwrap().lines() {
+        assert!(!line.split_once('\t').unwrap().1.is_empty());
+    }
+}
+
+#[test]
+fn bus_packed_workers_preserve_order_flags_and_limits_across_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let (index, transcript) = build_tiny_index(&dir);
+    let r1 = dir.path().join("r1.fastq");
+    let r2 = dir.path().join("r2.fastq");
+    let interleaved = dir.path().join("interleaved.fastq");
+    // Cross batch two with skipped/ambiguous records; malformed tails beyond the limit must remain unread.
+    let count = 4 * 65_536 + 77;
+    let limit = 65_536 + 46;
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    let mut combined = Vec::new();
+    let mut expected = Vec::new();
+    let mut prefix_ends = (0, 0, 0);
+    for number in 0..count {
+        let mut barcode_umi = b"ACGTACGTACGTACGTTTTTTTTTTTTT".to_vec();
+        let flags = match number % 3 {
+            1 => {
+                barcode_umi[0] = b'N';
+                1
+            }
+            2 => {
+                barcode_umi[20] = b'N';
+                17 << 8
+            }
+            _ => 0,
+        };
+        if number % 17 == 0 {
+            barcode_umi.truncate(20);
+        }
+        let sequence = if number % 7 == 0 {
+            vec![b'N'; transcript.len()]
+        } else {
+            transcript.clone()
+        };
+        let record = |seq: &[u8]| {
+            format!(
+                "@r{number}\n{}\n+\n{}\n",
+                std::str::from_utf8(seq).unwrap(),
+                "I".repeat(seq.len())
+            )
+            .into_bytes()
+        };
+        let a = record(&barcode_umi);
+        let b = record(&sequence);
+        left.extend_from_slice(&a);
+        right.extend_from_slice(&b);
+        combined.extend_from_slice(&a);
+        combined.extend_from_slice(&b);
+        if number + 1 == limit {
+            prefix_ends = (left.len(), right.len(), combined.len());
+        }
+        if number < limit && number % 17 != 0 && number % 7 != 0 {
+            expected.push((number, flags));
+        }
+    }
+    fs::write(&r1, &left).unwrap();
+    fs::write(&r2, &right).unwrap();
+    fs::write(&interleaved, &combined).unwrap();
+    let broken_r1 = dir.path().join("limited-r1.fastq");
+    let broken_r2 = dir.path().join("limited-r2.fastq");
+    let broken_interleaved = dir.path().join("limited-interleaved.fastq");
+    let truncated = b"@unread\nACGT\n";
+    fs::write(&broken_r1, [&left[..prefix_ends.0], truncated].concat()).unwrap();
+    fs::write(&broken_r2, [&right[..prefix_ends.1], truncated].concat()).unwrap();
+    fs::write(
+        &broken_interleaved,
+        [&combined[..prefix_ends.2], truncated].concat(),
+    )
+    .unwrap();
+    drop((left, right, combined));
+    for (case, interleave, numbered, broken_tail) in [
+        ("paired-files", false, false, false),
+        ("interleaved", true, false, false),
+        ("numbered", false, true, false),
+        ("trailing-truncation", false, false, true),
+        ("interleaved-trailing-truncation", true, false, true),
+    ] {
+        let mut control = None;
+        for threads in [1, 4] {
+            let out = dir.path().join(format!("{case}-{threads}"));
+            let mut command = bus_command(&index, &out);
+            command.args([
+                "-x",
+                "10xv3",
+                "-t",
+                &threads.to_string(),
+                "-N",
+                &limit.to_string(),
+            ]);
+            if numbered {
+                command.arg("--num");
+            }
+            if interleave {
+                command.arg("--interleaved").arg(if broken_tail {
+                    &broken_interleaved
+                } else {
+                    &interleaved
+                });
+            } else {
+                command
+                    .arg(if broken_tail { &broken_r1 } else { &r1 })
+                    .arg(if broken_tail { &broken_r2 } else { &r2 });
+            }
+            let status =
+                command_status_with_timeout(&mut command, Duration::from_secs(30)).unwrap();
+            assert!(status.success(), "{case}/{threads}");
+            let (_, _, records) = read_bus_records(&out.join("output.bus"));
+            assert_eq!(records.len(), expected.len(), "{case}/{threads}");
+            for (record, &(number, flags)) in records.iter().zip(&expected) {
+                assert_eq!(
+                    record.flags,
+                    if numbered { number as u32 } else { flags },
+                    "{case}/{threads}/{number}"
+                );
+            }
+            let info = fs::read_to_string(out.join("run_info.json")).unwrap();
+            assert_eq!(json_u64(&info, "n_processed"), Some(limit as u64));
+            let files = ["output.bus", "matrix.ec", "transcripts.txt"]
+                .map(|name| fs::read(out.join(name)).unwrap());
+            if let Some(control) = &control {
+                assert_eq!(&files, control, "{case}: threaded output order");
+            } else {
+                control = Some(files);
+            }
+        }
+    }
+}
+
+#[test]
 fn bus_cli_writes_tenx_v3_bus_outputs() {
     let dir = tempfile::tempdir().expect("tempdir");
     let r1 = dir.path().join("r1.fastq");
@@ -2936,34 +3115,34 @@ fn bus_rejects_fastq_files_with_different_record_counts() {
     let (index, transcript) = build_tiny_index(&dir);
     let r1 = dir.path().join("r1.fastq");
     let r2 = dir.path().join("r2.fastq");
-    let out_dir = dir.path().join("mismatched_fastq_out");
-
-    write_fastq(
-        &r1,
-        &[
+    for (case, left_count, right_count) in [("first-longer", 2, 1), ("second-longer", 1, 2)] {
+        let barcodes: &[(&str, &[u8])] = &[
             ("cell_read", b"ACGTACGTACGTACGTTTTTTTTTTTTT"),
             ("cell_read2", b"TGCATGCATGCATGCATTTTTTTTTTTT"),
-        ],
-    );
-    write_fastq(&r2, &[("seq_read", &transcript)]);
-
-    let output = Command::new(env!("CARGO_BIN_EXE_kallistors"))
-        .arg("bus")
-        .arg("-i")
-        .arg(&index)
-        .arg("-o")
-        .arg(&out_dir)
-        .arg("-x")
-        .arg("10XV3")
-        .arg(&r1)
-        .arg(&r2)
-        .output()
-        .expect("run kallistors bus with mismatched FASTQs");
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("FASTQ files ended at different record counts")
-    );
+        ];
+        let sequences: &[(&str, &[u8])] = &[("seq_read", &transcript), ("seq_read2", &transcript)];
+        write_fastq(&r1, &barcodes[..left_count]);
+        write_fastq(&r2, &sequences[..right_count]);
+        for threads in [1, 4] {
+            let out = dir.path().join(format!("{case}-{threads}"));
+            let error = dir.path().join(format!("{case}-{threads}.stderr"));
+            let mut command = bus_command(&index, &out);
+            command
+                .args(["-x", "10xv3", "-t", &threads.to_string()])
+                .arg(&r1)
+                .arg(&r2)
+                .stderr(Stdio::from(fs::File::create(&error).unwrap()));
+            let status =
+                command_status_with_timeout(&mut command, Duration::from_secs(30)).unwrap();
+            assert!(!status.success(), "{case}/{threads}");
+            assert!(
+                fs::read_to_string(error)
+                    .unwrap()
+                    .contains("FASTQ files ended at different record counts"),
+                "{case}/{threads}"
+            );
+        }
+    }
 }
 
 #[test]

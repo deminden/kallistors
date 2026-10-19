@@ -33,12 +33,13 @@ pub(crate) fn write_bus_header(writer: &mut impl Write, bc_len: u32, umi_len: u3
 }
 
 pub(crate) fn write_bus_record(writer: &mut impl Write, record: &BusRecord) -> Result<()> {
-    writer.write_all(&record.barcode.to_le_bytes())?;
-    writer.write_all(&record.umi.to_le_bytes())?;
-    writer.write_all(&record.ec.to_le_bytes())?;
-    writer.write_all(&record.count.to_le_bytes())?;
-    writer.write_all(&record.flags.to_le_bytes())?;
-    writer.write_all(&0u32.to_le_bytes())?;
+    let mut bytes = [0u8; 32];
+    bytes[..8].copy_from_slice(&record.barcode.to_le_bytes());
+    bytes[8..16].copy_from_slice(&record.umi.to_le_bytes());
+    bytes[16..20].copy_from_slice(&record.ec.to_le_bytes());
+    bytes[20..24].copy_from_slice(&record.count.to_le_bytes());
+    bytes[24..28].copy_from_slice(&record.flags.to_le_bytes());
+    writer.write_all(&bytes)?;
     Ok(())
 }
 
@@ -53,21 +54,6 @@ pub(crate) fn write_matrix_ec(path: &Path, ec_list: &[Vec<u32>]) -> Result<()> {
             write!(writer, "{transcript}")?;
         }
         writeln!(writer)?;
-    }
-    Ok(())
-}
-
-pub(crate) fn write_transcripts(
-    path: &Path,
-    names: &[String],
-    onlist: Option<&[bool]>,
-) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
-    for (idx, name) in names.iter().enumerate() {
-        if onlist.is_some_and(|onlist| !onlist.get(idx).copied().unwrap_or(false)) {
-            continue;
-        }
-        writeln!(writer, "{name}")?;
     }
     Ok(())
 }
