@@ -1,0 +1,25 @@
+{
+  "python": "3.14.7",
+  "packages": {
+    "numpy": {
+      "version": "2.5.4",
+      "requires_python": ">=3.12",
+      "url": "https://pypi.org/project/numpy/2.5.4/"
+    },
+    "scipy": {
+      "version": "1.18.1",
+      "requires_python": ">=3.12",
+      "url": "https://pypi.org/project/scipy/1.18.1/"
+    },
+    "h5py": {
+      "version": "3.16.0",
+      "requires_python": ">=3.10",
+      "url": "https://pypi.org/project/h5py/3.16.0/"
+    },
+    "psutil": {
+      "version": "7.2.2",
+      "requires_python": ">=3.6",
+      "url": "https://pypi.org/project/psutil/7.2.2/"
+    }
+  }
+}

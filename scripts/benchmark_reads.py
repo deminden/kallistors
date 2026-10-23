@@ -41,7 +41,8 @@ def configurations(args, rows):
         raise ValueError('--group requires --suite')
     configs = []
     for spec in specs:
-        unknown = set(spec) - {'name', 'group', 'sample', 'subset', 'reads', 'reads2', 'index', 'reference_metadata', 'modes'}
+        unknown = set(spec) - {'name', 'group', 'sample', 'subset', 'reads', 'reads2', 'index', 'reference_metadata', 'modes',
+                               'strand', 'fragment_length', 'fragment_sd', 'expected_processed'}
         if unknown:
             raise ValueError(f'Unknown suite fields: {sorted(unknown)}')
         if type(spec.get('subset', False)) is not bool:
@@ -49,6 +50,13 @@ def configurations(args, rows):
         name = spec['name']
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name):
             raise ValueError(f'Invalid case name: {name}')
+        strand = spec.get('strand', 'unstranded')
+        mean, sd = spec.get('fragment_length', args.fragment_length), spec.get('fragment_sd', args.fragment_sd)
+        expected_processed = spec.get('expected_processed')
+        if (strand not in ('unstranded', 'forward', 'reverse')
+                or not 0 < mean < float('inf') or not 0 < sd < float('inf')
+                or expected_processed is not None and (type(expected_processed) is not int or expected_processed < 1)):
+            raise ValueError(f'Invalid strand, fragment model or input count: {name}')
         provenance = None
         if 'sample' in spec:
             row = rows[spec['sample']]
@@ -67,7 +75,7 @@ def configurations(args, rows):
                 reference = args.data / reference
             reference = json.loads(reference.read_text())
             if 'total_targets' not in reference:
-                reference['total_targets'] = reference.get('mature_targets', 0) + reference.get('nascent_targets', 0)
+                reference['total_targets'] = reference.get('targets', reference.get('mature_targets', 0) + reference.get('nascent_targets', 0))
         modes = spec.get('modes', args.modes.split(','))
         if not modes or len(set(modes)) != len(modes) or set(modes) - {'paired', 'single'}:
             raise ValueError(f'Invalid modes for {name}')
@@ -78,7 +86,8 @@ def configurations(args, rows):
                 configs.append({'id': f'{name}--{mode}--t{threads}', 'name': name,
                                 'mode': mode, 'threads': threads, 'index': str(index.resolve()),
                                 'reads': [str(p.resolve()) for p in reads[:2 if mode == 'paired' else 1]],
-                                'fragment_length': args.fragment_length, 'fragment_sd': args.fragment_sd,
+                                'fragment_length': mean, 'fragment_sd': sd, 'strand': strand,
+                                'expected_processed': expected_processed,
                                 'reference': reference, 'provenance': provenance})
     if not configs or len({c['id'] for c in configs}) != len(configs):
         raise ValueError('Empty or duplicate benchmark configurations')
@@ -87,6 +96,8 @@ def configurations(args, rows):
 
 def quant_command(binary, config, out):
     command = [str(binary), 'quant', '-t', str(config['threads']), '-i', config['index'], '-o', str(out)]
+    if config.get('strand', 'unstranded') != 'unstranded':
+        command.append('--rf-stranded' if config['strand'] == 'reverse' else '--fr-stranded')
     if config['mode'] == 'single':
         command += ['--single', '-l', str(config['fragment_length']), '-s', str(config['fragment_sd'])]
     return command + config['reads']
@@ -116,6 +127,8 @@ def ec_preflight(config, args, tools):
         subprocess.run(command, stdout=log, stderr=log, env=env, check=True)
     command = [str(tools['kallistors']), 'pseudoalign', '--threads', str(config['threads']),
                '--index', config['index'], '--reads', config['reads'][0], '--out', str(candidate)]
+    if config.get('strand', 'unstranded') != 'unstranded':
+        command.append('--rf-stranded' if config['strand'] == 'reverse' else '--fr-stranded')
     if config['mode'] == 'paired':
         command += ['--reads2', config['reads'][1]]
     else:
@@ -201,7 +214,10 @@ def main():
             for path in case['reads']:
                 if Path(path).name not in outputs or outputs[Path(path).name]['sha256'] != file_records[path]['sha256']:
                     raise ValueError(f'Prepared FASTQ changed or missing provenance: {path}')
-            case['expected_processed'] = prep.get('pairs_after', prep.get('selected_pairs'))
+            prepared_count = prep.get('pairs_after', prep.get('selected_pairs'))
+            if case['expected_processed'] is not None and case['expected_processed'] != prepared_count:
+                raise ValueError(f'Expected count differs from prepared inputs: {case["id"]}')
+            case['expected_processed'] = prepared_count
             if type(case['expected_processed']) is not int or case['expected_processed'] < 1:
                 raise ValueError(f'Invalid prepared pair count: {case["id"]}')
         scripts = Path(__file__).parent
@@ -267,9 +283,10 @@ def main():
             rounds = re.search(r'algorithm ran for ([\d,]+) rounds', log_text)
             row['reported_em_rounds'] = int(rounds[1].replace(',', '')) if rounds else None
             row['versions'] = {key: info.get(key) for key in ('kallisto_version', 'index_version', 'k-mer length', 'n_targets')}
+            expected_processed = config['expected_processed'] if config['expected_processed'] is not None else counters['n_processed']
             row.update(case=config['id'], tool=tool, phase=phase, replicate=replicate, counters=counters,
                        counters_match=(counters == control and counters['n_pseudoaligned'] == ec_total
-                                       and counters['n_processed'] == config.get('expected_processed', counters['n_processed'])
+                                       and counters['n_processed'] == expected_processed
                                        and (not config.get('reference') or info['n_targets'] == config['reference']['total_targets'])))
             rows.append(row)
             write_json(runs_path, rows)

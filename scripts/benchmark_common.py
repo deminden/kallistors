@@ -151,7 +151,7 @@ def phase_durations(events, elapsed):
     return result
 
 
-def run_process(command, prefix, memory=True, markers=None, environment=None):
+def run_process(command, prefix, memory=True, markers=None, environment=None, observer=None):
     prefix = Path(prefix)
     prefix.parent.mkdir(parents=True, exist_ok=True)
     memory_file = prefix.with_suffix('.memory.log')
@@ -167,6 +167,8 @@ def run_process(command, prefix, memory=True, markers=None, environment=None):
     start = time.perf_counter()
     process = subprocess.Popen(execution, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                env=environment or timing_environment(), start_new_session=os.name == 'posix')
+    if observer is not None:
+        observer.start(process.pid)
 
     def sample():
         while not stopped.wait(5):
@@ -189,6 +191,8 @@ def run_process(command, prefix, memory=True, markers=None, environment=None):
             while chunk := os.read(process.stdout.fileno(), 65536):
                 stamp = time.perf_counter() - start
                 log.write(chunk)
+                if observer is not None:
+                    log.flush()
                 if markers:
                     pending += chunk
                     for key, marker in markers.items():
@@ -209,6 +213,8 @@ def run_process(command, prefix, memory=True, markers=None, environment=None):
             process.wait()
         if previous_sigterm is not None:
             signal.signal(signal.SIGTERM, previous_sigterm)
+        if observer is not None:
+            observer.stop()
     if code:
         raise RuntimeError(f'Command failed ({code}); see {prefix.with_suffix(".log")}')
     result = {'command': list(map(str, command)), 'wall_seconds': elapsed,

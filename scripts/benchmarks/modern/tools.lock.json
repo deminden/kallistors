@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "tools": {
+    "salmon": {
+      "version": "2.8.0",
+      "repository": "COMBINE-lab/salmon",
+      "release": "https://github.com/COMBINE-lab/salmon/releases/tag/v2.8.0",
+      "commit": "ed926b8f6120c592ba13e696fe24732004ee0132",
+      "version_args": [
+        "--version"
+      ],
+      "assets": {
+        "aarch64-apple-darwin": {
+          "url": "https://github.com/COMBINE-lab/salmon/releases/download/v2.8.0/salmon-cli-aarch64-apple-darwin.tar.xz",
+          "sha256": "da6374035ffd30e9a0a8496545e8260a86abcb38bd2e588d7826c2eeb8671869",
+          "bytes": 2670772
+        },
+        "x86_64-unknown-linux-gnu": {
+          "url": "https://github.com/COMBINE-lab/salmon/releases/download/v2.8.0/salmon-cli-x86_64-unknown-linux-gnu.tar.xz",
+          "sha256": "10a7f7994df7ef0592ac191cc79a1abd41316463000b307647a9dcab21e1efa6",
+          "bytes": 3473636
+        },
+        "aarch64-unknown-linux-gnu": {
+          "url": "https://github.com/COMBINE-lab/salmon/releases/download/v2.8.0/salmon-cli-aarch64-unknown-linux-gnu.tar.xz",
+          "sha256": "3b2bf20b7a87c8207e83debd7aa0a6fefa85fb3b211ca069a394584dee1025c3",
+          "bytes": 3056416
+        }
+      }
+    },
+    "piscem": {
+      "version": "0.23.0",
+      "repository": "COMBINE-lab/piscem",
+      "release": "https://github.com/COMBINE-lab/piscem/releases/tag/v0.23.0",
+      "commit": "2331b20d2546a257a2de8bf9745a88a9b937081b",
+      "version_args": [
+        "--version"
+      ],
+      "assets": {
+        "aarch64-apple-darwin": {
+          "url": "https://github.com/COMBINE-lab/piscem/releases/download/v0.23.0/piscem-aarch64-apple-darwin.tar.xz",
+          "sha256": "18ed1bfac0b7a40cdfeafbdac2354276a3ed556759ef79549cd9eeadafff3c52",
+          "bytes": 3841328
+        },
+        "x86_64-unknown-linux-gnu": {
+          "url": "https://github.com/COMBINE-lab/piscem/releases/download/v0.23.0/piscem-x86_64-unknown-linux-gnu.tar.xz",
+          "sha256": "a768bc7da84a7412ae46adc91ac7f0d054d8f3dc92dcf42d599742e33bab0cb0",
+          "bytes": 3846220
+        },
+        "aarch64-unknown-linux-gnu": {
+          "url": "https://github.com/COMBINE-lab/piscem/releases/download/v0.23.0/piscem-aarch64-unknown-linux-gnu.tar.xz",
+          "sha256": "4c4fd43395761888c6e327331603be88035e801ab1bc58438700bee87041fce6",
+          "bytes": 3822436
+        }
+      }
+    },
+    "piscem-infer": {
+      "version": "0.7.0",
+      "repository": "COMBINE-lab/piscem-infer",
+      "release": "https://github.com/COMBINE-lab/piscem-infer/releases/tag/v0.7.0",
+      "commit": "bdcfbe79209dd453739f7eaa2ffcc9f45b01e17a",
+      "version_args": [
+        "--version"
+      ],
+      "assets": {
+        "aarch64-apple-darwin": {
+          "url": "https://github.com/COMBINE-lab/piscem-infer/releases/download/v0.7.0/piscem-infer-aarch64-apple-darwin.tar.xz",
+          "sha256": "a5c0100407e5f1a8aab1f8f79965ef005a0807a5096558521684fb7af21fd084",
+          "bytes": 840576
+        },
+        "x86_64-unknown-linux-gnu": {
+          "url": "https://github.com/COMBINE-lab/piscem-infer/releases/download/v0.7.0/piscem-infer-x86_64-unknown-linux-gnu.tar.xz",
+          "sha256": "5f331c243f0ac5365877e8ab374c80cc56612f5e8d6dc6791242f1979625711c",
+          "bytes": 1085268
+        },
+        "aarch64-unknown-linux-gnu": {
+          "url": "https://github.com/COMBINE-lab/piscem-infer/releases/download/v0.7.0/piscem-infer-aarch64-unknown-linux-gnu.tar.xz",
+          "sha256": "ab03ebf3bd3af027550fd255d6243f59643b07e4d321cc88877ed860a2f63803",
+          "bytes": 785624
+        }
+      }
+    },
+    "alevin-fry": {
+      "version": "0.18.3",
+      "repository": "COMBINE-lab/alevin-fry",
+      "release": "https://github.com/COMBINE-lab/alevin-fry/releases/tag/v0.18.3",
+      "commit": "ad05742d274230f9141b2eabeebd1c1b31692199",
+      "version_args": [
+        "--version"
+      ],
+      "assets": {
+        "aarch64-apple-darwin": {
+          "url": "https://github.com/COMBINE-lab/alevin-fry/releases/download/v0.18.3/alevin-fry-aarch64-apple-darwin.tar.xz",
+          "sha256": "fac37c696379a7bb723c9e80d328646294b4ee1f4b1abbd4aff2d38c6703446c",
+          "bytes": 1198424
+        },
+        "x86_64-unknown-linux-gnu": {
+          "url": "https://github.com/COMBINE-lab/alevin-fry/releases/download/v0.18.3/alevin-fry-x86_64-unknown-linux-gnu.tar.xz",
+          "sha256": "8f0d1d61643f8224b4267fffc106eee8639cedd7e66c5776d15ec6a25806d652",
+          "bytes": 1477856
+        },
+        "aarch64-unknown-linux-gnu": {
+          "url": "https://github.com/COMBINE-lab/alevin-fry/releases/download/v0.18.3/alevin-fry-aarch64-unknown-linux-gnu.tar.xz",
+          "sha256": "e00184a2417706cfb4ff906bbf3b42a8e1beca4272f9983dbf8c8328176bf7b8",
+          "bytes": 1372652
+        }
+      }
+    },
+    "cellranger": {
+      "version": "10.1.0",
+      "platforms": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "execution": "deferred at user request",
+      "distribution": "User-provided 10x Genomics archive; record archive SHA-256 when supplied; not redistributed",
+      "source": "https://www.10xgenomics.com/support/software/cell-ranger/downloads"
+    },
+    "bustools": {
+      "version": "0.45.1",
+      "repository": "BUStools/bustools",
+      "source": {
+        "url": "https://codeload.github.com/BUStools/bustools/tar.gz/refs/tags/v0.45.1",
+        "sha256": "d6b3ce8c700335aa10e28421da1edcedd3efa55e8390dd2729ff1d43ead0e642",
+        "bytes": 2766078
+      },
+      "version_args": [
+        "version"
+      ]
+    },
+    "fastp": {
+      "version": "1.4.0",
+      "repository": "OpenGene/fastp",
+      "source": {
+        "url": "https://codeload.github.com/OpenGene/fastp/tar.gz/refs/tags/v1.4.0",
+        "sha256": "28c0537e9d1f32f5a5c404562e6a282bf373b034a4c3a3610d9aa31d6429b550",
+        "bytes": 117999
+      },
+      "version_args": [
+        "--version"
+      ]
+    }
+  }
+}
