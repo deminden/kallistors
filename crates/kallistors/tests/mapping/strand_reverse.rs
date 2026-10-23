@@ -181,3 +181,76 @@ fn paired_strand_flags_select_expected_transcripts_in_both_cli_commands() {
         }
     }
 }
+
+#[test]
+fn strand_diagnostics_load_annotations_without_a_fragment_filter() {
+    use std::fs;
+    use std::process::Command;
+
+    let dataset = helpers::build_synthetic_index();
+    let dir = tempfile::tempdir().unwrap();
+    let reads = dir.path().join("reads.fq");
+    let names = dir.path().join("names.txt");
+    fs::write(
+        &reads,
+        helpers::to_fastq(&[
+            dataset.transcripts[2][..50].to_vec(),
+            revcomp(&dataset.transcripts[3][..50]),
+        ]),
+    )
+    .unwrap();
+    fs::write(&names, "r1\nr2\n").unwrap();
+    for command in ["trace-reads", "trace-compare"] {
+        for flag in ["--fr-stranded", "--rf-stranded"] {
+            for loader in [
+                None,
+                Some("--kallisto-direct-kmer"),
+                Some("--kallisto-fallback"),
+            ] {
+                let case = format!("{command}-{flag}-{loader:?}");
+                let out = dir.path().join(&case);
+                let mut cmd = Command::new(env!("CARGO_BIN_EXE_kallistors"));
+                cmd.arg(command)
+                    .arg("--index")
+                    .arg(&dataset.index_path)
+                    .arg("--reads")
+                    .arg(&reads)
+                    .arg("--read-list")
+                    .arg(&names)
+                    .arg("--out")
+                    .arg(&out)
+                    .arg(flag);
+                if let Some(loader) = loader {
+                    cmd.arg(loader);
+                }
+                let result = cmd.output().unwrap();
+                assert!(
+                    result.status.success(),
+                    "{case}: {}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                let table = fs::read_to_string(&out).unwrap();
+                let mut lines = table.lines();
+                let header: Vec<_> = lines.next().unwrap().split('\t').collect();
+                let columns: &[&str] = if command == "trace-reads" {
+                    &["ec_after_strand"]
+                } else {
+                    &["ec_baseline", "ec_fast"]
+                };
+                let rows: Vec<Vec<_>> = lines.map(|row| row.split('\t').collect()).collect();
+                assert_eq!(rows.len(), 2, "{case}");
+                let expected = if flag == "--fr-stranded" {
+                    ["2", "-"]
+                } else {
+                    ["-", "3"]
+                };
+                for column in columns {
+                    let col = header.iter().position(|v| v == column).unwrap();
+                    for (row, expected) in rows.iter().zip(expected) {
+                        assert_eq!(row[col], expected, "{case}/{column}");
+                    }
+                }
+            }
+        }
+    }
+}

@@ -367,8 +367,10 @@ pub fn debug_minimizer_lookup(
                                 special_note = Some("special_abundant_strand_skip");
                                 continue;
                             }
-                            let block_idx =
-                                block_index_for_position(index.ec_blocks[uid].as_slice(), 0);
+                            let block_idx = block_index_for_position(
+                                index.flat_ec.owned_ec_blocks[uid].as_ref(),
+                                0,
+                            );
                             matched = Some((uid, 0usize, block_idx, None, used_revcomp));
                             special_note = Some("special_abundant_match");
                             break;
@@ -399,8 +401,10 @@ pub fn debug_minimizer_lookup(
                             continue;
                         }
                         let unitig_id = index.unitig_count() + uid;
-                        let block_idx =
-                            block_index_for_position(index.ec_blocks[unitig_id].as_slice(), 0);
+                        let block_idx = block_index_for_position(
+                            index.flat_ec.owned_ec_blocks[unitig_id].as_ref(),
+                            0,
+                        );
                         matched = Some((unitig_id, 0usize, block_idx, Some(true), used_revcomp));
                         break;
                     } else {
@@ -424,7 +428,7 @@ pub fn debug_minimizer_lookup(
                                 && &unitig[start..start + index.k] == kmer
                             {
                                 let block_idx = block_index_for_position(
-                                    index.ec_blocks[uid].as_slice(),
+                                    index.flat_ec.owned_ec_blocks[uid].as_ref(),
                                     start,
                                 );
                                 matched = Some((uid, start, block_idx, Some(false), false));
@@ -439,7 +443,7 @@ pub fn debug_minimizer_lookup(
                                     && &unitig[start..start + index.k] == rev_buf.as_slice()
                                 {
                                     let block_idx = block_index_for_position(
-                                        index.ec_blocks[uid].as_slice(),
+                                        index.flat_ec.owned_ec_blocks[uid].as_ref(),
                                         start,
                                     );
                                     matched = Some((uid, start, block_idx, Some(false), true));
@@ -453,7 +457,7 @@ pub fn debug_minimizer_lookup(
                             for start in start_low..=start_high {
                                 if allow_forward_base && &unitig[start..start + index.k] == kmer {
                                     let block_idx = block_index_for_position(
-                                        index.ec_blocks[uid].as_slice(),
+                                        index.flat_ec.owned_ec_blocks[uid].as_ref(),
                                         start,
                                     );
                                     matched = Some((uid, start, block_idx, Some(false), false));
@@ -465,7 +469,7 @@ pub fn debug_minimizer_lookup(
                                     && &unitig[start..start + index.k] == rev_buf.as_slice()
                                 {
                                     let block_idx = block_index_for_position(
-                                        index.ec_blocks[uid].as_slice(),
+                                        index.flat_ec.owned_ec_blocks[uid].as_ref(),
                                         start,
                                     );
                                     matched = Some((uid, start, block_idx, Some(false), true));

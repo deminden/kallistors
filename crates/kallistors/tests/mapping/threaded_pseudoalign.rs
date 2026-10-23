@@ -12,6 +12,90 @@ use kallistors::pseudoalign::{
 use crate::helpers;
 
 #[test]
+fn completed_bias_sampling_preserves_ecs_samples_and_fragment_histograms() {
+    use kallistors::pseudoalign::{
+        StrandSpecific, build_bifrost_index_with_positions,
+        pseudoalign_paired_bifrost_debug_with_options,
+        pseudoalign_single_end_bifrost_debug_with_options,
+    };
+    let dataset = helpers::build_synthetic_index();
+    let index = build_bifrost_index_with_positions(&dataset.index_path, true).unwrap();
+    let reads = to_fastq(&synthesize_reads(&dataset.transcripts, 50, 512));
+    let (left, right) = to_fastq_pairs(&synthesize_paired_reads(&dataset.transcripts, 50, 90, 512));
+    for mode in [None, Some(StrandSpecific::FR), Some(StrandSpecific::RF)] {
+        for limit in [0, 1, 3] {
+            let options = PseudoalignOptions {
+                bias: true,
+                max_bias: limit,
+                fragment_length_samples: 1,
+                strand_specific: mode,
+                ..Default::default()
+            };
+            let (expected, _) = pseudoalign_single_end_bifrost_debug_with_options(
+                &index,
+                &mut FastqReader::new(Cursor::new(&reads)),
+                Strand::Unstranded,
+                0,
+                None,
+                options,
+            )
+            .unwrap();
+            for threads in [1, 8] {
+                let got = pseudoalign_single_end_bifrost_with_options_threaded(
+                    &index,
+                    &mut FastqReader::new(Cursor::new(&reads)),
+                    Strand::Unstranded,
+                    None,
+                    options,
+                    threads,
+                )
+                .unwrap();
+                assert_eq!(to_ec_map(&got), to_ec_map(&expected));
+                assert_eq!(got.reads_processed, expected.reads_processed);
+                assert_eq!(
+                    got.bias.as_ref().unwrap().counts,
+                    expected.bias.as_ref().unwrap().counts
+                );
+                assert_eq!(
+                    got.bias.as_ref().unwrap().total,
+                    expected.bias.as_ref().unwrap().total
+                );
+            }
+            let (expected, _) = pseudoalign_paired_bifrost_debug_with_options(
+                &index,
+                &mut FastqReader::new(Cursor::new(&left)),
+                &mut FastqReader::new(Cursor::new(&right)),
+                Strand::Unstranded,
+                0,
+                options,
+            )
+            .unwrap();
+            let got = pseudoalign_paired_bifrost_with_options(
+                &index,
+                &mut FastqReader::new(Cursor::new(&left)),
+                &mut FastqReader::new(Cursor::new(&right)),
+                Strand::Unstranded,
+                options,
+            )
+            .unwrap();
+            assert_eq!(to_ec_map(&got), to_ec_map(&expected));
+            assert_eq!(got.fragment_length_hist, expected.fragment_length_hist);
+            assert_eq!(
+                got.bias.as_ref().unwrap().counts,
+                expected.bias.as_ref().unwrap().counts
+            );
+            assert_eq!(
+                got.bias.as_ref().unwrap().total,
+                expected.bias.as_ref().unwrap().total
+            );
+            if mode.is_none() {
+                assert_eq!(got.bias.unwrap().total, limit as u64);
+            }
+        }
+    }
+}
+
+#[test]
 fn threaded_single_end_matches_single_thread() {
     let dataset = helpers::build_synthetic_index();
     let index = build_bifrost_index(&dataset.index_path).expect("bifrost index");
@@ -99,7 +183,7 @@ fn threaded_paired_matches_single_thread() {
 }
 
 #[test]
-fn paired_length_error_releases_backpressured_producer() {
+fn threaded_input_errors_release_backpressured_producers() {
     use std::fs::{self, File};
     use std::process::{Command, Stdio};
     use std::time::Duration;
@@ -138,6 +222,27 @@ fn paired_length_error_releases_backpressured_producer() {
                 .contains("paired FASTQ length mismatch")
         );
     }
+    let broken = dir.path().join("broken.fq");
+    let mut truncated = fs::read(&long).unwrap();
+    truncated.extend_from_slice(b"@broken\nACGT\n");
+    fs::write(&broken, truncated).unwrap();
+    let status = helpers::command_status_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_kallistors"))
+            .arg("pseudoalign")
+            .arg("--index")
+            .arg(&dataset.index_path)
+            .arg("--reads")
+            .arg(&broken)
+            .arg("--out")
+            .arg(dir.path().join("single.tsv"))
+            .args(["--threads", "4"])
+            .stdout(Stdio::null())
+            .stderr(File::create(&log).unwrap()),
+        Duration::from_secs(10),
+    )
+    .expect("single-end input errors must propagate after queued batches drain");
+    assert!(!status.success());
+    assert!(fs::read_to_string(log).unwrap().contains("truncated FASTQ"));
 }
 
 fn to_ec_map(counts: &kallistors::pseudoalign::EcCounts) -> HashMap<Vec<u32>, u32> {

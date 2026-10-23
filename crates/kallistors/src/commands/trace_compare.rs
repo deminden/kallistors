@@ -207,22 +207,6 @@ pub fn run(
     let load_positional_info = filter
         .map(|v| !v.single_overhang && v.fragment_length > 0)
         .unwrap_or(false);
-    let index = if load_positional_info {
-        if kallisto_direct_kmer {
-            kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(index, true)
-        } else if kallisto_fallback {
-            kallistors::pseudoalign::build_bifrost_index_with_positions_and_kmer(index, true)
-        } else {
-            kallistors::pseudoalign::build_bifrost_index_with_positions(index, true)
-        }
-    } else if kallisto_direct_kmer {
-        kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(index, false)
-    } else if kallisto_fallback {
-        kallistors::pseudoalign::build_bifrost_index_with_kmer(index)
-    } else {
-        kallistors::pseudoalign::build_bifrost_index(index)
-    }?;
-
     let baseline = kallistors::pseudoalign::PseudoalignOptions {
         min_range,
         do_union,
@@ -243,6 +227,7 @@ pub fn run(
         fragment_length_samples: 10_000,
         investigation: kallistors::pseudoalign::InvestigationOptions::default(),
     };
+    let index = super::build_mapping_index(index, load_positional_info, 1, baseline, true)?;
     let mut fast_investigation = super::investigation_options_from_env();
     fast_investigation.trace_fast_path = true;
     let fast = kallistors::pseudoalign::PseudoalignOptions {

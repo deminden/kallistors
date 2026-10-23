@@ -2,38 +2,66 @@
 use kallistors::pseudoalign::{BifrostIndex, PseudoalignOptions, Strand};
 use std::borrow::Cow;
 use std::sync::Mutex;
+mod key;
+use key::{QueryKey, StoredKey};
 
 const SHARDS: usize = 64;
 const SLOTS: usize = 8192;
-const WAYS: usize = 2;
+const WAYS: usize = 3;
 struct Entry<'index> {
     hash: usize,
-    sequence: Vec<u8>,
+    sequence: StoredKey,
     ec: Option<Cow<'index, [u32]>>,
 }
-#[derive(Default)]
 struct Bucket<'index> {
     entries: [Option<Entry<'index>>; WAYS],
+    // Three two-bit way IDs in least-to-most recently used order.
     replace: usize,
 }
-pub(super) struct QueryCache<'index> {
+impl Default for Bucket<'_> {
+    fn default() -> Self {
+        Self {
+            entries: Default::default(),
+            replace: 0b10_01_00,
+        }
+    }
+}
+impl Bucket<'_> {
+    #[inline]
+    fn touch(&mut self, way: usize) {
+        let least = self.replace & 3;
+        let middle = (self.replace >> 2) & 3;
+        let most = self.replace >> 4;
+        if way == least {
+            self.replace = middle | (most << 2) | (way << 4);
+        } else if way == middle {
+            self.replace = least | (most << 2) | (way << 4);
+        }
+    }
+}
+pub(in crate::commands::bus) struct QueryCache<'index> {
     index: &'index BifrostIndex,
     options: PseudoalignOptions,
     shards: Vec<Mutex<Vec<Bucket<'index>>>>,
 }
 impl<'index> QueryCache<'index> {
-    pub(super) fn new(index: &'index BifrostIndex, options: PseudoalignOptions) -> Self {
+    pub(in crate::commands::bus) fn new(
+        index: &'index BifrostIndex,
+        options: PseudoalignOptions,
+    ) -> Self {
         Self {
             index,
             options,
             shards: (0..SHARDS).map(|_| Mutex::new(Vec::new())).collect(),
         }
     }
-    pub(super) fn lookup(&self, sequence: &[u8]) -> Option<Cow<'index, [u32]>> {
+    pub(in crate::commands::bus) fn lookup(&self, sequence: &[u8]) -> Option<Cow<'index, [u32]>> {
         if sequence.len() > 256 {
             return self.map(sequence);
         }
-        let hash = query_hash(sequence);
+        let mut compressed = [0; 64];
+        let key = QueryKey::new(sequence, &mut compressed);
+        let hash = key.hash();
         let shard = &self.shards[hash & (SHARDS - 1)];
         let slot = (hash >> SHARDS.trailing_zeros()) & (SLOTS - 1);
         {
@@ -42,10 +70,10 @@ impl<'index> QueryCache<'index> {
                 && let Some(way) = bucket.entries.iter().position(|entry| {
                     entry
                         .as_ref()
-                        .is_some_and(|entry| entry.hash == hash && entry.sequence == sequence)
+                        .is_some_and(|entry| entry.hash == hash && key.matches(&entry.sequence))
                 })
             {
-                bucket.replace = way ^ 1;
+                bucket.touch(way);
                 return bucket.entries[way]
                     .as_ref()
                     .expect("matched cache entry")
@@ -61,17 +89,16 @@ impl<'index> QueryCache<'index> {
                 entries.resize_with(SLOTS, Bucket::default);
             }
             let bucket = &mut entries[slot];
-            let way = bucket.replace;
-            bucket.replace ^= 1;
+            let way = bucket.replace & 3;
+            bucket.touch(way);
             if let Some(entry) = &mut bucket.entries[way] {
                 entry.hash = hash;
-                entry.sequence.clear();
-                entry.sequence.extend_from_slice(sequence);
+                key.replace(&mut entry.sequence);
                 entry.ec.clone_from(&ec);
             } else {
                 bucket.entries[way] = Some(Entry {
                     hash,
-                    sequence: sequence.to_vec(),
+                    sequence: key.stored(),
                     ec: ec.clone(),
                 });
             }
@@ -79,6 +106,9 @@ impl<'index> QueryCache<'index> {
         ec
     }
     fn map(&self, sequence: &[u8]) -> Option<Cow<'index, [u32]>> {
+        // The cache belongs to one run with a fixed strand policy. The counting
+        // API applies that policy before either positive or negative answers
+        // enter the cache, without constructing a diagnostic read trace.
         kallistors::pseudoalign::ec_for_sequence_bifrost_counting(
             self.index,
             sequence,
@@ -95,18 +125,13 @@ fn cacheable_ec(ec: &Option<Cow<'_, [u32]>>) -> bool {
     }
 }
 
+#[cfg(test)]
 fn query_hash(sequence: &[u8]) -> usize {
-    let mut hash = sequence.len() as u64;
-    let (words, tail) = sequence.as_chunks::<8>();
-    for word in words {
-        hash = (hash ^ u64::from_le_bytes(*word))
-            .wrapping_mul(0x9e3779b97f4a7c15)
-            .rotate_left(27);
-    }
-    for &base in tail {
-        hash = (hash ^ u64::from(base)).wrapping_mul(0x100000001b3);
-    }
-    (hash ^ (hash >> 32)) as usize
+    QueryKey::new(sequence, &mut [0; 64]).hash()
+}
+#[cfg(test)]
+fn stored_key(sequence: &[u8]) -> StoredKey {
+    QueryKey::new(sequence, &mut [0; 64]).stored()
 }
 
 #[cfg(test)]
@@ -114,6 +139,21 @@ mod tests {
     use super::*;
     #[test]
     fn full_sequence_check_survives_collisions_and_replacements() {
+        let mut bucket = Bucket::default();
+        let mut expected = vec![0, 1, 2];
+        for way in [0, 1, 2, 0, 2, 1, 1, 2, 0] {
+            expected.retain(|&old| old != way);
+            expected.push(way);
+            bucket.touch(way);
+            assert_eq!(
+                [
+                    bucket.replace & 3,
+                    (bucket.replace >> 2) & 3,
+                    bucket.replace >> 4
+                ],
+                expected.as_slice()
+            );
+        }
         let large: Vec<u32> = (0..257).collect();
         assert!(cacheable_ec(&Some(Cow::Borrowed(&large))));
         assert!(!cacheable_ec(&Some(Cow::Owned(large))));
@@ -143,8 +183,8 @@ mod tests {
         kallistors::index::build_index(&path, &[fasta], Default::default()).unwrap();
         let index = kallistors::pseudoalign::build_bifrost_index_threaded(&path, 1).unwrap();
         let cache = QueryCache::new(&index, Default::default());
-        let a = &a[70..170];
-        let b = &b[70..170];
+        let a = &a[70..161];
+        let b = &b[70..161];
         assert_eq!(cache.map(a).unwrap().as_ref(), &[0]);
         assert_eq!(cache.map(b).unwrap().as_ref(), &[1]);
         let hash = query_hash(a);
@@ -157,7 +197,7 @@ mod tests {
             for entry in &mut shard.lock().unwrap()[slot].entries {
                 *entry = Some(Entry {
                     hash,
-                    sequence: sequence.to_vec(),
+                    sequence: stored_key(sequence),
                     ec: ec.clone(),
                 });
             }
@@ -169,7 +209,7 @@ mod tests {
                     for entry in &mut shard.lock().unwrap()[slot].entries {
                         *entry = Some(Entry {
                             hash,
-                            sequence: b.to_vec(),
+                            sequence: stored_key(b),
                             ec: Some(Cow::Borrowed(&[1])),
                         });
                     }

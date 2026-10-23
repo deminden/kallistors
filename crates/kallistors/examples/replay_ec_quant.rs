@@ -21,6 +21,7 @@ fn main() -> anyhow::Result<()> {
         args.len() == 7 || args.len() == 8,
         "Usage: replay_ec_quant EC.tsv LENGTHS HISTOGRAM OUTPUT.tsv THREADS MAX_ITER_OR_DEFAULT [MIN_ROUNDS]"
     );
+    kallistors::timing::set_enabled(env::var_os("KALLISTORS_TIMINGS").is_some());
     let input = load_ec_counts(Path::new(&args[1]))?;
     let lengths = integers(&args[2])?;
     let histogram = integers(&args[3])?;

@@ -44,18 +44,55 @@ pub(crate) fn write_bus_record(writer: &mut impl Write, record: &BusRecord) -> R
 }
 
 pub(crate) fn write_matrix_ec(path: &Path, ec_list: &[Vec<u32>]) -> Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
+    let mut writer = File::create(path)?;
+    let mut buffer = Vec::with_capacity(64 * 1024);
+    // Keep room for a complete usize and delimiters at every boundary,
+    // including empty ECs and lines longer than the output buffer.
+    const FLUSH_AT: usize = 64 * 1024 - 32;
     for (idx, ec) in ec_list.iter().enumerate() {
-        write!(writer, "{idx}\t")?;
+        append_decimal(&mut buffer, idx as u64);
+        buffer.push(b'\t');
         for (tx_idx, transcript) in ec.iter().enumerate() {
             if tx_idx > 0 {
-                writer.write_all(b",")?;
+                buffer.push(b',');
             }
-            write!(writer, "{transcript}")?;
+            append_decimal(&mut buffer, u64::from(*transcript));
+            if buffer.len() >= FLUSH_AT {
+                writer.write_all(&buffer)?;
+                buffer.clear();
+            }
         }
-        writeln!(writer)?;
+        buffer.push(b'\n');
+        if buffer.len() >= FLUSH_AT {
+            writer.write_all(&buffer)?;
+            buffer.clear();
+        }
     }
+    writer.write_all(&buffer)?;
     Ok(())
+}
+
+#[inline]
+fn append_decimal(buffer: &mut Vec<u8>, mut value: u64) {
+    const PAIRS: &[u8; 200] = b"00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
+    let mut digits = [0u8; 20];
+    let mut start = digits.len();
+    while value >= 100 {
+        let next = value / 100;
+        let pair = (value - next * 100) as usize * 2;
+        start -= 2;
+        digits[start..start + 2].copy_from_slice(&PAIRS[pair..pair + 2]);
+        value = next;
+    }
+    if value >= 10 {
+        start -= 2;
+        let pair = value as usize * 2;
+        digits[start..start + 2].copy_from_slice(&PAIRS[pair..pair + 2]);
+    } else {
+        start -= 1;
+        digits[start] = b'0' + value as u8;
+    }
+    buffer.extend_from_slice(&digits[start..]);
 }
 
 pub(crate) fn write_cells<'a>(

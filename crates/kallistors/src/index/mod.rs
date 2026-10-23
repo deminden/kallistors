@@ -494,33 +494,25 @@ fn read_i32_le<R: Read>(reader: &mut R) -> Result<i32> {
 pub(crate) struct EcBlock {
     pub lb: u32,
     pub ub: u32,
-    pub ec: Vec<u32>,
-    pub positions: Option<Vec<PositionSet>>,
-    pub strands: Option<Vec<u8>>,
+    pub ec: Box<[u32]>,
+    pub positions: Option<PositionSets>,
 }
 
 pub(crate) enum PositionSet {
     Single(u32),
-    Many(Vec<u32>),
+    Many(Box<[u32]>),
 }
 
 impl PositionSet {
     fn from_values(mut values: Vec<u32>) -> Self {
         match values.len() {
-            0 => Self::Many(values),
+            0 => Self::Many(values.into_boxed_slice()),
             1 => Self::Single(values[0]),
             _ => {
                 values.sort_unstable();
                 values.dedup();
-                Self::Many(values)
+                Self::Many(values.into_boxed_slice())
             }
-        }
-    }
-
-    pub(crate) fn contains(&self, value: u32) -> bool {
-        match self {
-            Self::Single(raw) => *raw == value,
-            Self::Many(values) => values.binary_search(&value).is_ok(),
         }
     }
 
@@ -530,22 +522,11 @@ impl PositionSet {
             Self::Many(values) => Some((*values.first()?, *values.last()?)),
         }
     }
-
-    pub(crate) fn for_each(&self, mut f: impl FnMut(u32)) {
-        match self {
-            Self::Single(raw) => f(*raw),
-            Self::Many(values) => {
-                for &raw in values {
-                    f(raw);
-                }
-            }
-        }
-    }
 }
 
 fn read_block_array_ecs<R: Read>(reader: &mut R) -> Result<Vec<Vec<u32>>> {
     let blocks = read_block_array_blocks(reader)?;
-    Ok(blocks.into_iter().map(|b| b.ec).collect())
+    Ok(blocks.into_iter().map(|b| b.ec.into_vec()).collect())
 }
 
 pub(crate) fn read_block_array_blocks<R: Read>(reader: &mut R) -> Result<Vec<EcBlock>> {
@@ -559,9 +540,8 @@ pub(crate) fn read_block_array_blocks<R: Read>(reader: &mut R) -> Result<Vec<EcB
             Ok(vec![EcBlock {
                 lb,
                 ub,
-                ec,
+                ec: ec.into_boxed_slice(),
                 positions: None,
-                strands: None,
             }])
         }
         2 => {
@@ -574,9 +554,8 @@ pub(crate) fn read_block_array_blocks<R: Read>(reader: &mut R) -> Result<Vec<EcB
                 ecs.push(EcBlock {
                     lb,
                     ub,
-                    ec,
+                    ec: ec.into_boxed_slice(),
                     positions: None,
-                    strands: None,
                 });
             }
             Ok(ecs)
@@ -585,8 +564,9 @@ pub(crate) fn read_block_array_blocks<R: Read>(reader: &mut R) -> Result<Vec<EcB
     }
 }
 
-pub(crate) fn read_block_array_blocks_with_positions<R: Read>(
-    reader: &mut R,
+#[inline(never)]
+pub(crate) fn read_block_array_blocks_with_positions(
+    reader: &mut Cursor<&[u8]>,
 ) -> Result<Vec<EcBlock>> {
     let flag = read_u8(reader)?;
     match flag {
@@ -594,13 +574,12 @@ pub(crate) fn read_block_array_blocks_with_positions<R: Read>(
         1 => {
             let lb = read_u32_le(reader)?;
             let ub = read_u32_le(reader)?;
-            let (ec, positions, strands) = read_sparse_vector_with_positions(reader)?;
+            let (ec, positions) = read_sparse_vector_with_positions(reader)?;
             Ok(vec![EcBlock {
                 lb,
                 ub,
                 ec,
                 positions: Some(positions),
-                strands: Some(strands),
             }])
         }
         2 => {
@@ -609,13 +588,12 @@ pub(crate) fn read_block_array_blocks_with_positions<R: Read>(
             for _ in 0..count {
                 let lb = read_u32_le(reader)?;
                 let ub = read_u32_le(reader)?;
-                let (ec, positions, strands) = read_sparse_vector_with_positions(reader)?;
+                let (ec, positions) = read_sparse_vector_with_positions(reader)?;
                 ecs.push(EcBlock {
                     lb,
                     ub,
                     ec,
                     positions: Some(positions),
-                    strands: Some(strands),
                 });
             }
             Ok(ecs)
@@ -650,40 +628,39 @@ pub(crate) fn read_sparse_vector_ec<R: Read>(reader: &mut R) -> Result<Vec<u32>>
     Ok(ids)
 }
 
-pub(crate) fn read_sparse_vector_with_positions<R: Read>(
-    reader: &mut R,
-) -> Result<(Vec<u32>, Vec<PositionSet>, Vec<u8>)> {
-    let roaring_size = read_u64_le(reader)? as usize;
-    let mut buf = vec![0u8; roaring_size];
-    reader.read_exact(&mut buf)?;
-    let ids = unsafe { deserialize_roaring_to_vec(&buf) }
-        .ok_or_else(|| Error::InvalidFormat("failed to deserialize roaring bitmap".into()))?;
+// Positional nodes are already buffered by their loader. Keep serialized
+// bitmap payloads borrowed while decoding them instead of copying each group
+// through another temporary buffer. Every range remains checked before use.
+fn read_bitmap_slice<'a>(reader: &mut Cursor<&'a [u8]>) -> Result<&'a [u8]> {
+    let size = read_u64_le(reader)? as usize;
+    let start = reader.position() as usize;
+    let end = start.checked_add(size).ok_or_else(node_eof)?;
+    let bytes = *reader.get_ref();
+    let bitmap = bytes.get(start..end).ok_or_else(node_eof)?;
+    reader.set_position(end as u64);
+    Ok(bitmap)
+}
 
+pub(crate) fn read_sparse_vector_with_positions(
+    reader: &mut Cursor<&[u8]>,
+) -> Result<(Box<[u32]>, PositionSets)> {
+    let ids = unsafe { deserialize_roaring_to_box(read_bitmap_slice(reader)?) }
+        .ok_or_else(|| Error::InvalidFormat("failed to deserialize roaring bitmap".into()))?;
     let v_size = read_u64_le(reader)? as usize;
+    if ids.len() == v_size
+        && let Some(positions) = read_native_singletons(reader, v_size)
+    {
+        return Ok((ids, positions));
+    }
     let mut positions = Vec::with_capacity(v_size);
-    let mut strands = Vec::with_capacity(v_size);
-    let mut pbuf = Vec::new();
     for _ in 0..v_size {
-        let p_size = read_u64_le(reader)? as usize;
-        pbuf.resize(p_size, 0);
-        reader.read_exact(&mut pbuf)?;
-        let raw_positions = unsafe { deserialize_roaring_to_vec(&pbuf) }
+        let raw_positions = deserialize_position_set(read_bitmap_slice(reader)?)
             .ok_or_else(|| Error::InvalidFormat("failed to deserialize roaring bitmap".into()))?;
-        let raw_positions = PositionSet::from_values(raw_positions);
-        let (min, max) = raw_positions
+        raw_positions
             .min_max()
             .ok_or_else(|| Error::InvalidFormat("empty position bitmap".into()))?;
-        let min_sense = (min & 0x7fff_ffff) == min;
-        let max_sense = (max & 0x7fff_ffff) == max;
-        let strand = if min_sense == max_sense {
-            if min_sense { 1 } else { 0 }
-        } else {
-            2
-        };
         positions.push(raw_positions);
-        strands.push(strand);
     }
-
     let mut ids = ids;
     if ids.len() != v_size {
         ids.sort_unstable();
@@ -691,14 +668,100 @@ pub(crate) fn read_sparse_vector_with_positions<R: Read>(
     if ids.len() != positions.len() {
         return Err(Error::InvalidFormat("sparse vector size mismatch".into()));
     }
-    if ids.len() != strands.len() {
-        return Err(Error::InvalidFormat("sparse vector size mismatch".into()));
+    Ok((ids, PositionSets::from_values(positions)))
+}
+
+fn read_native_singletons(reader: &mut Cursor<&[u8]>, groups: usize) -> Option<PositionSets> {
+    let start = reader.position() as usize;
+    let end = start.checked_add(groups.checked_mul(17)?)?;
+    let bytes = reader.get_ref().get(start..end)?;
+    let (chunks, tail) = bytes.as_chunks::<17>();
+    debug_assert!(tail.is_empty());
+    // Require every complete size/tag/cardinality header. Repeated, portable,
+    // padded or malformed payloads retain the general decoder and its errors.
+    const PREFIX: [u8; 13] = [9, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0];
+    let maximum = if groups < 4 {
+        // Small groups already retain full words or check their inline bounds.
+        if !chunks.iter().all(|chunk| chunk[..13] == PREFIX) {
+            return None;
+        }
+        0
+    } else {
+        let mut maximum = 0;
+        for chunk in chunks {
+            if chunk[..13] != PREFIX {
+                return None;
+            }
+            let raw = u32::from_le_bytes(chunk[13..17].try_into().expect("fixed native singleton"));
+            maximum = maximum.max(raw & 0x7fff_ffff);
+        }
+        maximum
+    };
+    let positions = PositionSets::from_singletons_with_max(
+        chunks.iter().map(|chunk| {
+            u32::from_le_bytes(chunk[13..17].try_into().expect("fixed native singleton"))
+        }),
+        maximum,
+    );
+    reader.set_position(end as u64);
+    Some(positions)
+}
+
+// A native singleton array already stores its complete coordinate and sign.
+// Decode it directly instead of allocating and freeing a one-element Vec for
+// every singleton annotation. Other representations retain the set decoder.
+#[inline]
+fn deserialize_position_set(buf: &[u8]) -> Option<PositionSet> {
+    match buf {
+        [1, 1, 0, 0, 0, a, b, c, d, ..] => {
+            Some(PositionSet::Single(u32::from_le_bytes([*a, *b, *c, *d])))
+        }
+        _ => unsafe { deserialize_roaring_to_vec(buf) }.map(PositionSet::from_values),
     }
-    Ok((ids, positions, strands))
+}
+
+// Positional EC ownership is immutable. Native tiny sets can construct their
+// exact boxed payload directly; duplicate/unsorted, portable and other arrays
+// retain the existing decoder and all of its set/error/trailing semantics.
+unsafe fn deserialize_roaring_to_box(buf: &[u8]) -> Option<Box<[u32]>> {
+    match buf {
+        [1, 0, 0, 0, 0, ..] => return Some(Box::new([])),
+        [1, 1, 0, 0, 0, a, b, c, d, ..] => {
+            return Some(Box::new([u32::from_le_bytes([*a, *b, *c, *d])]));
+        }
+        [1, 2, 0, 0, 0, a, b, c, d, e, f, g, h, ..] => {
+            let first = u32::from_le_bytes([*a, *b, *c, *d]);
+            let second = u32::from_le_bytes([*e, *f, *g, *h]);
+            if first < second {
+                return Some(Box::new([first, second]));
+            }
+        }
+        [1, 3, 0, 0, 0, a, b, c, d, e, f, g, h, i, j, k, l, ..] => {
+            let first = u32::from_le_bytes([*a, *b, *c, *d]);
+            let second = u32::from_le_bytes([*e, *f, *g, *h]);
+            let third = u32::from_le_bytes([*i, *j, *k, *l]);
+            if first < second && second < third {
+                return Some(Box::new([first, second, third]));
+            }
+        }
+        _ => {}
+    }
+    unsafe { deserialize_roaring_to_vec(buf) }.map(Vec::into_boxed_slice)
 }
 
 unsafe fn deserialize_roaring_to_vec(buf: &[u8]) -> Option<Vec<u32>> {
-    let mut out = Vec::new();
+    // Immutable full-node metadata becomes boxed after decoding. Reserve the
+    // exact small-array length to avoid a subsequent shrink reallocation.
+    // Validate its complete payload before allocating, as the decoder does.
+    let capacity = if buf.first() == Some(&1) {
+        let count = u32::from_le_bytes(buf.get(1..5)?.try_into().ok()?) as usize;
+        let end = count.checked_mul(4)?.checked_add(5)?;
+        buf.get(5..end)?;
+        count
+    } else {
+        0
+    };
+    let mut out = Vec::with_capacity(capacity);
     unsafe { append_roaring_to_vec(buf, &mut out) }?;
     Some(out)
 }
@@ -796,7 +859,13 @@ mod skipped_position_tests {
         for ids in [
             vec![],
             vec![7u32],
+            vec![u32::MAX],
+            vec![0x8000_0000],
             vec![7, 7],
+            vec![1, 7],
+            vec![7, 1],
+            vec![1, 7, u32::MAX],
+            vec![7, 1, 7],
             vec![9, 3, 9, 1],
             vec![0, u32::MAX, 100_000, 65_535, 65_536],
         ] {
@@ -817,11 +886,28 @@ mod skipped_position_tests {
                 unsafe { deserialize_roaring_to_vec(&bytes) }.unwrap(),
                 expected
             );
+            assert_eq!(
+                unsafe { deserialize_roaring_to_box(&bytes) }
+                    .unwrap()
+                    .as_ref(),
+                expected.as_slice()
+            );
             bytes.extend_from_slice(&[19, 7, 3]);
             assert_eq!(
                 unsafe { deserialize_roaring_to_vec(&bytes) }.unwrap(),
                 expected
             );
+            assert_eq!(
+                unsafe { deserialize_roaring_to_box(&bytes) }
+                    .unwrap()
+                    .as_ref(),
+                expected.as_slice()
+            );
+            let positions = deserialize_position_set(&bytes).unwrap();
+            match positions {
+                PositionSet::Single(value) => assert_eq!(expected, [value]),
+                PositionSet::Many(values) => assert_eq!(expected, values.as_ref()),
+            }
         }
         for bytes in [
             vec![],
@@ -830,6 +916,8 @@ mod skipped_position_tests {
             vec![1, 2, 0, 0, 0, 5, 0, 0, 0],
         ] {
             assert!(unsafe { deserialize_roaring_to_vec(&bytes) }.is_none());
+            assert!(deserialize_position_set(&bytes).is_none());
+            assert!(unsafe { deserialize_roaring_to_box(&bytes) }.is_none());
         }
     }
 
@@ -870,7 +958,7 @@ mod skipped_position_tests {
             let expected: Vec<_> = read_block_array_blocks(&mut Cursor::new(&bytes))
                 .unwrap()
                 .into_iter()
-                .map(|b| (b.lb, b.ub, b.ec))
+                .map(|b| (b.lb, b.ub, b.ec.into_vec()))
                 .collect();
             let mut actual = Vec::new();
             read_block_array_slice(&bytes, |lb, ub, bitmap| {
@@ -897,6 +985,72 @@ mod skipped_position_tests {
 
     #[test]
     fn skipped_positions_consume_exact_bytes_and_reject_truncated_payloads() {
+        let groups = [
+            vec![7u32],
+            vec![0x8000_0001, 0x8000_0002],
+            (0..16).collect(),
+        ];
+        let mut bytes = Vec::new();
+        let append_bitmap = |bytes: &mut Vec<u8>, values: &[u32]| {
+            let size = 5 + values.len() * 4;
+            bytes.extend_from_slice(&(size as u64).to_le_bytes());
+            bytes.push(1);
+            bytes.extend_from_slice(&(values.len() as u32).to_le_bytes());
+            for value in values {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        };
+        append_bitmap(&mut bytes, &[1, 7, 33]);
+        // The sparse vector carries its position-group count before bitmaps.
+        bytes.extend_from_slice(&(groups.len() as u64).to_le_bytes());
+        for group in &groups {
+            append_bitmap(&mut bytes, group);
+        }
+        let length = bytes.len();
+        bytes.push(173);
+        let mut reader = Cursor::new(bytes.as_slice());
+        let (ids, positions) = read_sparse_vector_with_positions(&mut reader).unwrap();
+        assert_eq!(ids.as_ref(), [1, 7, 33]);
+        assert_eq!(reader.position() as usize, length);
+        assert_eq!(read_u8(&mut reader).unwrap(), 173);
+        for (position, expected) in positions.iter().zip(&groups) {
+            let actual = match position {
+                PositionSetRef::Single(v) => vec![v],
+                PositionSetRef::Many(v) => v.to_vec(),
+            };
+            assert_eq!(&actual, expected);
+        }
+        for cut in [0, 7, length - 1] {
+            assert!(read_sparse_vector_with_positions(&mut Cursor::new(&bytes[..cut])).is_err());
+        }
+        // Four singleton groups use the fused header/maximum pass. Put the
+        // largest coordinate last so ignoring any group changes the oracle.
+        for words in [
+            [0, 0x8000_0001, 0x7ffe, 0x8000_7fff],
+            [0, 1, 2, 0x8000_8000],
+            [0, 1, 2, 0x807f_ffff],
+            [0, 1, 2, 0xffff_ffff],
+        ] {
+            let mut bytes = Vec::new();
+            append_bitmap(&mut bytes, &[1, 7, 33, 100]);
+            bytes.extend_from_slice(&4u64.to_le_bytes());
+            for word in words {
+                append_bitmap(&mut bytes, &[word]);
+            }
+            let (_, positions) =
+                read_sparse_vector_with_positions(&mut Cursor::new(bytes.as_slice())).unwrap();
+            for (position, expected) in positions.iter().zip(words) {
+                assert!(position.contains(expected));
+                assert_eq!(
+                    position.strand_summary(),
+                    Some(u8::from(expected & 0x8000_0000 == 0))
+                );
+            }
+            assert!(
+                read_sparse_vector_with_positions(&mut Cursor::new(&bytes[..bytes.len() - 1]))
+                    .is_err()
+            );
+        }
         for sizes in [[0usize, 0, 0], [1, 1024, 1025], [4099, 3, 5]] {
             let bytes = sparse_bytes(&sizes);
             let mut input = bytes.clone();
@@ -919,3 +1073,6 @@ pub(crate) mod scratch_pages;
 mod transcript_runs;
 
 mod block_positions;
+
+mod position_sets;
+pub(crate) use position_sets::{PositionSetRef, PositionSets};

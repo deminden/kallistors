@@ -25,7 +25,7 @@ pub fn write_index_ec_dump_filtered(
     )?;
     let mut rows = 0usize;
     let mut remaining = unitig_filter.map(|v| v.len());
-    for (unitig_id, blocks) in index.ec_blocks.iter().enumerate() {
+    for (unitig_id, blocks) in index.flat_ec.owned_ec_blocks.iter().enumerate() {
         if let Some(filter) = unitig_filter
             && !filter.contains(&unitig_id)
         {

@@ -43,6 +43,28 @@ pub fn investigation_options_from_env() -> kallistors::pseudoalign::Investigatio
 
 // Retain nested blocks for positional filters, diagnostics and alternate scanners.
 // Ordinary counting uses the same flat EC values and jump bounds without a duplicate graph.
+// Packed graph bases retain the same positional annotations for ordinary
+// fragment and strand filters. Diagnostics and alternate scanners stay full.
+fn use_packed_positions(
+    load_positional_info: bool,
+    options: kallistors::pseudoalign::PseudoalignOptions,
+    debug: bool,
+) -> bool {
+    (load_positional_info || options.strand_specific.is_some())
+        && !debug
+        && !options.bias
+        && !options.kallisto_direct_kmer
+        && !options.kallisto_fallback
+        && !options.do_union
+        && !options.dfk_onlist
+        && !options.no_jump
+        && !options.kallisto_enum
+        && !options.kallisto_strict
+        && !options.kallisto_local_fallback
+        && !options.discard_special_only
+        && !options.kallisto_bifrost_find
+        && !options.investigation.any_enabled()
+}
 fn build_mapping_index(
     path: &std::path::Path,
     load_positional_info: bool,
@@ -50,6 +72,11 @@ fn build_mapping_index(
     options: kallistors::pseudoalign::PseudoalignOptions,
     debug: bool,
 ) -> kallistors::Result<kallistors::pseudoalign::BifrostIndex> {
+    if use_packed_positions(load_positional_info, options, debug) {
+        return kallistors::pseudoalign::build_bifrost_index_positional_packed_threaded(
+            path, threads, false,
+        );
+    }
     build_mapping_index_impl(path, load_positional_info, threads, options, debug, false)
 }
 fn build_quant_index(
@@ -58,6 +85,13 @@ fn build_quant_index(
     threads: usize,
     options: kallistors::pseudoalign::PseudoalignOptions,
 ) -> kallistors::Result<kallistors::pseudoalign::BifrostIndex> {
+    if use_packed_positions(load_positional_info, options, false) {
+        return kallistors::pseudoalign::build_bifrost_index_positional_packed_threaded(
+            path,
+            threads,
+            !options.bias,
+        );
+    }
     build_mapping_index_impl(path, load_positional_info, threads, options, false, true)
 }
 fn build_mapping_index_impl(

@@ -196,13 +196,22 @@ impl Builder {
                 end += 1;
             }
             debug_assert_eq!(self.states[bucket] & ORD_MASK, (end - at) as u64);
-            let crowded = self.events[at..end].iter().any(|event| {
-                event.position >> 32 == u32::MAX as u64 && event.position & 0x8000_0000 != 0
+            // One-pass loading has the same exact runtime descriptor flags.
+            // Its total input is already bounded below2^26, so counts fit.
+            let flags = self.events[at..end].iter().fold(0u64, |flags, event| {
+                if event.position >> 32 == u32::MAX as u64 {
+                    flags
+                        | (1u64 << 61)
+                        | if event.position & 0x8000_0000 != 0 {
+                            1u64 << 62
+                        } else {
+                            0
+                        }
+                } else {
+                    flags
+                }
             });
-            self.states[bucket] = (1 << 63)
-                | (((end - at) as u64) << 32)
-                | at as u64
-                | if crowded { 1 << 62 } else { 0 };
+            self.states[bucket] = (1 << 63) | (((end - at) as u64) << 32) | at as u64 | flags;
             at = end;
         }
         let values = self.events.iter().map(|event| event.position).collect();

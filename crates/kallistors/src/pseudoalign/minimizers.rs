@@ -235,10 +235,40 @@ pub(super) fn minimizers_for_encoded_kmer_into(
 pub(super) struct PrimaryMinimizerCursor {
     previous: Option<u64>,
     hashes: [u64; 6],
+    head: usize,
     last: Option<RepHashWindow>,
+    minimum: u64,
+    minimum_positions: u8,
 }
 impl PrimaryMinimizerCursor {
+    #[inline]
     pub(super) fn fill(
+        &mut self,
+        forward: u64,
+        reverse: u64,
+        out: &mut Vec<([u8; 8], usize)>,
+    ) -> bool {
+        // A BUS ring may have rotated physical hash slots. Standard callers
+        // keep their original contiguous layout; rebuild on a policy change.
+        if self.head != 0 {
+            self.previous = None;
+            self.head = 0;
+        }
+        self.minimum_positions = 0;
+        self.fill_impl::<false>(forward, reverse, out)
+    }
+
+    #[inline]
+    pub(super) fn fill_bus(
+        &mut self,
+        forward: u64,
+        reverse: u64,
+        out: &mut Vec<([u8; 8], usize)>,
+    ) -> bool {
+        self.fill_impl::<true>(forward, reverse, out)
+    }
+
+    fn fill_impl<const INCREMENTAL: bool>(
         &mut self,
         forward: u64,
         reverse: u64,
@@ -249,9 +279,10 @@ impl PrimaryMinimizerCursor {
         let adjacent = self
             .previous
             .is_some_and(|previous| previous & OVERLAP == forward >> 2);
+        let adjacent = adjacent && (!INCREMENTAL || self.minimum_positions != 0);
         let mut rolling;
+        let mut refresh_minimum = !adjacent;
         if adjacent {
-            self.hashes.copy_within(1..6, 0);
             let pos = 6;
             rolling = self.last.expect("previous query has final window");
             rolling = rolling.advance_encoded(
@@ -259,8 +290,27 @@ impl PrimaryMinimizerCursor {
                 ((forward >> (2 * (31 - pos - 23))) & 3) as usize,
                 23,
             );
-            self.hashes[5] = rolling.finish();
+            let incoming = rolling.finish();
+            if INCREMENTAL {
+                // The outgoing slot becomes the newest hash. Keep tie bits
+                // relative to the query, independently of physical storage.
+                self.hashes[self.head] = incoming;
+                self.head = if self.head == 5 { 0 } else { self.head + 1 };
+                let surviving = self.minimum_positions >> 1;
+                if incoming < self.minimum {
+                    self.minimum = incoming;
+                    self.minimum_positions = 1 << 5;
+                } else if surviving != 0 {
+                    self.minimum_positions = surviving | (u8::from(incoming == self.minimum) << 5);
+                } else {
+                    refresh_minimum = true;
+                }
+            } else {
+                self.hashes.copy_within(1..6, 0);
+                self.hashes[5] = incoming;
+            }
         } else {
+            self.head = 0;
             rolling =
                 RepHashWindow::from_encoded((forward >> 14) & MASK, (reverse >> 2) & MASK, 23);
             for (offset, hash) in self.hashes.iter_mut().enumerate() {
@@ -277,14 +327,40 @@ impl PrimaryMinimizerCursor {
         }
         self.previous = Some(forward);
         self.last = Some(rolling);
-        let best = self.hashes.iter().copied().min().expect("six windows");
-        out.clear();
-        for (offset, hash) in self.hashes.iter().copied().enumerate() {
-            if hash == best {
-                let pos = offset + 1;
+        if INCREMENTAL {
+            if refresh_minimum {
+                self.minimum = self.hashes.iter().copied().min().expect("six windows");
+                self.minimum_positions = 0;
+                for (offset, &hash) in self.hashes.iter().enumerate() {
+                    let relative = if offset >= self.head {
+                        offset - self.head
+                    } else {
+                        offset + 6 - self.head
+                    };
+                    self.minimum_positions |= u8::from(hash == self.minimum) << relative;
+                }
+            }
+            out.clear();
+            // Keep every equal-hash position, in original ascending order.
+            // Expiry and unproven overlap refresh all six exact hashes.
+            let mut positions = self.minimum_positions;
+            while positions != 0 {
+                let pos = positions.trailing_zeros() as usize + 1;
+                positions &= positions - 1;
                 let f = (forward >> (2 * (8 - pos))) & MASK;
                 let r = (reverse >> (2 * pos)) & MASK;
                 out.push(((f.min(r) << 18).to_le_bytes(), pos));
+            }
+        } else {
+            let best = self.hashes.iter().copied().min().expect("six windows");
+            out.clear();
+            for (offset, hash) in self.hashes.iter().copied().enumerate() {
+                if hash == best {
+                    let pos = offset + 1;
+                    let f = (forward >> (2 * (8 - pos))) & MASK;
+                    let r = (reverse >> (2 * pos)) & MASK;
+                    out.push(((f.min(r) << 18).to_le_bytes(), pos));
+                }
             }
         }
         true
@@ -573,6 +649,10 @@ struct RepHashWindow {
 impl RepHashWindow {
     #[inline]
     fn from_encoded(fword: u64, rword: u64, g: usize) -> Self {
+        if g == 23 {
+            let (forward, reverse) = crate::minimizer_hash::paired_state_23(fword);
+            return Self { forward, reverse };
+        }
         Self {
             forward: grouped_state(fword, g),
             reverse: grouped_state(rword, g),
@@ -631,10 +711,10 @@ impl RepHashWindow {
     }
 
     fn finish(self) -> u64 {
-        let mut buf = [0u8; 16];
-        buf[..8].copy_from_slice(&self.forward.min(self.reverse).to_le_bytes());
-        buf[8..].copy_from_slice(&self.forward.max(self.reverse).to_le_bytes());
-        wyhash(&buf, 0)
+        crate::index::bifrost::wyhash16_words(
+            self.forward.min(self.reverse),
+            self.forward.max(self.reverse),
+        )
     }
 }
 
@@ -698,6 +778,11 @@ mod encoded_tests {
                         .advance(seq[pos - 1], seq[pos + g - 1], g)
                         .expect("valid slide");
                 }
+                let (fword, rword) =
+                    crate::pseudoalign::ec::encode_kmer_pair(&seq[pos..pos + g]).unwrap();
+                let encoded = RepHashWindow::from_encoded(fword, rword, g);
+                assert_eq!(encoded.forward, window.forward, "forward g={g} pos={pos}");
+                assert_eq!(encoded.reverse, window.reverse, "reverse g={g} pos={pos}");
                 assert_eq!(
                     Some(window.finish()),
                     rep_hash(&seq[pos..pos + g]),
@@ -772,14 +857,19 @@ mod primary_cursor_tests {
     #[test]
     fn overlapping_primary_hashes_match_independent_byte_oracle() {
         let mut cursor = PrimaryMinimizerCursor::default();
+        let mut bus_cursor = PrimaryMinimizerCursor::default();
+        let mut mixed_cursor = PrimaryMinimizerCursor::default();
+        let mut mixed_toggle = 0usize;
         let mut state = 17u64;
-        for kind in 0..6 {
+        for kind in 0..8 {
             let sequence: Vec<u8> = (0..500)
                 .map(|i| {
                     state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
                     match kind {
                         0 => b'A',
                         1 => b"AT"[i % 2],
+                        6 if !(150..250).contains(&i) => b'A',
+                        7 => b"AAAACCCCTTTTGGGG"[i % 16],
                         _ => b"ACGT"[(state >> 32) as usize & 3],
                     }
                 })
@@ -791,6 +881,17 @@ mod primary_cursor_tests {
                     minimizers_for_kmer_into(window, 23, &mut expected);
                     let mut actual = Vec::new();
                     assert!(cursor.fill(f, r, &mut actual));
+                    assert_eq!(actual, expected);
+                    actual.clear();
+                    assert!(bus_cursor.fill_bus(f, r, &mut actual));
+                    assert_eq!(actual, expected);
+                    actual.clear();
+                    mixed_toggle += 1;
+                    if mixed_toggle.is_multiple_of(3) {
+                        assert!(mixed_cursor.fill(f, r, &mut actual));
+                    } else {
+                        assert!(mixed_cursor.fill_bus(f, r, &mut actual));
+                    }
                     assert_eq!(actual, expected);
                 }
             }

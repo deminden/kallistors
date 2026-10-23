@@ -81,10 +81,97 @@ pub(crate) fn match_unitig_candidate_encoded(
     allow_rev: bool,
     allow_relaxed: bool,
 ) -> Option<(usize, bool, bool, bool)> {
+    match_unitig_candidate_encoded_fixed::<0>(
+        index,
+        unitig_id,
+        rel_pos,
+        diff,
+        min_pos_fwd,
+        min_pos_rev,
+        read_fwd,
+        read_rev,
+        allow_forward,
+        allow_rev,
+        allow_relaxed,
+    )
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn match_unitig_candidate_encoded_typed<const BUS: bool>(
+    index: &BifrostIndex,
+    unitig_id: usize,
+    rel_pos: usize,
+    diff: usize,
+    min_pos_fwd: usize,
+    min_pos_rev: usize,
+    read_fwd: u64,
+    read_rev: u64,
+    allow_forward: bool,
+    allow_rev: bool,
+    allow_relaxed: bool,
+) -> Option<(usize, bool, bool, bool)> {
+    if BUS && index.k == 31 {
+        match_unitig_candidate_encoded_fixed::<31>(
+            index,
+            unitig_id,
+            rel_pos,
+            diff,
+            min_pos_fwd,
+            min_pos_rev,
+            read_fwd,
+            read_rev,
+            allow_forward,
+            allow_rev,
+            allow_relaxed,
+        )
+    } else {
+        match_unitig_candidate_encoded_fixed::<0>(
+            index,
+            unitig_id,
+            rel_pos,
+            diff,
+            min_pos_fwd,
+            min_pos_rev,
+            read_fwd,
+            read_rev,
+            allow_forward,
+            allow_rev,
+            allow_relaxed,
+        )
+    }
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn match_unitig_candidate_encoded_fixed<const K: usize>(
+    index: &BifrostIndex,
+    unitig_id: usize,
+    rel_pos: usize,
+    diff: usize,
+    min_pos_fwd: usize,
+    min_pos_rev: usize,
+    read_fwd: u64,
+    read_rev: u64,
+    allow_forward: bool,
+    allow_rev: bool,
+    allow_relaxed: bool,
+) -> Option<(usize, bool, bool, bool)> {
+    let k = if K == 0 { index.k } else { K };
     let sequence = index.encoded_unitigs.unitig_bases.sequence(unitig_id)?;
     let unitig_len = sequence.len;
-    if unitig_len < index.k {
+    if unitig_len < k {
         return None;
+    }
+
+    // A length-k node has exactly one possible reference word. A mismatch in
+    // both allowed orientations proves that neither strict nor relaxed search
+    // can succeed. Keep hit handling below so its priority and flags are exact.
+    if unitig_len == k {
+        let code = sequence.kmer_at(0, k)?;
+        if (!allow_forward || code != read_fwd) && (!allow_rev || code != read_rev) {
+            return None;
+        }
     }
 
     let rel = rel_pos as isize;
@@ -95,8 +182,8 @@ pub(crate) fn match_unitig_candidate_encoded(
         // strand checks. Preserve forward priority while decoding it only once.
         if (allow_forward || allow_rev) && start_fwd >= 0 {
             let start = start_fwd as usize;
-            if start + index.k <= unitig_len {
-                let code = sequence.kmer_at(start, index.k);
+            if start + k <= unitig_len {
+                let code = sequence.kmer_at(start, k);
                 if allow_forward && code == Some(read_fwd) {
                     return Some((start, false, false, true));
                 }
@@ -108,14 +195,14 @@ pub(crate) fn match_unitig_candidate_encoded(
     } else {
         if allow_forward && start_fwd >= 0 {
             let start = start_fwd as usize;
-            if start + index.k <= unitig_len && sequence.kmer_at(start, index.k) == Some(read_fwd) {
+            if start + k <= unitig_len && sequence.kmer_at(start, k) == Some(read_fwd) {
                 return Some((start, false, false, true));
             }
         }
 
         if allow_rev && start_rev >= 0 {
             let start = start_rev as usize;
-            if start + index.k <= unitig_len && sequence.kmer_at(start, index.k) == Some(read_rev) {
+            if start + k <= unitig_len && sequence.kmer_at(start, k) == Some(read_rev) {
                 return Some((start, true, false, false));
             }
         }
@@ -123,19 +210,19 @@ pub(crate) fn match_unitig_candidate_encoded(
     if !allow_relaxed {
         return None;
     }
-    let max_start = unitig_len - index.k;
+    let max_start = unitig_len - k;
     let start_lo = rel_pos.saturating_sub(diff).min(max_start);
     let start_hi = rel_pos.min(max_start);
     if start_lo > start_hi {
         return None;
     }
-    if let Some(windows) = sequence.range(start_lo, start_hi, index.k) {
+    if let Some(windows) = sequence.range(start_lo, start_hi, k) {
         return windows
             .first_match(read_fwd, read_rev, allow_forward, allow_rev)
             .map(|(start, rev)| (start, rev, true, !rev));
     }
     for start in start_lo..=start_hi {
-        let Some(code) = sequence.kmer_at(start, index.k) else {
+        let Some(code) = sequence.kmer_at(start, k) else {
             continue;
         };
         if allow_forward && code == read_fwd {
@@ -333,9 +420,22 @@ pub(crate) fn match_kmer_at_pos(
                         continue;
                     }
                     let km_pos = rel_pos as usize;
-                    let km_seq = index.km_unitig_sequence(uid)?;
-                    if km_seq.as_ref() != kmer_canon {
-                        continue;
+                    if let Some((forward, reverse)) = encoded_match_codes {
+                        // Packed graphs already retain this complete k-mer. Do
+                        // not rebuild its ASCII sequence for each rescue probe.
+                        if index
+                            .encoded_unitigs
+                            .km_bases
+                            .encode_kmer_at(uid, 0, index.k)
+                            != Some(forward.min(reverse))
+                        {
+                            continue;
+                        }
+                    } else {
+                        let km_seq = index.km_unitig_sequence(uid)?;
+                        if km_seq.as_ref() != kmer_canon {
+                            continue;
+                        }
                     }
                     if min_pos != km_pos && min_pos + km_pos != _diff {
                         continue;
@@ -438,7 +538,9 @@ pub(crate) fn match_kmer_direct(
                 }
             }
         }
-        if let Some(entries) = map.get(&rev) {
+        // Both orientations are indexed under the query's encoded bases;
+        // the entry flag records orientation relative to the stored unitig.
+        if let Some(entries) = map.get(&fwd) {
             for &(unitig_id, pos, used_revcomp) in entries {
                 if !used_revcomp {
                     continue;
@@ -515,19 +617,25 @@ mod encoded_probe_tests {
                 b"ACGT"[((state >> 32) & 3) as usize] as char
             })
             .collect();
-        std::fs::write(&fasta, format!(">tx\n{sequence}\n")).unwrap();
+        std::fs::write(&fasta, format!(">tx\n{sequence}\n>short\nCGGGTGTGGTGGCGGGCACCTGTAGTCCCAG\n>two\nCGAGGTTCGGCGGCTAGATCTAGTTGTTACGT\n")).unwrap();
         crate::index::build_index(&path, &[fasta], crate::index::IndexBuildOptions::default())
             .unwrap();
         let index = crate::pseudoalign::build_bifrost_index(&path).unwrap();
+        assert!(index.unitigs.iter().any(|unitig| unitig.len() == 31));
+        assert!(index.unitigs.iter().any(|unitig| unitig.len() == 32));
         for (uid, unitig) in index.unitigs.iter().enumerate() {
             if unitig.len() < index.k {
                 continue;
             }
-            for query in unitig.windows(index.k).step_by(41) {
-                for alter in [false, true] {
+            for query in unitig
+                .windows(index.k)
+                .step_by(if unitig.len() <= 33 { 1 } else { 41 })
+                .flat_map(|word| [word.to_vec(), crate::util::reverse_complement(word)])
+            {
+                for alter in [None, Some(13), Some(30)] {
                     let mut read = query.to_vec();
-                    if alter {
-                        read[13] = if read[13] == b'A' { b'C' } else { b'A' };
+                    if let Some(position) = alter {
+                        read[position] = if read[position] == b'A' { b'C' } else { b'A' };
                     }
                     let (fwd, rev) = encode_kmer_pair(&read).unwrap();
                     let mut reverse = Vec::new();
@@ -563,6 +671,23 @@ mod encoded_probe_tests {
                                     forward,
                                     reverse_allowed,
                                     relaxed,
+                                );
+                                let bus_actual = match_unitig_candidate_encoded_typed::<true>(
+                                    &index,
+                                    uid,
+                                    rel,
+                                    8,
+                                    min_fwd,
+                                    min_rev,
+                                    fwd,
+                                    rev,
+                                    forward,
+                                    reverse_allowed,
+                                    relaxed,
+                                );
+                                assert_eq!(
+                                    bus_actual, expected,
+                                    "BUS uid={uid} rel={rel} min={min_fwd}/{min_rev} flags={flags}"
                                 );
                                 assert_eq!(
                                     actual, expected,

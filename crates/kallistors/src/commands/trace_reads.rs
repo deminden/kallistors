@@ -231,17 +231,7 @@ pub fn run(
     let load_positional_info = filter
         .map(|v| !v.single_overhang && v.fragment_length > 0)
         .unwrap_or(false);
-    let index = if kallisto_direct_kmer {
-        kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(index, load_positional_info)?
-    } else if load_positional_info && kallisto_fallback {
-        kallistors::pseudoalign::build_bifrost_index_with_positions_and_kmer(index, true)?
-    } else if load_positional_info {
-        kallistors::pseudoalign::build_bifrost_index_with_positions(index, true)?
-    } else if kallisto_fallback {
-        kallistors::pseudoalign::build_bifrost_index_with_kmer(index)?
-    } else {
-        kallistors::pseudoalign::build_bifrost_index(index)?
-    };
+    let index = super::build_mapping_index(index, load_positional_info, 1, options, true)?;
     let gene_map = match gene_map {
         Some(path) => Some(load_gene_map(path)?),
         None => None,

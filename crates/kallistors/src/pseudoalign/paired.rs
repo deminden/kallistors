@@ -1,14 +1,14 @@
+pub use super::diagnostics::trace_read_pair_bifrost;
+use super::diagnostics::{PairedFinalTraceRow, PairedFinalTraceWriter};
 use super::utils::EcCountMap;
-use std::fs::File;
-use std::io::{BufWriter, Write};
 
 use crate::bias::BiasCounts;
-use crate::io::{FastqRecord, PackedSeqBatch, ReadSource};
+use crate::io::{PackedSeqBatch, ReadSource};
 use crate::{Error, Result};
 
 use super::{
     BifrostIndex, DebugFailReason, DebugReport, EcCounts, FragmentLengthStats, KmerEcIndex,
-    PairedTraceResult, PseudoalignOptions, ReadDebugState, Strand,
+    PseudoalignOptions, ReadDebugState, Strand,
 };
 
 /// Upstream-style observation goal shared by paired workers. Each batch snapshots
@@ -169,160 +169,6 @@ pub fn pseudoalign_paired_bifrost_debug_with_options<R1: ReadSource, R2: ReadSou
     Ok((counts, report))
 }
 
-pub fn trace_read_pair_bifrost(
-    index: &BifrostIndex,
-    left_seq: &[u8],
-    right_seq: &[u8],
-    strand: Strand,
-    options: PseudoalignOptions,
-) -> PairedTraceResult {
-    let mut dbg1 = ReadDebugState::default();
-    let mut dbg2 = ReadDebugState::default();
-    let mut ec1 = super::ec_for_read_bifrost(index, left_seq, strand, Some(&mut dbg1), options);
-    let mut ec2 = super::ec_for_read_bifrost(index, right_seq, strand, Some(&mut dbg2), options);
-
-    if let Some(mode) = options.strand_specific {
-        let comprehensive = options.do_union || options.no_jump || index.use_shade;
-        if let Some(read_ec) = ec1.as_mut()
-            && let Some(filtered) = super::apply_strand_filter(
-                index,
-                read_ec,
-                mode,
-                true,
-                comprehensive,
-                &mut None,
-                b"",
-            )
-        {
-            read_ec.hard_reject_pair |= filtered.is_empty();
-            read_ec.ec = filtered;
-        }
-        if let Some(read_ec) = ec2.as_mut()
-            && let Some(filtered) = super::apply_strand_filter(
-                index,
-                read_ec,
-                mode,
-                false,
-                comprehensive,
-                &mut None,
-                b"",
-            )
-        {
-            read_ec.hard_reject_pair |= filtered.is_empty();
-            read_ec.ec = filtered;
-        }
-    }
-
-    let mut left_reason_override = None;
-    let mut right_reason_override = None;
-    if ec1.as_ref().is_some_and(|v| v.ec.is_empty())
-        && ec1.as_ref().is_some_and(|v| !v.hard_reject_pair)
-    {
-        left_reason_override = Some(DebugFailReason::EmptyEc);
-        ec1 = None;
-    }
-    if ec2.as_ref().is_some_and(|v| v.ec.is_empty())
-        && ec2.as_ref().is_some_and(|v| !v.hard_reject_pair)
-    {
-        right_reason_override = Some(DebugFailReason::EmptyEc);
-        ec2 = None;
-    }
-
-    let hard_reject_pair = ec1.as_ref().is_some_and(|v| v.hard_reject_pair)
-        || ec2.as_ref().is_some_and(|v| v.hard_reject_pair);
-
-    let mut merged = Vec::new();
-    let mut had_offlist = false;
-    let merged_reason = if hard_reject_pair {
-        Some(DebugFailReason::IntersectionEmpty)
-    } else {
-        match (ec1.as_ref(), ec2.as_ref()) {
-            (None, None) => {
-                if left_reason_override.is_none() && right_reason_override.is_none() {
-                    left_reason_override = Some(DebugFailReason::NoKmerMatch);
-                    right_reason_override = Some(DebugFailReason::NoKmerMatch);
-                }
-                None
-            }
-            (Some(ec), None) | (None, Some(ec)) => {
-                merged.extend_from_slice(&ec.ec);
-                had_offlist = ec.had_offlist;
-                None
-            }
-            (Some(left), Some(right)) => {
-                super::intersect_sorted(&left.ec, &right.ec, &mut merged);
-                had_offlist = left.had_offlist || right.had_offlist;
-                if merged.is_empty() {
-                    Some(DebugFailReason::IntersectionEmpty)
-                } else {
-                    None
-                }
-            }
-        }
-    };
-
-    let left_before = ec1.as_ref().map(|v| v.ec.clone());
-    let right_before = ec2.as_ref().map(|v| v.ec.clone());
-    let estimated_fragment_length = if merged.len() == 1 {
-        match (ec1.as_ref(), ec2.as_ref()) {
-            (Some(left), Some(right)) => {
-                estimate_fragment_length_for_pair(index, merged[0], left, right)
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let placement = if merged.len() == 1 {
-        ec1.as_ref()
-            .and_then(|left| {
-                left.best_match.and_then(|best_match| {
-                    super::placement_for_match(&merged, best_match, left_seq.len())
-                })
-            })
-            .or_else(|| {
-                ec2.as_ref().and_then(|right| {
-                    right.best_match.and_then(|best_match| {
-                        super::placement_for_match(&merged, best_match, right_seq.len())
-                    })
-                })
-            })
-    } else {
-        None
-    };
-    let left_trace = super::trace_result_from_debug_state(
-        index,
-        left_seq,
-        &dbg1,
-        ec1.is_some(),
-        left_before.clone(),
-        left_before.clone(),
-        left_before,
-        left_reason_override,
-    );
-    let right_trace = super::trace_result_from_debug_state(
-        index,
-        right_seq,
-        &dbg2,
-        ec2.is_some(),
-        right_before.clone(),
-        right_before.clone(),
-        right_before,
-        right_reason_override,
-    );
-
-    PairedTraceResult {
-        left: left_trace,
-        right: right_trace,
-        merged_ec: (!merged.is_empty()).then_some(merged),
-        merged_reason,
-        hard_reject_pair,
-        had_offlist,
-        estimated_fragment_length,
-        placement,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pseudoalign_paired_bifrost_batch_into(
     index: &BifrostIndex,
@@ -351,8 +197,8 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
 
     let fragment_budget = sampling.map_or(usize::MAX, FragmentLengthSampler::remaining);
     if fragment_budget == 0
-        && counts.bias.is_none()
-        && options.strand_specific.is_none()
+        && !super::bias_sampling_pending(counts.bias.as_ref(), options.max_bias)
+        && super::counting_filters_supported(index, options)
         && !index.use_shade
         && !options.dfk_onlist
     {
@@ -384,8 +230,9 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
         }
         counts.reads_processed = counts.reads_processed.saturating_add(1);
 
-        let count_only =
-            fragment_budget == 0 && counts.bias.is_none() && options.strand_specific.is_none();
+        let count_only = fragment_budget == 0
+            && !super::bias_sampling_pending(counts.bias.as_ref(), options.max_bias)
+            && super::counting_filters_supported(index, options);
         let scan = |seq: &[u8]| {
             if count_only {
                 super::core::ec_for_read_bifrost_counting(index, seq, strand, options)
@@ -574,11 +421,25 @@ fn count_paired_borrowed_batch(
         // SAFETY: caller proved both batch lengths equal and this range in bounds.
         let a_seq = unsafe { left.seq_unchecked(idx) };
         let b_seq = unsafe { right.seq_unchecked(idx) };
-        let a = super::core::ec_for_read_bifrost_counting_borrowed(index, a_seq, strand, options);
+        let a = super::core::ec_for_read_bifrost_counting_borrowed(index, a_seq, strand, options)
+            .map(|v| {
+                if let Some(mode) = options.strand_specific {
+                    v.filter_strand(index, mode, true)
+                } else {
+                    v
+                }
+            });
         if a.as_ref().is_some_and(|v| v.read.hard_reject_pair) {
             continue;
         }
-        let b = super::core::ec_for_read_bifrost_counting_borrowed(index, b_seq, strand, options);
+        let b = super::core::ec_for_read_bifrost_counting_borrowed(index, b_seq, strand, options)
+            .map(|v| {
+                if let Some(mode) = options.strand_specific {
+                    v.filter_strand(index, mode, false)
+                } else {
+                    v
+                }
+            });
         if b.as_ref().is_some_and(|v| v.read.hard_reject_pair) {
             continue;
         }
@@ -643,8 +504,8 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
                 // Diagnostics, bias and stranded filters retain the complete scan.
                 let count_only = options.fragment_length_samples != 0
                     && frag_stats.count() >= options.fragment_length_samples as u64
-                    && bias.is_none()
-                    && options.strand_specific.is_none()
+                    && !super::bias_sampling_pending(bias.as_ref(), options.max_bias)
+                    && super::counting_filters_supported(index, options)
                     && report.is_none()
                     && final_trace.is_none();
                 let (ec1, ec2) = if count_only {
@@ -944,80 +805,7 @@ fn pseudoalign_paired_bifrost_inner<R1: ReadSource, R2: ReadSource>(
     })
 }
 
-struct PairedFinalTraceWriter {
-    writer: BufWriter<File>,
-}
-
-struct PairedFinalTraceRow<'a> {
-    read_id: u64,
-    left: &'a FastqRecord,
-    right: &'a FastqRecord,
-    merged_ec: Option<&'a [u32]>,
-    reason: &'a str,
-    left_ec: Option<&'a [u32]>,
-    right_ec: Option<&'a [u32]>,
-}
-
-impl PairedFinalTraceWriter {
-    fn from_env() -> Result<Option<Self>> {
-        let Some(path) = std::env::var_os("KALLISTORS_PAIRED_FINAL_TRACE") else {
-            return Ok(None);
-        };
-        let file = File::create(path)?;
-        let mut writer = BufWriter::new(file);
-        writeln!(
-            writer,
-            "read_id\tread_name1\tread_name2\taligned\treason\tmerged_ec\tleft_ec\tright_ec"
-        )?;
-        Ok(Some(Self { writer }))
-    }
-
-    fn write(&mut self, row: PairedFinalTraceRow<'_>) -> Result<()> {
-        writeln!(
-            self.writer,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            row.read_id,
-            normalize_trace_header(&row.left.header),
-            normalize_trace_header(&row.right.header),
-            if row.merged_ec.is_some_and(|ec| !ec.is_empty()) {
-                1
-            } else {
-                0
-            },
-            row.reason,
-            format_trace_ec(row.merged_ec),
-            format_trace_ec(row.left_ec),
-            format_trace_ec(row.right_ec),
-        )?;
-        Ok(())
-    }
-}
-
-fn normalize_trace_header(header: &[u8]) -> String {
-    let text = String::from_utf8_lossy(header);
-    text.trim()
-        .strip_prefix('@')
-        .unwrap_or(text.trim())
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string()
-}
-
-fn format_trace_ec(ec: Option<&[u32]>) -> String {
-    let Some(ec) = ec else {
-        return "-".to_string();
-    };
-    if ec.is_empty() {
-        return "-".to_string();
-    }
-    ec.iter()
-        .map(|v| v.to_string())
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn estimate_fragment_length_for_pair(
+pub(super) fn estimate_fragment_length_for_pair(
     index: &BifrostIndex,
     tr: u32,
     left: &super::ReadEc,

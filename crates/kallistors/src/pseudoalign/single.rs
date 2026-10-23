@@ -1,4 +1,5 @@
 use super::utils::EcCountMap;
+use std::borrow::Cow;
 
 use crate::Result;
 use crate::bias::BiasCounts;
@@ -193,6 +194,77 @@ pub fn pseudoalign_single_end_bifrost_with_options<R: ReadSource>(
     pseudoalign_single_end_bifrost_inner(index, reader, strand, None, filter, options)
 }
 
+// Borrowed ECs remain tied to the immutable index; only newly counted keys
+// become owned, so no index references escape into the returned counts.
+fn single_counting_ec<'index>(
+    index: &BifrostIndex,
+    read: super::BorrowedReadEc<'index>,
+    filter: Option<FragmentFilter>,
+    options: PseudoalignOptions,
+) -> Cow<'index, [u32]> {
+    let hit = read.read.first_hit;
+    let ec = match read.borrowed {
+        Some(ec) => Cow::Borrowed(ec),
+        None => Cow::Owned(read.read.ec),
+    };
+    let ec = if let Some(filter) = filter
+        && !filter.single_overhang
+        && filter.fragment_length > 0
+        && let Some(best_match) = read.read.best_match
+    {
+        if let (Some(mode), Some(hit)) = (options.strand_specific, hit.as_ref()) {
+            return super::core::filter_ec_by_fragment_and_strand_cow(
+                index,
+                ec,
+                best_match,
+                filter.fragment_length as i64,
+                hit,
+                mode,
+            );
+        }
+        super::filter_ec_by_fragment_cow(index, ec, best_match, filter.fragment_length as i64)
+    } else {
+        ec
+    };
+    if let (Some(mode), Some(hit)) = (options.strand_specific, hit) {
+        super::core::filter_ec_by_strand_cow(index, ec, &hit, mode, true)
+    } else {
+        ec
+    }
+}
+
+// Keep fragment and strand filtering identical in serial and batched counting.
+#[inline]
+fn filter_single_read(
+    index: &BifrostIndex,
+    read_ec: &mut super::ReadEc,
+    filter: Option<FragmentFilter>,
+    options: PseudoalignOptions,
+    report: &mut Option<&mut DebugReport>,
+    header: &[u8],
+) {
+    if let Some(filter) = filter
+        && !filter.single_overhang
+        && filter.fragment_length > 0
+        && let Some(best_match) = read_ec.best_match
+    {
+        super::filter_ec_by_fragment_in_place(
+            index,
+            &mut read_ec.ec,
+            best_match,
+            filter.fragment_length as i64,
+        );
+    }
+    if let Some(mode) = options.strand_specific {
+        let comprehensive = options.do_union || options.no_jump || index.use_shade;
+        if let Some(filtered) =
+            super::apply_strand_filter(index, read_ec, mode, true, comprehensive, report, header)
+        {
+            read_ec.ec = filtered;
+        }
+    }
+}
+
 pub(crate) fn pseudoalign_single_end_bifrost_batch_into(
     index: &BifrostIndex,
     batch: PackedSeqBatch,
@@ -209,36 +281,27 @@ pub(crate) fn pseudoalign_single_end_bifrost_batch_into(
         }
         counts.reads_processed = counts.reads_processed.saturating_add(1);
 
-        let Some(mut read_ec) = super::ec_for_read_bifrost(index, seq, strand, None, options)
+        if !super::bias_sampling_pending(counts.bias.as_ref(), options.max_bias)
+            && super::counting_filters_supported(index, options)
+        {
+            let Some(read) =
+                super::ec_for_read_bifrost_single_borrowed(index, seq, strand, options)
+            else {
+                continue;
+            };
+            let ec = single_counting_ec(index, read, filter, options);
+            if !ec.is_empty() {
+                counts.reads_aligned = counts.reads_aligned.saturating_add(1);
+                super::utils::add_ec_count_slice(counts, ec_map, &ec);
+            }
+            continue;
+        }
+
+        let Some(mut read_ec) = super::ec_for_read_bifrost_single(index, seq, strand, options)
         else {
             continue;
         };
-        if let Some(filter) = filter
-            && !filter.single_overhang
-            && filter.fragment_length > 0
-            && let Some(best_match) = read_ec.best_match
-        {
-            read_ec.ec = super::filter_ec_by_fragment(
-                index,
-                &read_ec.ec,
-                best_match,
-                filter.fragment_length as i64,
-            );
-        }
-        if let Some(mode) = options.strand_specific {
-            let comprehensive = options.do_union || options.no_jump || index.use_shade;
-            if let Some(filtered) = super::apply_strand_filter(
-                index,
-                &read_ec,
-                mode,
-                true,
-                comprehensive,
-                &mut None,
-                b"",
-            ) {
-                read_ec.ec = filtered;
-            }
-        }
+        filter_single_read(index, &mut read_ec, filter, options, &mut None, b"");
         if read_ec.ec.is_empty() {
             continue;
         }
@@ -301,8 +364,40 @@ fn pseudoalign_single_end_bifrost_inner<R: ReadSource>(
         }
         reads_processed += 1;
 
+        if report.is_none()
+            && !super::bias_sampling_pending(bias.as_ref(), options.max_bias)
+            && super::counting_filters_supported(index, options)
+        {
+            let Some(read) =
+                super::ec_for_read_bifrost_single_borrowed(index, &record.seq, strand, options)
+            else {
+                continue;
+            };
+            let ec = single_counting_ec(index, read, filter, options);
+            if ec.is_empty() {
+                continue;
+            }
+            reads_aligned += 1;
+            let ec_id = match ec_map.get(&ec, &ec_list) {
+                Some(id) => id,
+                None => {
+                    let id = ec_list.len();
+                    ec_map.insert(&ec, id);
+                    ec_list.push(ec.into_owned());
+                    counts.push(0);
+                    id
+                }
+            };
+            counts[ec_id] += 1;
+            continue;
+        }
+
         let mut dbg = report.as_ref().map(|_| ReadDebugState::default());
-        let ec = super::ec_for_read_bifrost(index, &record.seq, strand, dbg.as_mut(), options);
+        let ec = if dbg.is_none() {
+            super::ec_for_read_bifrost_single(index, &record.seq, strand, options)
+        } else {
+            super::ec_for_read_bifrost(index, &record.seq, strand, dbg.as_mut(), options)
+        };
         let Some(mut read_ec) = ec else {
             if let Some(r) = report.as_deref_mut() {
                 if let Some(state) = dbg {
@@ -361,32 +456,14 @@ fn pseudoalign_single_end_bifrost_inner<R: ReadSource>(
             }
             continue;
         };
-        if let Some(filter) = filter
-            && !filter.single_overhang
-            && filter.fragment_length > 0
-            && let Some(best_match) = read_ec.best_match
-        {
-            read_ec.ec = super::filter_ec_by_fragment(
-                index,
-                &read_ec.ec,
-                best_match,
-                filter.fragment_length as i64,
-            );
-        }
-        if let Some(mode) = options.strand_specific {
-            let comprehensive = options.do_union || options.no_jump || index.use_shade;
-            if let Some(filtered) = super::apply_strand_filter(
-                index,
-                &read_ec,
-                mode,
-                true,
-                comprehensive,
-                &mut report,
-                &record.header,
-            ) {
-                read_ec.ec = filtered;
-            }
-        }
+        filter_single_read(
+            index,
+            &mut read_ec,
+            filter,
+            options,
+            &mut report,
+            &record.header,
+        );
         if read_ec.ec.is_empty() {
             if let Some(r) = report.as_deref_mut() {
                 if let Some(state) = dbg {

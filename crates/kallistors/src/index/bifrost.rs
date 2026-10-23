@@ -54,6 +54,7 @@ pub struct BooPhf {
     nelem: u64,
     levels: Vec<BooLevel>,
     final_hash: HashMap<[u8; 8], u64>,
+    compact_levels: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -132,20 +133,29 @@ struct BooLevel {
 
 impl BooLevel {
     #[inline(always)]
-    fn rank_for_hash(&self, hash: u64) -> Option<u64> {
-        let bucket = match self.reduced_domain {
+    fn rank_for_hash<const COMPACT: bool>(&self, hash: u64) -> Option<u64> {
+        let bucket = self.bucket_for_hash(hash);
+        if COMPACT {
+            self.bitset.get_rank_compact(bucket)
+        } else {
+            self.bitset.get_rank(bucket)
+        }
+    }
+
+    #[inline(always)]
+    fn bucket_for_hash(&self, hash: u64) -> u64 {
+        match self.reduced_domain {
             Some(domain) => domain.remainder(hash),
             None => hash % self.hash_domain,
-        };
-        self.bitset.get_rank(bucket)
+        }
     }
 }
 
 #[derive(Clone)]
-#[repr(C, packed(4))]
+#[repr(C, packed(2))]
 struct RankedBitWord {
     bits: u64,
-    rank: u32,
+    rank: u16,
 }
 
 #[derive(Clone)]
@@ -155,6 +165,7 @@ struct BitVector {
     bit_array: Vec<u64>,
     ranks: Vec<u64>,
     ranked_words: Vec<RankedBitWord>,
+    rank_bases: Vec<u32>,
 }
 
 impl BitVector {
@@ -165,6 +176,7 @@ impl BitVector {
         let ranks_len = read_u64_le(reader)? as usize;
         let ranks = read_u64_array(reader, ranks_len)?;
         let mut ranked_words = Vec::with_capacity(bit_array.len());
+        let mut rank_bases = Vec::new();
         'blocks: for (words, &base) in bit_array.chunks(8).zip(&ranks) {
             let mut rank = base;
             for &bits in words {
@@ -172,11 +184,26 @@ impl BitVector {
                     // Very large rank domains retain the independent full-width
                     // bitmap/rank implementation, including its original order.
                     ranked_words = Vec::new();
+                    rank_bases = Vec::new();
+                    break 'blocks;
+                };
+                if ranked_words.len().is_multiple_of(1024) {
+                    rank_bases.push(compact_rank);
+                }
+                // A valid block spans at most1023 preceding64-bit words:
+                // its relative rank cannot exceed65472. Malformed/nonmonotone
+                // rank tables keep the established full-width fallback.
+                let Some(relative) = compact_rank
+                    .checked_sub(*rank_bases.last().expect("rank block"))
+                    .and_then(|rank| u16::try_from(rank).ok())
+                else {
+                    ranked_words = Vec::new();
+                    rank_bases = Vec::new();
                     break 'blocks;
                 };
                 ranked_words.push(RankedBitWord {
                     bits,
-                    rank: compact_rank,
+                    rank: relative,
                 });
                 rank += u64::from(bits.count_ones());
             }
@@ -187,22 +214,38 @@ impl BitVector {
             bit_array,
             ranks,
             ranked_words,
+            rank_bases,
         })
+    }
+
+    #[inline(always)]
+    fn rank_word_at(&self, pos: u64, word: &RankedBitWord) -> Option<u64> {
+        let offset = (pos & 63) as u32;
+        if word.bits & (1u64 << offset) == 0 {
+            return None;
+        }
+        let before = if offset == 0 {
+            0
+        } else {
+            (word.bits << (64 - offset)).count_ones()
+        };
+        Some(u64::from(self.compact_word_rank((pos >> 6) as usize, word)) + u64::from(before))
+    }
+    #[inline(always)]
+    fn get_rank_compact(&self, pos: u64) -> Option<u64> {
+        // The loader proved complete compact coverage before enabling this
+        // representation. Ordinary Rust bounds checks remain authoritative.
+        self.rank_word_at(pos, &self.ranked_words[(pos >> 6) as usize])
+    }
+    #[inline]
+    fn compact_word_rank(&self, index: usize, word: &RankedBitWord) -> u32 {
+        self.rank_bases[index >> 10] + u32::from(word.rank)
     }
 
     #[inline]
     fn get_rank(&self, pos: u64) -> Option<u64> {
-        let offset = (pos & 63) as u32;
         if let Some(word) = self.ranked_words.get((pos >> 6) as usize) {
-            if word.bits & (1u64 << offset) == 0 {
-                return None;
-            }
-            let before = if offset == 0 {
-                0
-            } else {
-                (word.bits << (64 - offset)).count_ones()
-            };
-            Some(u64::from(word.rank) + u64::from(before))
+            self.rank_word_at(pos, word)
         } else {
             self.get_rank_fallback(pos)
         }
@@ -233,7 +276,7 @@ impl BitVector {
         if self.bit_array.is_empty() && !self.ranked_words.is_empty() {
             let word = &self.ranked_words[(pos >> 6) as usize];
             let offset = (pos & 63) as u32;
-            return u64::from(word.rank)
+            return u64::from(self.compact_word_rank((pos >> 6) as usize, word))
                 + u64::from(if offset == 0 {
                     0
                 } else {
@@ -257,13 +300,14 @@ impl BitVector {
 }
 
 impl BooPhf {
-    // Compact rank words already contain the complete bitmap and absolute rank.
+    // Compact words and their small block bases retain the complete bitmap/rank.
     // Wider or incomplete tables retain their original full-width storage.
     pub(crate) fn retire_storage(self) {
         for level in self.levels {
             super::scratch_pages::retire(level.bitset.bit_array);
             super::scratch_pages::retire(level.bitset.ranks);
             super::scratch_pages::retire(level.bitset.ranked_words);
+            super::scratch_pages::retire(level.bitset.rank_bases);
         }
     }
 
@@ -298,6 +342,13 @@ impl BooPhf {
             let val = read_u64_le(reader)?;
             final_hash.insert(key.to_le_bytes(), val);
         }
+        let compact_levels = levels
+            .iter()
+            .take(nb_levels.saturating_sub(1).max(0) as usize)
+            .all(|level| {
+                level.hash_domain != 0
+                    && level.bitset.ranked_words.len() as u64 >= level.hash_domain.div_ceil(64)
+            });
         let phf = Self {
             _gamma: gamma,
             nb_levels,
@@ -305,11 +356,21 @@ impl BooPhf {
             nelem,
             levels,
             final_hash,
+            compact_levels,
         };
         Ok(phf)
     }
 
+    #[inline]
     pub fn lookup(&self, key: &[u8; 8]) -> Option<u64> {
+        if self.compact_levels {
+            self.lookup_impl::<true>(key)
+        } else {
+            self.lookup_impl::<false>(key)
+        }
+    }
+    #[inline(never)]
+    fn lookup_impl<const COMPACT: bool>(&self, key: &[u8; 8]) -> Option<u64> {
         let base_hash = minimizer_hash(key, 0);
         let mut s0 = base_hash ^ 0xAAAAAAAA55555555;
         let mut s1 = base_hash ^ 0x33333333CCCCCCCC;
@@ -317,21 +378,112 @@ impl BooPhf {
         let mut levels = self.levels.iter().take(max_level);
         // The first two seeds do not depend on the xorshift recurrence.
         if let Some(level) = levels.next()
-            && let Some(rank) = level.rank_for_hash(s0)
+            && let Some(rank) = level.rank_for_hash::<COMPACT>(s0)
         {
             return Some(rank);
         }
         if let Some(level) = levels.next()
-            && let Some(rank) = level.rank_for_hash(s1)
+            && let Some(rank) = level.rank_for_hash::<COMPACT>(s1)
         {
             return Some(rank);
         }
         for level in levels {
-            if let Some(rank) = level.rank_for_hash(xorshift_next(&mut s0, &mut s1)) {
+            if let Some(rank) = level.rank_for_hash::<COMPACT>(xorshift_next(&mut s0, &mut s1)) {
                 return Some(rank);
             }
         }
+        self.lookup_final(key)
+    }
+    #[cold]
+    #[inline(never)]
+    fn lookup_final(&self, key: &[u8; 8]) -> Option<u64> {
         self.final_hash.get(key).map(|v| v + self.lastbitsetrank)
+    }
+
+    // Independent loader probes can advance through one MPHF level together,
+    // exposing unrelated rank-table loads without changing any hash or rank.
+    // Missing/tail lanes never inspect the MPHF, and output order is unchanged.
+    pub(crate) fn lookup_batch8(&self, keys: &[Option<[u8; 8]>; 8]) -> [Option<u64>; 8] {
+        let mut result = [None; 8];
+        let mut first = [0; 8];
+        let mut second = [0; 8];
+        let mut pending = 0u8;
+        for (lane, key) in keys.iter().enumerate() {
+            if let Some(key) = key {
+                let base = minimizer_hash(key, 0);
+                first[lane] = base ^ 0xAAAAAAAA55555555;
+                second[lane] = base ^ 0x33333333CCCCCCCC;
+                pending |= 1 << lane;
+            }
+        }
+        let max_level = self.nb_levels.saturating_sub(1).max(0) as usize;
+        let mut buckets = [0; 8];
+        let mut words = [0u64; 8];
+        let mut ranks = [0u32; 8];
+        for (number, level) in self.levels.iter().take(max_level).enumerate() {
+            if pending == 0 {
+                break;
+            }
+            let mut loaded = 0u8;
+            // Gather every independent rank word before branching on hits.
+            // Testing each lane immediately would serialize the random loads.
+            for (lane, (bucket, (bits, rank))) in buckets
+                .iter_mut()
+                .zip(words.iter_mut().zip(ranks.iter_mut()))
+                .enumerate()
+            {
+                if pending & (1 << lane) != 0 {
+                    let hash = match number {
+                        0 => first[lane],
+                        1 => second[lane],
+                        _ => xorshift_next(&mut first[lane], &mut second[lane]),
+                    };
+                    *bucket = level.bucket_for_hash(hash);
+                    if let Some(word) = level.bitset.ranked_words.get((*bucket >> 6) as usize) {
+                        *bits = word.bits;
+                        *rank = level
+                            .bitset
+                            .compact_word_rank((*bucket >> 6) as usize, word);
+                        loaded |= 1 << lane;
+                    }
+                }
+            }
+            for (lane, (&bucket, (&bits, &base))) in
+                buckets.iter().zip(words.iter().zip(&ranks)).enumerate()
+            {
+                if pending & (1 << lane) == 0 {
+                    continue;
+                }
+                let rank = if loaded & (1 << lane) != 0 {
+                    let offset = (bucket & 63) as u32;
+                    if bits & (1u64 << offset) == 0 {
+                        None
+                    } else {
+                        let before = if offset == 0 {
+                            0
+                        } else {
+                            (bits << (64 - offset)).count_ones()
+                        };
+                        Some(u64::from(base) + u64::from(before))
+                    }
+                } else {
+                    level.bitset.get_rank_fallback(bucket)
+                };
+                if let Some(rank) = rank {
+                    result[lane] = Some(rank);
+                    pending &= !(1 << lane);
+                }
+            }
+        }
+        for (lane, (result, key)) in result.iter_mut().zip(keys).enumerate() {
+            if pending & (1 << lane) != 0 {
+                *result = self
+                    .final_hash
+                    .get(key.as_ref().expect("pending query has a key"))
+                    .map(|value| value + self.lastbitsetrank);
+            }
+        }
+        result
     }
 
     pub fn debug_lookup(&self, key: &[u8; 8]) -> (Option<u64>, MphfDebugInfo) {
@@ -494,8 +646,19 @@ pub fn encode_minimizer_rep(seq: &[u8]) -> Option<[u8; 8]> {
     Some(rep.to_le_bytes())
 }
 
+/// The serialized minimizer key is exactly eight little-endian bytes.
+/// This is the fixed-length form of wyhash(key,0), followed by the original
+/// external seed XOR. Keep generic byte hashing as the independent oracle.
+#[inline]
 pub fn minimizer_hash(key: &[u8; 8], seed: u64) -> u64 {
-    wyhash(key, 0) ^ seed
+    let word = u64::from_le_bytes(*key);
+    wymix(
+        WYHASH_SECRET[1] ^ 8,
+        wymix(
+            word.rotate_left(32) ^ WYHASH_SECRET[1],
+            word ^ WYHASH_SECRET[0],
+        ),
+    ) ^ seed
 }
 
 fn encode_word_pair(seq: &[u8]) -> Option<(u64, u64)> {
@@ -532,6 +695,18 @@ fn xorshift_next(s0: &mut u64, s1: &mut u64) -> u64 {
     x ^= x << 23;
     *s1 = x ^ y ^ (x >> 17) ^ (y >> 26);
     s1.wrapping_add(y)
+}
+
+/// Exact seed-zero wyhash for two little-endian words (the16-byte REP key).
+/// Keep the generic byte hash as the independent format/compatibility oracle.
+#[inline]
+pub(crate) fn wyhash16_words(first: u64, second: u64) -> u64 {
+    let a = (first << 32) | u64::from(second as u32);
+    let b = (second & 0xffff_ffff_0000_0000) | (first >> 32);
+    wymix(
+        WYHASH_SECRET[1] ^ 16,
+        wymix(a ^ WYHASH_SECRET[1], b ^ WYHASH_SECRET[0]),
+    )
 }
 
 pub(crate) fn wyhash(key: &[u8], seed: u64) -> u64 {
@@ -746,7 +921,48 @@ mod mphf_lookup_tests {
 
     #[test]
     fn lookup_matches_diagnostic_oracle_across_hash_levels() {
-        assert_eq!(std::mem::size_of::<RankedBitWord>(), 12);
+        assert_eq!(std::mem::size_of::<RankedBitWord>(), 10);
+        // Independent full-width rank oracle at both1024-word base transitions,
+        // including the largest possible16-bit relative rank.
+        let mut words = vec![u64::MAX; 2051];
+        words[1023] = 0;
+        words[1024] = 5;
+        words[2048] = 1;
+        let mut rank = 17u64;
+        let ranks: Vec<_> = words
+            .chunks(8)
+            .map(|chunk| {
+                let base = rank;
+                rank += chunk.iter().map(|v| u64::from(v.count_ones())).sum::<u64>();
+                base
+            })
+            .collect();
+        let mut bytes = Vec::new();
+        for value in [words.len() as u64 * 64, words.len() as u64] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in &words {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&(ranks.len() as u64).to_le_bytes());
+        for value in &ranks {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut compact_words = BitVector::load(&mut std::io::Cursor::new(bytes)).unwrap();
+        let probes: Vec<_> = [0usize, 1, 1022, 1023, 1024, 1025, 2047, 2048, 2050]
+            .into_iter()
+            .flat_map(|word| [0usize, 1, 17, 63].map(move |offset| (word * 64 + offset) as u64))
+            .collect();
+        let expected: Vec<_> = probes
+            .iter()
+            .map(|&pos| compact_words.get(pos).then(|| compact_words.rank(pos)))
+            .collect();
+        assert_eq!(compact_words.rank_bases.len(), 3);
+        compact_words.bit_array.clear();
+        compact_words.ranks.clear();
+        for (&pos, expected) in probes.iter().zip(expected) {
+            assert_eq!(compact_words.get_rank(pos), expected);
+        }
         for base in [u64::from(u32::MAX) - 1, u64::from(u32::MAX) + 1] {
             let bytes: Vec<u8> = [64u64, 1, 0b101, 1, base]
                 .into_iter()
@@ -800,12 +1016,102 @@ mod mphf_lookup_tests {
                 );
             }
         }
-        for _ in 0..20_000 {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let key = state.to_le_bytes();
-            assert_eq!(mphf.lookup(&key), mphf.debug_lookup(&key).0);
+        assert!(mphf.compact_levels);
+        let mut fallback = mphf.clone();
+        fallback.compact_levels = false;
+        for level in &mut fallback.levels {
+            level.bitset.ranked_words.clear();
         }
+        for batch in 0..2500 {
+            let keys = std::array::from_fn(|lane| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (lane < batch % 9).then_some(state.to_le_bytes())
+            });
+            let expected = keys.map(|key| key.and_then(|key| mphf.debug_lookup(&key).0));
+            assert_eq!(mphf.lookup_batch8(&keys), expected);
+            assert_eq!(compact.lookup_batch8(&keys), expected);
+            assert_eq!(fallback.lookup_batch8(&keys), expected);
+            for key in keys.into_iter().flatten() {
+                assert_eq!(mphf.lookup(&key), mphf.debug_lookup(&key).0);
+                assert_eq!(compact.lookup(&key), mphf.debug_lookup(&key).0);
+                assert_eq!(fallback.lookup(&key), mphf.debug_lookup(&key).0);
+            }
+        }
+        let key = 1729u64.to_le_bytes();
+        let mut tail = mphf;
+        tail.nb_levels = 1;
+        tail.levels.clear();
+        tail.final_hash = HashMap::from([(key, 12)]);
+        tail.lastbitsetrank = 7;
+        let keys = [
+            Some(key),
+            None,
+            Some([0; 8]),
+            None,
+            Some(key),
+            None,
+            None,
+            None,
+        ];
+        assert_eq!(
+            tail.lookup_batch8(&keys),
+            [Some(19), None, None, None, Some(19), None, None, None]
+        );
+    }
+}
+
+#[cfg(test)]
+mod exact_rep_hash_tests {
+    #[test]
+    fn fixed_minimizer_keys_equal_generic_bytes_for_all_bits_and_seeds() {
+        let check = |word: u64| {
+            let bytes = word.to_le_bytes();
+            for seed in [0, 1, u64::MAX] {
+                assert_eq!(
+                    super::minimizer_hash(&bytes, seed),
+                    super::wyhash(&bytes, 0) ^ seed
+                );
+            }
+        };
+        for bit in 0..64 {
+            check(1u64 << bit);
+            check(!(1u64 << bit));
+        }
+        for word in [0, u64::MAX, u32::MAX as u64, 1u64 << 32] {
+            check(word);
+        }
+        let mut state = 59u64;
+        for _ in 0..4096 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            check(state);
+        }
+    }
+
+    #[test]
+    fn fixed_words_equal_generic_byte_hash_in_both_orders() {
+        let mut state = 17u64;
+        for first in [0, 1, u32::MAX as u64, 1u64 << 32, u64::MAX] {
+            for second in [0, 1, u64::MAX] {
+                check(first, second);
+            }
+        }
+        for _ in 0..4096 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let first = state;
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            check(first, state);
+            check(state, first);
+        }
+    }
+    fn check(first: u64, second: u64) {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&first.to_le_bytes());
+        bytes[8..].copy_from_slice(&second.to_le_bytes());
+        assert_eq!(
+            super::wyhash16_words(first, second),
+            super::wyhash(&bytes, 0)
+        );
     }
 }

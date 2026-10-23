@@ -65,7 +65,7 @@ impl Hasher for EcFingerprintHasher {
 }
 
 pub(crate) struct SharedEcKey {
-    ec: Vec<u32>,
+    ec: Box<[u32]>,
     previous: Option<Arc<SharedEcKey>>,
 }
 pub(crate) type SharedEcKeys = Vec<Arc<SharedEcKey>>;
@@ -87,13 +87,16 @@ impl SharedEcPool {
             .expect("EC pool poisoned");
         let mut node = shard.get(&hash);
         while let Some(key) = node {
-            if key.ec == ec {
+            if key.ec.as_ref() == ec.as_slice() {
                 return Arc::clone(key);
             }
             node = key.previous.as_ref();
         }
         let previous = shard.get(&hash).cloned();
-        let key = Arc::new(SharedEcKey { ec, previous });
+        let key = Arc::new(SharedEcKey {
+            ec: ec.into_boxed_slice(),
+            previous,
+        });
         shard.insert(hash, Arc::clone(&key));
         key
     }
@@ -187,7 +190,7 @@ impl EcCountMap {
                 let head = Self::head_id(*entry.get(), hash, &self.wide_heads);
                 let mut id = head;
                 loop {
-                    if keys.map_or_else(|| classes[id].as_slice(), |k| k[id].ec.as_slice()) == ec {
+                    if keys.map_or_else(|| classes[id].as_slice(), |k| k[id].ec.as_ref()) == ec {
                         return (id, false);
                     }
                     match self.collisions.get(&id) {
@@ -209,7 +212,7 @@ impl EcCountMap {
         let hash = Self::folded(hash);
         let mut id = Self::head_id(*self.entries.get(&hash)?, hash, &self.wide_heads);
         loop {
-            if keys.map_or_else(|| classes[id].as_slice(), |k| k[id].ec.as_slice()) == ec {
+            if keys.map_or_else(|| classes[id].as_slice(), |k| k[id].ec.as_ref()) == ec {
                 return Some(id);
             }
             id = *self.collisions.get(&id)?;
@@ -299,7 +302,8 @@ pub(crate) fn merge_shared_ec_counts(
     for (key, &count) in keys.into_iter().zip(&other.counts) {
         let (id, new) = target_map.get_or_insert(&key.ec, &target.ec_list);
         if new {
-            let ec = Arc::try_unwrap(key).map_or_else(|key| key.ec.clone(), |key| key.ec);
+            let ec =
+                Arc::try_unwrap(key).map_or_else(|key| key.ec.to_vec(), |key| key.ec.into_vec());
             target.ec_list.push(ec);
             target.counts.push(count);
         } else {
@@ -348,8 +352,8 @@ mod count_map_tests {
             merge_shared_ec_counts(&mut target, &mut map, worker, worker_map.into_shared_keys());
         }
         pool.clear();
-        assert_eq!(first.ec, [1, 2]);
-        assert_eq!(different.ec, [2, 1]);
+        assert_eq!(first.ec.as_ref(), [1, 2]);
+        assert_eq!(different.ec.as_ref(), [2, 1]);
         assert_eq!(target.reads_processed, 12);
         for (key, count) in [(vec![1, 2], 6), (vec![2, 1], 3), (vec![], 3)] {
             assert_eq!(

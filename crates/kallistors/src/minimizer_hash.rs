@@ -50,6 +50,55 @@ fn rep_grouped_23(word: u64) -> u64 {
         ^ REP_HASH_GROUPS[2][((word >> 42) & 15) as usize].rotate_left(21)
 }
 
+// Paired initialization shares each validated forward-word table lookup.
+// The second lane contains the exact REP state of that group's reverse
+// complement; opposite rotations place it in the reversed complete window.
+const fn paired_groups<const N: usize>(bases: usize) -> [(u64, u64); N] {
+    let mut out = [(0, 0); N];
+    let mut word = 0;
+    while word < N {
+        let mut reverse = 0;
+        let mut remaining = word;
+        let mut i = 0;
+        while i < bases {
+            reverse = (reverse << 2) | ((remaining & 3) ^ 3);
+            remaining >>= 2;
+            i += 1;
+        }
+        out[word] = (
+            REP_HASH_GROUPS[bases][word],
+            REP_HASH_GROUPS[bases][reverse],
+        );
+        word += 1;
+    }
+    out
+}
+
+static REP_PAIRED_THREE: [(u64, u64); 64] = paired_groups(3);
+static REP_PAIRED_TWO: [(u64, u64); 16] = paired_groups(2);
+
+#[inline]
+pub(crate) fn paired_state_23(word: u64) -> (u64, u64) {
+    let tail = REP_PAIRED_TWO[((word >> 42) & 15) as usize];
+    let mut forward = tail.0.rotate_left(21);
+    let mut reverse = tail.1;
+    macro_rules! add_group {
+        ($offset:literal) => {{
+            let pair = REP_PAIRED_THREE[((word >> (2 * $offset)) & 63) as usize];
+            forward ^= pair.0.rotate_left($offset);
+            reverse ^= pair.1.rotate_left(20 - $offset);
+        }};
+    }
+    add_group!(0);
+    add_group!(3);
+    add_group!(6);
+    add_group!(9);
+    add_group!(12);
+    add_group!(15);
+    add_group!(18);
+    (forward, reverse)
+}
+
 /// Exact REP state from a validated right-aligned A/C/G/T two-bit word.
 #[inline]
 pub(crate) fn grouped_state(mut word: u64, g: usize) -> u64 {

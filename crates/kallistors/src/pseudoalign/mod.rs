@@ -25,20 +25,23 @@ mod io;
 mod minimizers;
 mod onlist;
 mod paired;
+mod paired_counting;
 mod single;
 mod threaded;
 mod utils;
 use bias::bias_hexamer_for_match;
 pub use bifrost::{
-    BifrostIndex, build_bifrost_index, build_bifrost_index_quant_deferred_threaded,
-    build_bifrost_index_quant_packed_threaded, build_bifrost_index_quant_threaded,
-    build_bifrost_index_threaded, build_bifrost_index_with_kmer_pos,
-    build_bifrost_index_with_kmer_pos_threaded, build_bifrost_index_with_positions,
-    build_bifrost_index_with_positions_threaded,
+    BifrostIndex, build_bifrost_index, build_bifrost_index_positional_packed_threaded,
+    build_bifrost_index_quant_deferred_threaded, build_bifrost_index_quant_packed_threaded,
+    build_bifrost_index_quant_threaded, build_bifrost_index_threaded,
+    build_bifrost_index_with_kmer_pos, build_bifrost_index_with_kmer_pos_threaded,
+    build_bifrost_index_with_positions, build_bifrost_index_with_positions_threaded,
 };
 pub use core::local_kmer_hits;
 use core::{
-    apply_strand_filter, ec_for_read_bifrost, filter_ec_by_fragment, reset_thread_local_caches,
+    apply_strand_filter, ec_for_read_bifrost, ec_for_read_bifrost_single,
+    ec_for_read_bifrost_single_borrowed, filter_ec_by_fragment, filter_ec_by_fragment_cow,
+    filter_ec_by_fragment_in_place, reset_thread_local_caches,
 };
 pub use debug::{
     DebugFailReason, DebugReport, DroppedHitTrace, JumpDecisionTrace, MinimizerCandidateTrace,
@@ -62,6 +65,7 @@ pub use paired::{
     pseudoalign_paired_bifrost_with_options, pseudoalign_paired_bifrost_with_strand,
     pseudoalign_paired_naive, trace_read_pair_bifrost,
 };
+pub use paired_counting::{PairedCountingResult, ec_for_pair_bifrost_counting};
 pub use single::{
     pseudoalign_single_end, pseudoalign_single_end_bifrost, pseudoalign_single_end_bifrost_debug,
     pseudoalign_single_end_bifrost_debug_with_options,
@@ -74,7 +78,7 @@ pub use threaded::{
     pseudoalign_paired_bifrost_with_options_threaded,
     pseudoalign_single_end_bifrost_with_options_threaded,
 };
-pub(super) use utils::{add_ec_count, merge_ec_counts};
+pub(super) use utils::add_ec_count;
 
 const KMER_BYTES_CANDIDATES: [usize; 4] = [8, 16, 24, 32];
 const BATCH_SIZE: usize = 12_000;
@@ -332,7 +336,8 @@ pub fn ec_for_sequence_bifrost(
 
 /// Pseudoalign a sequence for counting without retaining placement/hit metadata.
 /// Unchanged equivalence classes borrow the index; intersections own their result.
-/// Strand-aware queries retain the full filtering path.
+/// Ordinary strand filtering retains its orientation hit; comprehensive filters
+/// retain the full hit collection.
 #[inline(always)]
 pub fn ec_for_sequence_bifrost_counting<'index>(
     index: &'index BifrostIndex,
@@ -340,10 +345,13 @@ pub fn ec_for_sequence_bifrost_counting<'index>(
     strand: Strand,
     options: PseudoalignOptions,
 ) -> Option<std::borrow::Cow<'index, [u32]>> {
-    if options.strand_specific.is_some() {
+    if !counting_filters_supported(index, options) {
         return ec_for_sequence_bifrost(index, seq, strand, options).map(std::borrow::Cow::Owned);
     }
-    let read_ec = core::ec_for_read_bifrost_counting_borrowed(index, seq, strand, options)?;
+    let mut read_ec = core::ec_for_read_bifrost_counting_borrowed(index, seq, strand, options)?;
+    if let Some(mode) = options.strand_specific {
+        read_ec = read_ec.filter_strand(index, mode, true);
+    }
     if read_ec.ec().is_empty() {
         return None;
     }
@@ -351,6 +359,18 @@ pub fn ec_for_sequence_bifrost_counting<'index>(
         Some(ec) => std::borrow::Cow::Borrowed(ec),
         None => std::borrow::Cow::Owned(read_ec.read.ec),
     })
+}
+
+fn counting_filters_supported(index: &BifrostIndex, options: PseudoalignOptions) -> bool {
+    options.strand_specific.is_none()
+        || !(options.do_union
+            || options.no_jump
+            || index.use_shade
+            || options.investigation.any_enabled())
+}
+
+fn bias_sampling_pending(bias: Option<&BiasCounts>, max: usize) -> bool {
+    bias.is_some_and(|counts| counts.total < max as u64)
 }
 
 pub fn unmapped_kmer_ratio_bifrost(
@@ -417,6 +437,7 @@ pub struct PseudoalignOptions {
     pub skip_overcrowded_minimizer: bool,
     pub kallisto_direct_kmer: bool,
     pub kallisto_bifrost_find: bool,
+    /// Legacy compatibility field; it has no effect on the current scanner.
     pub kallisto_sparse_hits: bool,
     pub bias: bool,
     pub max_bias: usize,
@@ -498,6 +519,21 @@ struct BorrowedReadEc<'index> {
     borrowed: Option<&'index [u32]>,
 }
 impl<'index> BorrowedReadEc<'index> {
+    fn filter_strand(mut self, index: &BifrostIndex, mode: StrandSpecific, first: bool) -> Self {
+        if let Some(hit) = self.read.first_hit.as_ref() {
+            let ec = match self.borrowed.take() {
+                Some(ec) => std::borrow::Cow::Borrowed(ec),
+                None => std::borrow::Cow::Owned(std::mem::take(&mut self.read.ec)),
+            };
+            let ec = core::filter_ec_by_strand_cow(index, ec, hit, mode, first);
+            self.read.hard_reject_pair |= ec.is_empty();
+            match ec {
+                std::borrow::Cow::Borrowed(ec) => self.borrowed = Some(ec),
+                std::borrow::Cow::Owned(ec) => self.read.ec = ec,
+            }
+        }
+        self
+    }
     fn owned(read: ReadEc) -> Self {
         Self {
             read,
@@ -600,11 +636,11 @@ pub fn build_kmer_ec_index(path: &Path) -> Result<KmerEcIndex> {
                 if let Some((fwd, rev)) = encode_kmer_pair(&seq[pos..pos + k]) {
                     map.entry(fwd)
                         .and_modify(|existing| merge_sorted_unique(existing, &block.ec))
-                        .or_insert_with(|| block.ec.clone());
+                        .or_insert_with(|| block.ec.to_vec());
                     if rev != fwd {
                         map.entry(rev)
                             .and_modify(|existing| merge_sorted_unique(existing, &block.ec))
-                            .or_insert_with(|| block.ec.clone());
+                            .or_insert_with(|| block.ec.to_vec());
                     }
                 }
             }

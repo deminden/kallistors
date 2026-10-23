@@ -34,7 +34,15 @@ pub(crate) fn ec_for_read_bifrost_counting_borrowed<'index>(
 ) -> Option<BorrowedReadEc<'index>> {
     if index.k > 0 && seq.len() >= index.k && fast_path_enabled(index, false, options) {
         super::runtime::ensure_cache_context(index);
-        super::fast::ec_for_read_bifrost_fast_counting_borrowed(index, seq, strand, options)
+        if options.strand_specific.is_some() {
+            super::fast::ec_for_read_bifrost_fast_counting_borrowed::<true>(
+                index, seq, strand, options,
+            )
+        } else {
+            super::fast::ec_for_read_bifrost_fast_counting_borrowed::<false>(
+                index, seq, strand, options,
+            )
+        }
     } else {
         ec_for_read_bifrost(index, seq, strand, None, options).map(BorrowedReadEc::owned)
     }
@@ -48,6 +56,35 @@ pub(crate) fn ec_for_read_bifrost_counting(
 ) -> Option<ReadEc> {
     ec_for_read_bifrost_counting_borrowed(index, seq, strand, options)
         .map(BorrowedReadEc::into_owned)
+}
+
+// Single-end fragment filtering needs the best placement, but ordinary
+// unstranded counting does not consume the complete hit vector.
+pub(crate) fn ec_for_read_bifrost_single(
+    index: &BifrostIndex,
+    seq: &[u8],
+    strand: Strand,
+    options: PseudoalignOptions,
+) -> Option<ReadEc> {
+    ec_for_read_bifrost_single_borrowed(index, seq, strand, options).map(BorrowedReadEc::into_owned)
+}
+
+pub(crate) fn ec_for_read_bifrost_single_borrowed<'index>(
+    index: &'index BifrostIndex,
+    seq: &[u8],
+    strand: Strand,
+    options: PseudoalignOptions,
+) -> Option<BorrowedReadEc<'index>> {
+    if index.k > 0
+        && seq.len() >= index.k
+        && !options.investigation.any_enabled()
+        && fast_path_enabled(index, false, options)
+    {
+        super::runtime::ensure_cache_context(index);
+        super::fast::ec_for_read_bifrost_fast_counting_borrowed::<true>(index, seq, strand, options)
+    } else {
+        ec_for_read_bifrost(index, seq, strand, None, options).map(BorrowedReadEc::owned)
+    }
 }
 
 // Main parity scanner: stream hits, keep an online EC intersection, and jump when safe.
@@ -93,8 +130,6 @@ pub(crate) fn ec_for_read_bifrost(
     // Kallisto falls back to incremental scanning after a failed jump; track that window.
     let mut backoff_until: Option<usize> = None;
     let mut fallback_probe_pending = false;
-    // Legacy parity switch kept for CLI compatibility.
-    let _kallisto_sparse_hits = options.kallisto_sparse_hits;
 
     let mut pos = 0usize;
     let last_pos = seq.len() - index.k;

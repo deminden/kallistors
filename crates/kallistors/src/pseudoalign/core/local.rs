@@ -141,11 +141,11 @@ fn build_local_kmer_map(index: &BifrostIndex, unitig_ids: &[usize]) -> HashMap<u
             index.km_unitig_sequence(km_idx)
         };
         let Some(seq_ref) = seq_ref else { continue };
-        let blocks = match index.ec_blocks.get(unitig_id) {
+        let blocks = match index.flat_ec.owned_ec_blocks.get(unitig_id) {
             Some(v) => v,
             None => continue,
         };
-        for block in blocks {
+        for block in blocks.iter() {
             let start = block.lb as usize;
             let end = block.ub as usize;
             for pos in start..end {
@@ -155,11 +155,11 @@ fn build_local_kmer_map(index: &BifrostIndex, unitig_ids: &[usize]) -> HashMap<u
                 if let Some((fwd, rev)) = encode_kmer_pair(&seq_ref[pos..pos + index.k]) {
                     map.entry(fwd)
                         .and_modify(|existing| merge_sorted_unique(existing, &block.ec))
-                        .or_insert_with(|| block.ec.clone());
+                        .or_insert_with(|| block.ec.to_vec());
                     if rev != fwd {
                         map.entry(rev)
                             .and_modify(|existing| merge_sorted_unique(existing, &block.ec))
-                            .or_insert_with(|| block.ec.clone());
+                            .or_insert_with(|| block.ec.to_vec());
                     }
                 }
             }
@@ -217,7 +217,7 @@ pub fn local_kmer_hits(
 
 fn special_ec_for_kmer<'a>(index: &'a BifrostIndex, kmer: &'a [u8]) -> Option<&'a [u32]> {
     let uid = special_unitig_for_kmer(index, kmer)?;
-    let _ = index.ec_blocks.get(uid)?;
+    let _ = index.flat_ec.owned_ec_blocks.get(uid)?;
     let block_idx = block_index_for_position_fast(index, uid, 0)?;
     Some(index.flat_ec.ec(uid, block_idx))
 }

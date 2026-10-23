@@ -8,33 +8,31 @@ use kallistors::io::{FastqInput, FastqReader, PackedSeqBatch, PackedSeqBatchSour
 use kallistors::pseudoalign::BifrostIndex;
 
 mod query_cache;
-use query_cache::QueryCache;
+pub(super) use query_cache::QueryCache;
 use rayon::prelude::*;
 
 use super::input::ReadGroup;
 use super::{
-    BusArgs, BusProcessingConfig, BusRecord, BusWriteState, SliceSpec, TechnologySpec, intern_ec,
-    record_length, string_to_binary, write_bus_record,
+    BusArgs, BusProcessingConfig, BusWriteState, SliceSpec, TechnologySpec, string_to_binary,
 };
+
+use super::counting::{CountedRead as Counted, ReadTags, write_batch};
+type CountedRead<'a> = Counted<'a, ()>;
 
 const BATCH_READS: usize = 65_536;
 
 pub(super) fn supports(args: &BusArgs, spec: &TechnologySpec) -> bool {
     !args.bam
-        && !args.pseudobam
-        && !args.genomebam
-        && !args.long
-        && !args.unmapped
-        && !args.aa
+        && super::counting::supports(args)
         && !args.batch_barcodes
         && !spec.paired
         && !spec.keep_fastq_comments
         && spec.tag_len.is_none()
-        && spec.bc.len() == 1
-        && spec.umi.len() == 1
+        && !spec.bc.is_empty()
+        && !spec.umi.is_empty()
         && spec.seq.len() == 1
-        && spec.bc[0].file.is_some()
-        && spec.umi[0].file.is_some()
+        && spec.bc.iter().all(|slice| slice.file.is_some())
+        && spec.umi.iter().all(|slice| slice.file.is_some())
         && spec.seq[0].file.is_some()
 }
 
@@ -153,15 +151,6 @@ impl Drop for Readers {
     }
 }
 
-struct CountedRead<'index> {
-    barcode: u64,
-    umi: u64,
-    flags: u32,
-    barcode_len: usize,
-    umi_len: usize,
-    ec: Option<std::borrow::Cow<'index, [u32]>>,
-}
-
 fn sequence(
     batches: &[PackedSeqBatch],
     read: usize,
@@ -184,6 +173,30 @@ fn sliced(seq: &[u8], slice: SliceSpec) -> Option<&[u8]> {
     seq.get(slice.start..slice.stop.unwrap_or(seq.len()))
 }
 
+fn sequence_slices<'a>(
+    batches: &'a [PackedSeqBatch],
+    read: usize,
+    slices: &[SliceSpec],
+    interleaved: bool,
+    nfiles: usize,
+) -> Result<Option<std::borrow::Cow<'a, [u8]>>> {
+    if slices.len() == 1 {
+        let slice = slices[0];
+        return Ok(
+            sliced(sequence(batches, read, slice, interleaved, nfiles)?, slice)
+                .map(std::borrow::Cow::Borrowed),
+        );
+    }
+    let mut joined = Vec::new();
+    for &slice in slices {
+        let Some(part) = sliced(sequence(batches, read, slice, interleaved, nfiles)?, slice) else {
+            return Ok(None);
+        };
+        joined.extend_from_slice(part);
+    }
+    Ok(Some(std::borrow::Cow::Owned(joined)))
+}
+
 fn classify<'index>(
     batches: &[PackedSeqBatch],
     read: usize,
@@ -191,12 +204,10 @@ fn classify<'index>(
     spec: &TechnologySpec,
     cache: &QueryCache<'index>,
 ) -> Result<Option<CountedRead<'index>>> {
-    let barcode = sequence(batches, read, spec.bc[0], interleaved, spec.nfiles)?;
-    let Some(barcode) = sliced(barcode, spec.bc[0]) else {
+    let Some(barcode) = sequence_slices(batches, read, &spec.bc, interleaved, spec.nfiles)? else {
         return Ok(None);
     };
-    let umi = sequence(batches, read, spec.umi[0], interleaved, spec.nfiles)?;
-    let Some(umi) = sliced(umi, spec.umi[0]) else {
+    let Some(umi) = sequence_slices(batches, read, &spec.umi, interleaved, spec.nfiles)? else {
         return Ok(None);
     };
     let query = sequence(batches, read, spec.seq[0], interleaved, spec.nfiles)?;
@@ -211,11 +222,14 @@ fn classify<'index>(
     let mut barcode_flags = 0;
     let mut umi_flags = 0;
     Ok(Some(CountedRead {
-        barcode: string_to_binary(barcode, &mut barcode_flags, "barcode")?,
-        umi: string_to_binary(umi, &mut umi_flags, "UMI")?,
-        flags: barcode_flags | (umi_flags << 8),
-        barcode_len: barcode.len(),
-        umi_len: umi.len(),
+        tags: ReadTags {
+            barcode: string_to_binary(&barcode, &mut barcode_flags, "barcode")?,
+            umi: string_to_binary(&umi, &mut umi_flags, "UMI")?,
+            flags: barcode_flags | (umi_flags << 8),
+            barcode_len: barcode.len(),
+            umi_len: umi.len(),
+        },
+        fragment_length: (),
         ec: cache.lookup(query),
     }))
 }
@@ -282,38 +296,9 @@ pub(super) fn process<W: std::io::Write>(
     processing: BusProcessingConfig,
     state: &mut BusWriteState<'_, W>,
 ) -> Result<(u64, u64, u64)> {
-    let (mut processed, mut aligned, mut unique) = (0u64, 0u64, 0u64);
+    let mut counts = (0u64, 0u64, 0u64);
     let mut consume = |results: Vec<Result<Option<CountedRead>>>| -> Result<()> {
-        for result in results {
-            let number = processed;
-            processed += 1;
-            let Some(read) = result? else { continue };
-            record_length(state.bc_len_hist, read.barcode_len);
-            record_length(state.umi_len_hist, read.umi_len);
-            let Some(ec) = read.ec else { continue };
-            aligned += 1;
-            unique += u64::from(ec.len() == 1);
-            let ec = if let Some(&id) = state.ec_map.get(ec.as_ref()) {
-                id
-            } else {
-                intern_ec(state.ec_map, state.ec_list, ec.into_owned())
-            };
-            write_bus_record(
-                state.writer,
-                &BusRecord {
-                    barcode: read.barcode,
-                    umi: read.umi,
-                    ec,
-                    count: 1,
-                    flags: if args.num {
-                        u32::try_from(number).unwrap_or(u32::MAX)
-                    } else {
-                        read.flags
-                    },
-                },
-            )?;
-        }
-        Ok(())
+        write_batch(results, args.num, &mut counts, state)
     };
     if args.threads > 1 {
         std::thread::scope(|scope| -> Result<()> {
@@ -344,5 +329,5 @@ pub(super) fn process<W: std::io::Write>(
             Ok(true)
         })?;
     }
-    Ok((processed, aligned, unique))
+    Ok(counts)
 }

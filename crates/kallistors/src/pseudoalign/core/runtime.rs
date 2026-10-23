@@ -21,9 +21,8 @@ pub(crate) fn env_flag(cache: &'static OnceLock<bool>, name: &'static str) -> bo
 #[derive(Clone, Copy, Default)]
 struct MphfCacheEntry {
     key: [u8; 8],
-    idx: u32,
-    state: u8,
-    fingerprint: u16,
+    // Original u32 index, full u16 fingerprint and two-bit presence state.
+    value: u64,
 }
 
 pub(crate) struct MphfLookupCache {
@@ -32,7 +31,7 @@ pub(crate) struct MphfLookupCache {
     minimizers: MinimizerCandidateCache,
     primary_cursor: super::super::minimizers::PrimaryMinimizerCursor,
     query_fingerprints: super::super::fingerprints::QueryFingerprintCache,
-    pub(super) scan_scratch: super::fast::FastScannerScratch,
+    pub(super) scan_scratch: Option<Box<super::fast::FastScannerScratch>>,
     pub(super) slow_rev_buf: Vec<u8>,
 }
 
@@ -44,7 +43,7 @@ impl Default for MphfLookupCache {
             minimizers: MinimizerCandidateCache::new(),
             primary_cursor: Default::default(),
             query_fingerprints: super::super::fingerprints::QueryFingerprintCache::default(),
-            scan_scratch: super::fast::FastScannerScratch::default(),
+            scan_scratch: Some(Box::default()),
             slow_rev_buf: Vec::new(),
         }
     }
@@ -136,7 +135,7 @@ struct MinimizerCandidateCache {
 impl MinimizerCandidateCache {
     fn new() -> Self {
         Self {
-            entries: vec![MinimizerCandidateCacheEntry::default(); 1 << 16],
+            entries: Vec::new(),
             ties: std::collections::HashMap::new(),
         }
     }
@@ -148,6 +147,9 @@ impl MinimizerCandidateCache {
 
     #[inline]
     fn get_into(&self, key: u64, out: &mut Vec<([u8; 8], usize)>) -> bool {
+        if self.entries.is_empty() {
+            return false;
+        }
         let slot = self.slot(key);
         let entry = &self.entries[slot];
         if entry.value == 0 || entry.key != key {
@@ -180,6 +182,12 @@ impl MinimizerCandidateCache {
 
     #[inline]
     fn put(&mut self, key: u64, values: &[([u8; 8], usize)]) {
+        // BUS can bypass this cache entirely. Allocate its table only on an
+        // actual insertion; bulk retains the same capacity and cache answers.
+        if self.entries.is_empty() {
+            self.entries
+                .resize(1 << 16, MinimizerCandidateCacheEntry::default());
+        }
         let slot = self.slot(key);
         let value = match values {
             [] => 1,
@@ -437,8 +445,9 @@ fn mphf_lookup_cached(
     let word = u64::from_le_bytes(*min_bytes);
     let slot = (word.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 53) as usize;
     let entry = &cache.entries[slot];
-    if entry.state != 0 && entry.key == *min_bytes {
-        return (entry.state == 1).then_some((entry.idx as usize, entry.fingerprint));
+    let state = entry.value >> 48;
+    if state != 0 && entry.key == *min_bytes {
+        return (state == 1).then_some((entry.value as u32 as usize, (entry.value >> 32) as u16));
     }
     let idx = index
         .mphf
@@ -450,9 +459,9 @@ fn mphf_lookup_cached(
         .unwrap_or(0);
     cache.entries[slot] = MphfCacheEntry {
         key: *min_bytes,
-        idx: idx.unwrap_or(0) as u32,
-        state: if idx.is_some() { 1 } else { 2 },
-        fingerprint,
+        value: u64::from(idx.unwrap_or(0) as u32)
+            | (u64::from(fingerprint) << 32)
+            | ((if idx.is_some() { 1u64 } else { 2u64 }) << 48),
     };
     idx.map(|idx| (idx, fingerprint))
 }
@@ -503,6 +512,22 @@ pub(crate) fn minimizer_candidates_cached_into_with_code(
         cache.minimizers.put(fwd_code, out);
     }
     true
+}
+
+#[inline]
+pub(crate) fn minimizer_candidates_single_cell(
+    cache: &mut MphfLookupCache,
+    kmer: &[u8],
+    g: usize,
+    forward: u64,
+    reverse: u64,
+    out: &mut Vec<([u8; 8], usize)>,
+) -> bool {
+    if kmer.len() == 31 && g == 23 {
+        cache.primary_cursor.fill_bus(forward, reverse, out)
+    } else {
+        minimizers_for_encoded_kmer_into(kmer, g, forward, reverse, out)
+    }
 }
 
 #[inline]
@@ -609,6 +634,8 @@ mod cache_context_tests {
     fn candidate_cache_never_truncates_a_tie_list() {
         assert_eq!(std::mem::size_of::<MinimizerCandidateCacheEntry>(), 16);
         let mut cache = MinimizerCandidateCache::new();
+        assert!(cache.entries.is_empty());
+        assert!(cache.get(0).is_none());
         for word in [0, 0x8000_0000_0000_0000u64, 0xffff_ffff_ffff_ff00] {
             for position in [0, 1, 31, 127] {
                 cache.put(40, &[(word.to_le_bytes(), position)]);

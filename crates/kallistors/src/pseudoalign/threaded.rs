@@ -144,37 +144,43 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
     let mut merged = EcCounts::new(options.bias);
     let mut merged_map: EcCountMap = EcCountMap::default();
     let mut final_error: Option<Error> = None;
+    let key_pool = Arc::new(super::utils::SharedEcPool::default());
 
     thread::scope(|scope| {
-        let (producer_tx, producer_rx) = bounded::<Result<PackedSeqBatch>>(threads * 2);
-        let (work_tx, work_rx) = bounded::<PackedSeqBatch>(threads * 2);
+        // One prefetched batch overlaps decoding; rendezvous dispatch bounds read
+        // storage independently of worker count without dropping or reordering input.
+        let (producer_tx, producer_rx) = bounded::<Result<PackedSeqBatch>>(1);
+        let (work_tx, work_rx) = bounded::<PackedSeqBatch>(0);
         let mut handles = Vec::with_capacity(threads);
 
         let read_start = Instant::now();
-        let producer =
-            scope.spawn(move || produce_batches(reader, &producer_tx, super::BATCH_SIZE));
+        let producer = scope.spawn(move || produce_batches(reader, &producer_tx, 4_096));
 
         let pseudoalign_start = Instant::now();
         for _ in 0..threads {
             let rx = work_rx.clone();
-            handles.push(scope.spawn(move || -> Result<EcCounts> {
-                let mut acc = EcCounts::new(options.bias);
-                let mut acc_map: EcCountMap = EcCountMap::default();
-                while let Ok(batch) = rx.recv() {
-                    super::single::pseudoalign_single_end_bifrost_batch_into(
-                        index,
-                        batch,
-                        strand,
-                        filter,
-                        options,
-                        &mut acc,
-                        &mut acc_map,
-                    );
-                }
-                Ok(acc)
-            }));
+            let key_pool = Arc::clone(&key_pool);
+            handles.push(
+                scope.spawn(move || -> Result<(EcCounts, super::utils::SharedEcKeys)> {
+                    let mut acc = EcCounts::new(options.bias);
+                    let mut acc_map = EcCountMap::shared(key_pool);
+                    while let Ok(batch) = rx.recv() {
+                        super::single::pseudoalign_single_end_bifrost_batch_into(
+                            index,
+                            batch,
+                            strand,
+                            filter,
+                            options,
+                            &mut acc,
+                            &mut acc_map,
+                        );
+                    }
+                    Ok((acc, acc_map.into_shared_keys()))
+                }),
+            );
         }
 
+        drop(work_rx);
         loop {
             match recv_batch(&producer_rx) {
                 Ok(Some(batch)) => {
@@ -191,6 +197,7 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
             }
         }
         drop(work_tx);
+        drop(producer_rx);
 
         match producer.join() {
             Ok(Ok(())) => {}
@@ -207,11 +214,17 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
         }
         timing::add_duration(Stage::FastqReadDecompress, read_start.elapsed());
 
+        key_pool.clear();
         for handle in handles {
             match handle.join() {
-                Ok(Ok(counts)) => {
+                Ok(Ok((counts, keys))) => {
                     let merge_start = Instant::now();
-                    super::merge_ec_counts(&mut merged, &mut merged_map, counts);
+                    super::utils::merge_shared_ec_counts(
+                        &mut merged,
+                        &mut merged_map,
+                        counts,
+                        keys,
+                    );
                     timing::add_duration(Stage::EcMerge, merge_start.elapsed());
                 }
                 Ok(Err(err)) => {

@@ -9,3 +9,7 @@ pub use minimizer::debug_minimizer_lookup;
 pub(super) use tracing::placement_for_match;
 pub(crate) use tracing::trace_result_from_debug_state;
 pub use tracing::{trace_read_bifrost, trace_read_bifrost_with_hits};
+
+mod paired;
+pub use paired::trace_read_pair_bifrost;
+pub(super) use paired::{PairedFinalTraceRow, PairedFinalTraceWriter};

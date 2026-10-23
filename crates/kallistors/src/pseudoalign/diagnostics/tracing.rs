@@ -40,7 +40,7 @@ pub fn trace_read_bifrost_with_hits(
     let mut shade_scratch = Vec::new();
     let mut hits = Vec::with_capacity(read_ec.hits.len());
     for hit in &read_ec.hits {
-        let Some(blocks) = index.ec_blocks.get(hit.unitig_id) else {
+        let Some(blocks) = index.flat_ec.owned_ec_blocks.get(hit.unitig_id) else {
             continue;
         };
         let Some(block) = blocks.get(hit.block_idx) else {

@@ -35,6 +35,59 @@ fn preset_metadata_matches_kallisto_layouts() {
 }
 
 #[test]
+fn ordinary_layouts_keep_parallel_counting_and_special_outputs_keep_metadata() {
+    for name in [
+        "10xv3",
+        "PARSEV3",
+        "SPLIT-SEQ",
+        "SURECELL",
+        "BDWTA",
+        "INDROPSV3",
+    ] {
+        let spec = technology_spec(name).unwrap();
+        for (fr_stranded, rf_stranded) in [(false, false), (true, false), (false, true)] {
+            let args = BusArgs {
+                fr_stranded,
+                rf_stranded,
+                ..Default::default()
+            };
+            assert!(super::fast::supports(&args, &spec), "{name}");
+        }
+    }
+    assert!(super::normalized::supports(&BusArgs {
+        paired: true,
+        batch_barcodes: true,
+        ..Default::default()
+    }));
+    let spec = technology_spec("10xv3").unwrap();
+    for args in [
+        BusArgs {
+            pseudobam: true,
+            ..Default::default()
+        },
+        BusArgs {
+            genomebam: true,
+            ..Default::default()
+        },
+        BusArgs {
+            long: true,
+            ..Default::default()
+        },
+        BusArgs {
+            unmapped: true,
+            ..Default::default()
+        },
+        BusArgs {
+            aa: true,
+            ..Default::default()
+        },
+    ] {
+        assert!(!super::fast::supports(&args, &spec));
+        assert!(!super::normalized::supports(&args));
+    }
+}
+
+#[test]
 fn bulk_is_single_end_by_default_and_pairable() {
     let mut spec = technology_spec("Bulk").unwrap();
     assert_eq!(spec.nfiles, 1);
@@ -308,7 +361,29 @@ fn matrix_ec_uses_comma_separated_transcript_lists() {
 
     write_matrix_ec(&path, &[vec![0, 2], vec![1]]).expect("write matrix.ec");
 
-    assert_eq!(std::fs::read_to_string(path).unwrap(), "0\t0,2\n1\t1\n");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "0\t0,2\n1\t1\n");
+    let values = vec![
+        vec![],
+        (0..20000u32).map(|v| v * 200003).collect(),
+        vec![0, 9, 10, 99, 100, 999, 1000, u32::MAX],
+        vec![],
+    ];
+    write_matrix_ec(&path, &values).unwrap();
+    let expected: String = values
+        .iter()
+        .enumerate()
+        .map(|(i, values)| {
+            format!(
+                "{i}\t{}\n",
+                values
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .collect();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
 }
 
 #[test]

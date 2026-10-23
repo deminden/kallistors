@@ -151,7 +151,7 @@ enum Commands {
         kallisto_direct_kmer: bool,
         #[arg(long)]
         kallisto_bifrost_find: bool,
-        #[arg(long)]
+        #[arg(long, help = "Legacy compatibility option; has no effect")]
         kallisto_sparse_hits: bool,
     },
     Quant {
@@ -204,7 +204,7 @@ enum Commands {
         kallisto_direct_kmer: bool,
         #[arg(long)]
         kallisto_bifrost_find: bool,
-        #[arg(long)]
+        #[arg(long, help = "Legacy compatibility option; has no effect")]
         kallisto_sparse_hits: bool,
         #[arg(long)]
         pseudobam: bool,
@@ -291,7 +291,7 @@ enum Commands {
         kallisto_direct_kmer: bool,
         #[arg(long)]
         kallisto_bifrost_find: bool,
-        #[arg(long)]
+        #[arg(long, help = "Legacy compatibility option; has no effect")]
         kallisto_sparse_hits: bool,
         reads: Vec<std::path::PathBuf>,
     },
@@ -352,7 +352,7 @@ enum Commands {
         kallisto_direct_kmer: bool,
         #[arg(long)]
         kallisto_bifrost_find: bool,
-        #[arg(long)]
+        #[arg(long, help = "Legacy compatibility option; has no effect")]
         kallisto_sparse_hits: bool,
         #[arg(long, value_enum, default_value_t = Strand::Unstranded)]
         strand: Strand,
@@ -401,7 +401,7 @@ enum Commands {
         kallisto_direct_kmer: bool,
         #[arg(long)]
         kallisto_bifrost_find: bool,
-        #[arg(long)]
+        #[arg(long, help = "Legacy compatibility option; has no effect")]
         kallisto_sparse_hits: bool,
         #[arg(long, value_enum, default_value_t = Strand::Unstranded)]
         strand: Strand,
