@@ -79,3 +79,4 @@ cargo run --locked --release --example replay_ec_quant -- \
 Use a Python interpreter with h5py and NumPy for replay preparation. Target-name filtering
 selects metadata for inspection; it does not remove transcripts or ECs from the replay.
 Matched ECs, models and iteration settings separate EM behavior from mapping and sampling.
+Set `KALLISTORS_TIMINGS=1` when running the replay executable to report its EM iteration count.

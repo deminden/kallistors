@@ -1,0 +1,49 @@
+% Requires \usepackage{booktabs,longtable}.
+\begingroup
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{longtable}{@{}lrrrr@{}}
+\caption{Prepared single-end R1 FASTQ to transcript abundance on Apple Silicon; common empirical fragment models.}\label{tab:paper-bulk-single}\\
+\toprule
+Method & Workers & Wall, s & CPU, s & Peak RSS, GiB \\
+\midrule
+\endfirsthead
+\toprule
+Method & Workers & Wall, s & CPU, s & Peak RSS, GiB \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{SRR13638690-se}} \\
+kallistors & 1 & 33.899 [33.807--33.967] & 33.86 & 1.423 [1.423--1.423] \\
+piscem + piscem-infer & 1 & 34.530 [34.337--34.594] & 34.45 & 0.653 [0.653--0.653] \\
+Salmon selective alignment & 1 & 146.846 [146.599--146.959] & 148.55 & 2.218 [2.217--2.219] \\
+Salmon sketch & 1 & 49.726 [49.509--49.923] & 51.80 & 0.832 [0.832--0.834] \\
+kallistors & 8 & 7.271 [7.266--7.293] & 47.81 & 1.445 [1.445--1.446] \\
+piscem + piscem-infer & 8 & 19.593 [19.360--20.893] & 125.20 & 0.768 [0.759--0.771] \\
+Salmon selective alignment & 8 & 26.348 [26.141--26.568] & 201.10 & 2.425 [2.419--2.454] \\
+Salmon sketch & 8 & 10.170 [10.046--10.258] & 73.44 & 1.001 [0.987--1.013] \\
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{SRR307903-se}} \\
+kallistors & 1 & 159.997 [159.969--160.456] & 159.88 & 1.423 [1.423--1.423] \\
+piscem + piscem-infer & 1 & 154.527 [154.430--154.793] & 154.22 & 0.653 [0.653--0.653] \\
+Salmon selective alignment & 1 & 654.130 [653.384--654.366] & 673.50 & 2.352 [2.351--2.354] \\
+Salmon sketch & 1 & 230.212 [230.212--230.527] & 253.47 & 0.969 [0.969--0.969] \\
+kallistors & 8 & 30.474 [30.463--30.478] & 239.38 & 1.446 [1.445--1.446] \\
+piscem + piscem-infer & 8 & 66.422 [66.214--67.297] & 395.48 & 0.746 [0.744--0.747] \\
+Salmon selective alignment & 8 & 117.467 [117.451--118.518] & 922.65 & 2.514 [2.507--2.548] \\
+Salmon sketch & 8 & 45.099 [44.438--45.200] & 349.72 & 1.092 [1.088--1.094] \\
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{fragment-truth-se}} \\
+kallistors & 1 & 39.081 [39.059--39.146] & 39.04 & 1.423 [1.423--1.423] \\
+piscem + piscem-infer & 1 & 46.091 [46.053--46.102] & 46.01 & 0.659 [0.659--0.659] \\
+Salmon selective alignment & 1 & 121.126 [120.440--121.546] & 123.58 & 2.240 [2.239--2.240] \\
+Salmon sketch & 1 & 59.339 [59.112--59.488] & 62.39 & 0.841 [0.836--0.842] \\
+kallistors & 8 & 8.403 [8.393--8.456] & 54.87 & 1.446 [1.445--1.447] \\
+piscem + piscem-infer & 8 & 31.139 [31.099--31.309] & 214.41 & 0.995 [0.974--0.996] \\
+Salmon selective alignment & 8 & 23.784 [23.628--23.814] & 178.61 & 2.481 [2.452--2.496] \\
+Salmon sketch & 8 & 12.248 [12.131--12.291] & 88.70 & 1.053 [1.052--1.075] \\
+\end{longtable}
+\noindent\footnotesize Medians of three measured runs after one warmup; brackets show observed minima and maxima. CPU is user plus system time. Pipeline peak RSS is the maximum stage peak.
+\endgroup

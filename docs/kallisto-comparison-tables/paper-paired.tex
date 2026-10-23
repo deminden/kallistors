@@ -1,0 +1,49 @@
+% Requires \usepackage{booktabs,longtable}.
+\begingroup
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{longtable}{@{}lrrrr@{}}
+\caption{paired complete processing on Apple Silicon.}\label{tab:paper-paired}\\
+\toprule
+Method & Workers & Wall, s & CPU, s & Peak RSS, GiB \\
+\midrule
+\endfirsthead
+\toprule
+Method & Workers & Wall, s & CPU, s & Peak RSS, GiB \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{gencode: SRR13638690}} \\
+original kallisto & 1 & 102.153 [99.672--103.594] & 101.95 & 2.256 [2.210--2.313] \\
+kallistors & 1 & 40.028 [39.834--40.541] & 39.98 & 1.468 [1.468--1.468] \\
+original kallisto & 8 & 46.077 [45.680--46.132] & 141.99 & 2.610 [2.604--2.612] \\
+kallistors & 8 & 8.084 [8.039--8.141] & 60.07 & 1.433 [1.432--1.437] \\
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{gencode: SRR1039508}} \\
+original kallisto & 1 & 316.463 [316.157--326.220] & 316.25 & 2.449 [2.442--2.488] \\
+kallistors & 1 & 144.017 [137.460--147.867] & 143.88 & 1.277 [1.277--1.277] \\
+original kallisto & 8 & 178.462 [178.367--180.793] & 406.35 & 2.890 [2.888--2.894] \\
+kallistors & 8 & 26.207 [26.184--26.671] & 210.27 & 1.341 [1.329--1.345] \\
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{gencode: SRR307903}} \\
+original kallisto & 1 & 532.582 [531.915--537.608] & 532.28 & 2.375 [2.375--2.427] \\
+kallistors & 1 & 233.848 [233.779--235.115] & 233.70 & 1.468 [1.468--1.468] \\
+original kallisto & 8 & 209.235 [207.700--210.280] & 757.96 & 2.847 [2.788--2.849] \\
+kallistors & 8 & 44.036 [43.938--44.476] & 360.94 & 1.563 [1.556--1.574] \\
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{gencode: fragment-truth}} \\
+original kallisto & 1 & 94.581 [93.832--95.791] & 94.51 & 2.313 [2.259--2.346] \\
+kallistors & 1 & 41.113 [41.097--41.284] & 41.07 & 1.277 [1.277--1.277] \\
+original kallisto & 8 & 58.540 [58.216--58.853] & 126.22 & 2.678 [2.674--2.690] \\
+kallistors & 8 & 8.160 [8.157--8.204] & 58.92 & 1.246 [1.240--1.258] \\
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{nascent: SRR10919051}} \\
+original kallisto & 1 & 339.392 [338.677--339.618] & 339.14 & 15.225 [14.523--15.422] \\
+kallistors & 1 & 188.524 [188.004--188.651] & 188.39 & 9.102 [9.102--9.102] \\
+original kallisto & 8 & 96.170 [95.727--96.385] & 516.46 & 16.215 [15.873--16.404] \\
+kallistors & 8 & 41.547 [41.464--41.604] & 253.65 & 9.154 [9.154--9.154] \\
+\end{longtable}
+\noindent\footnotesize Medians of three measured runs after one warmup; brackets show observed minima and maxima. CPU is user plus system time. Pipeline peak RSS is the maximum stage peak.
+\endgroup

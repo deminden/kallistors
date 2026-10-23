@@ -80,6 +80,27 @@ HDF5 readback through the Rust library checks values; native-library validation 
 an independent format check. Passing synthetic tests does not establish general real-data or
 biological accuracy.
 
+## Mapping route selection
+
+Select routes by required metadata. Ordinary stranded mapping needs an orientation
+hit; fragment filtering and active bias sampling also need a best placement.
+Union, no-jump and Shade strand filters retain their complete hit collection.
+Diagnostic traces remain separate from counting. Bias sampling can finish while
+the accumulator remains available to quantification; its presence alone must
+not force full mapping metadata for subsequent reads.
+
+BUS uses packed batches for ordinary single-cDNA layouts, including compound
+barcode/UMI slices. Synthetic barcodes, header/tag extraction and paired layouts
+use the existing extraction rules to prepare bounded batches for parallel mapping.
+Ordinary BAM follows the same mapping/output layer after tag decoding. Results
+are emitted in input order, and each pair contributes its eligible fragment length
+to the complete BUS histogram. Do not substitute bulk's sampled histogram here.
+Answer caches are scoped to the strand policy, including tag-disabled reads.
+
+Packed positional loading retains transcript coordinates and orientation bits;
+it changes in-memory graph storage without changing v13 serialization. Alternate
+scanners and requested diagnostics retain their established representations.
+
 ## Native HDF5 output validation
 
 For changes to HDF5 output, also read a generated quantification directory with the native
@@ -216,20 +237,28 @@ See the benchmark guide for runnable commands, manifests, trimming and reporting
 
 | Responsibility | Modules |
 | --- | --- |
-| CLI orchestration | `commands/quant.rs`, `commands/pseudoalign.rs`, `commands/bus.rs` |
-| Index loading and building | `index/`, `pseudoalign/bifrost.rs` |
-| Read matching | `pseudoalign/core/`, `pseudoalign/single.rs`, `pseudoalign/paired.rs` |
+| CLI orchestration | `commands/{quant,pseudoalign,bus}.rs` |
+| Graph construction | `index/graph_build.rs` coordinates `graph_build/{collection,compaction,joins,locations,payloads,minimizers}.rs` |
+| Exact graph lookup and edge storage | `index/graph_build/{lookup,edges,keys,relative_edges,sparse_locations}.rs` |
+| Index loading | `pseudoalign/bifrost.rs` exposes constructors; `bifrost/{loader,encoded,ec_storage,buckets,decoding}.rs` own loading, storage and decoding |
+| Read matching | `pseudoalign/core/fast/{matching,rescue,scanner}.rs`; `core/read.rs` retains the full fallback scanner |
+| Single/paired counting and sampling | `pseudoalign/{single,paired}.rs`; single-end fragment/strand filtering is shared across serial and batched counting |
 | Threaded input and EC aggregation | `pseudoalign/threaded.rs` |
-| EC dumps, minimizer lookup and read traces | `pseudoalign/diagnostics/{ec_dump,minimizer,tracing}.rs` |
-| Fragment models, EM and bootstraps | `quant/mod.rs`, `quant/components.rs` |
+| EC dumps, minimizer lookup and read traces | `pseudoalign/diagnostics/{ec_dump,minimizer,tracing,paired}.rs` |
+| EM scheduling and arithmetic | `quant/mod.rs`, `quant/{work,components}.rs` |
+| Fragment/bias models, input and bootstraps | `quant/{models,input,bootstrap}.rs` |
 | Abundance TSV/HDF5 and run metadata | `quant/output/{tsv,hdf5,metadata}.rs` |
-| BUS input, records and technology definitions | `commands/bus/{input,output,technology}.rs` |
+| BUS configuration, tags and general alignment | `commands/bus/{configuration,tags,alignment}.rs` |
+| BUS FASTQ/BAM input, records and technology definitions | `commands/bus/{input,bam_input,output,technology}.rs` |
 | BUS packed input, ordered parallel counting and bounded reader shutdown | `commands/bus/fast.rs` |
 | Exact shared cDNA reuse and collision/replacement regression | `commands/bus/fast/query_cache.rs` |
 | BUS genome projection and BAM output | `commands/bus/{genome,pseudobam}.rs` |
-| BUS unit/integration tests | `commands/bus/tests.rs`, `tests/bus.rs` |
+| BUS unit/integration tests | `commands/bus/tests.rs`; `tests/bus.rs` contains shared fixtures and `tests/bus/` groups distinct regressions |
+| Graph regressions | `index/graph_build/tests/` groups collection, compaction, lookup/edges, minimizers and payload checks |
 
-Public diagnostic and quantification output APIs are re-exported from their parent modules.
+Public index-loading, diagnostic and quantification APIs are re-exported from their parent modules.
+Implementation modules stay private to their subsystem. Keep independent naive/fallback mapping
+paths as correctness oracles; their lack of production fast-path traffic does not make them unused.
 Keep module boundaries separate from algorithm changes. Changes to mapping must preserve
 candidate/fallback order, EC contribution order, cache ownership and wide-value handling.
 Changes to EM must preserve per-transcript addition order and convergence rules.
@@ -246,17 +275,63 @@ and memory with alternating controls. Use the same executable for all validation
   retain full records, and sampling follows the same record order and sequence-buffer quotas.
 - **Loading:** packed graph words, shared EC lists, compact MPHF ranks and bounded bitmap
   scratch reduce allocations. Deferred transcript names use the same open index file and preserve
-  every output row. Shade/bias/positional loaders keep eager names. Abundant-node keys remain
+  every output row. Ordinary unstranded single-end loading keeps the graph packed while
+  retaining all positions needed by the fragment filter. Grouped positions use inline storage
+  or one lossless coordinate arena per block. Exact value and offset bounds select 16-, 24- or 32-bit
+  descriptors; repeated coordinates remain full-width, with wide offset/length fallback.
+  Packing dispatches on descriptor width once per block.
+  Native singleton position bitmaps decode directly to their complete coordinate and sign,
+  avoiding a temporary one-element allocation. Consecutive native singleton groups pack
+  directly into the same lossless descriptors without an intermediate position-set vector;
+  On 64-bit targets, one complete 32-bit coordinate, two 24-bit descriptors or three 16-bit
+  descriptors fit in the existing group descriptor without allocation. Each narrower descriptor
+  retains its own strand bit and is selected only after all coordinate bounds are proved.
+  Larger coordinates, repeated positions and 32-bit targets retain allocated storage.
+  Compact arenas proved to contain only singleton positions omit indirect-entry flags.
+  Native singleton-group validation also computes the maximum coordinate in the same pass.
+  Other encodings retain the general decoder.
+  Positional bitmap payloads are decoded directly from the buffered node bytes, without
+  intermediate serialized buffers.
+  Parallel unitig counting advances eight independent MPHF keys together and gathers compact
+  rank words before testing their hit bits. Lane order, scalar hash/rank results and full-width
+  or final-map fallbacks remain exact; scratch storage is bounded to one batch.
+  Positional and mapping views share the same owned transcript IDs and block bounds.
+  Strand summaries are derived from raw positions instead of cached per-block arrays. Bias,
+  strand-aware and diagnostic loaders retain their required metadata and sequence access.
+  Shade/bias loaders keep eager names. Abundant-node keys remain
   explicitly associated with their EC payloads; source candidate order is preserved.
 - **Matching:** jump and midpoint probes advance across ambiguous bases to the next valid k-mer,
   preserving upstream iterator positions and end-of-read behavior. Caches verify complete keys and mode/index ownership. Conservative 12-bit
   fingerprints check all nine possible g-mer anchors for k=31/g=23; conflicting or special
   buckets bypass rejection. Full keys still prove a hit. Encoded fallback queries, exact overlap
   reuse and bounded AArch64 vector paths preserve ties, strand priority and scalar fallbacks.
+  Read minimizer initialization shares exact forward and reverse-complement group lookups
+  for 23-base windows; other lengths retain the general initializer.
+  Ordinary primary/tail probes and Bifrost rescue retain their distinct candidate families.
+  Encoded rescue preserves their ordering and delegates special/overcrowded markers to the
+  full matcher when required.
 - **Paired counting:** once sampling finishes, unused placements are omitted. Unchanged ECs
   remain borrowed through mate counting; filtering or divergent intersections materialize owned
   vectors. Per-worker counts share collision-checked EC keys. Bounded queues and rendezvous
   dispatch retain all reads and release blocked producers on input failure.
+- **Single-end counting:** threaded workers share complete, collision-checked EC keys through
+  the same pool used for paired reads; immutable keys store exactly their transcript payload.
+  Ordinary reads fold ECs during scanning and retain first/best placement without
+  collecting a full hit list. Both synchronous and threaded counting keep unchanged ECs borrowed
+  through exact fragment filtering; filtering materializes a borrowed EC only after its first
+  rejected transcript, while owned intersections filter in place. Only new counted keys are
+  copied. Borrowed annotation ranges and early coordinate acceptance avoid temporary position
+  vectors while preserving boundary padding, transcript order and the supplied fragment model.
+  When fragment and strand filters address the same annotation block, they share its decoded
+  positions while retaining independent acceptance rules, including mixed-strand groups.
+  Threaded dispatch uses 4,096-read batches and one prefetched batch with rendezvous delivery;
+  receivers are released before joining blocked producers on failure. Bias, comprehensive
+  strand filters and diagnostics retain their required hit metadata.
+- **BUS strand loading:** explicit FR/RF filtering loads transcript orientation annotations
+  for single-cDNA FASTQ, paired layouts and BAM input. The unstranded compact loader stays
+  separate. Diagnostic commands use the shared strand-aware mapping loader even when no
+  fragment filter is requested. Reverse-complement direct-kmer entries are keyed by the
+  query sequence, with orientation recorded in the entry flag.
 - **BUS counting:** simple single-cDNA layouts use the compact count-only scanner. A bounded
   mapping/output queue preserves input and first-seen EC order. The shared sequence cache
   uses two-way replacement and verifies both a hash and full bytes under a short shard lock;

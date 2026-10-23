@@ -35,6 +35,24 @@ Supported features include fixed presets and custom technology triples, batch/in
 BAM input tags, SmartSeq3 tags, long-read BUS filtering, amino-acid BUS mapping and transcriptome
 or genome BAM output.
 
+Nucleotide BUS defaults to unstranded processing. `--fr-stranded` retains cDNA reads
+in transcript orientation; `--rf-stranded` retains reverse-complement cDNA reads.
+For paired technologies these require opposite orientations for the second mate.
+Explicit strand flags load transcript orientation annotations for FASTQ and BAM
+input; annotations are read from existing v13 indexes without rebuilding them.
+Choose the flag from the library protocol; the technology preset alone does not
+infer strandedness. Ordinary stranded and unstranded counting use packed graph
+storage while preserving the annotations needed by their filters.
+
+Ordinary FASTQ BUS counting uses ordered parallel mapping for single-cDNA,
+compound-barcode, synthetic-barcode, tagged and paired layouts. Ordinary BAM
+input is decoded in bounded batches for the same counting workers. Read limits,
+ambiguity flags, raw/corrected tag precedence and output order are preserved.
+Paired BUS records every qualifying fragment length, independently of the
+sampling quota used for bulk fragment estimation. Modes requesting long-read
+filtering, amino-acid mapping, unmapped-read diagnostics or BAM output retain
+the metadata required by those features.
+
 Amino-acid mode supports single-cDNA technologies and rejects paired BUS technologies.
 Unpaired multi-sequence custom technologies are rejected for BAM output and strand-specific
 processing. Genome BAM output requires matching GTF annotations and chromosome lengths.

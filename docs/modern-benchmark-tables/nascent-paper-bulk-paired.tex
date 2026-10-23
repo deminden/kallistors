@@ -1,0 +1,29 @@
+% Requires \usepackage{booktabs,longtable}.
+\begingroup
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{longtable}{@{}lrrrr@{}}
+\caption{Prepared paired-end FASTQ to transcript abundance on Apple Silicon.}\label{tab:paper-bulk-paired}\\
+\toprule
+Method & Workers & Wall, s & CPU, s & Peak RSS, GiB \\
+\midrule
+\endfirsthead
+\toprule
+Method & Workers & Wall, s & CPU, s & Peak RSS, GiB \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{SRR10919051}} \\
+kallistors & 1 & 445.947 [445.906--448.603] & 445.67 & 8.735 [8.735--8.735] \\
+piscem + piscem-infer & 1 & 201.880 [201.862--202.325] & 201.75 & 3.132 [3.132--3.132] \\
+Salmon selective alignment & 1 & 794.562 [794.261--795.646] & 795.17 & 5.430 [5.430--5.430] \\
+Salmon sketch & 1 & 274.321 [273.667--274.350] & 275.11 & 3.182 [3.182--3.182] \\
+kallistors & 8 & 88.798 [88.420--89.137] & 646.95 & 8.742 [8.742--8.743] \\
+piscem + piscem-infer & 8 & 45.693 [45.554--45.795] & 342.18 & 3.217 [3.217--3.218] \\
+Salmon selective alignment & 8 & 131.501 [131.392--131.581] & 1039.93 & 5.606 [5.602--5.614] \\
+Salmon sketch & 8 & 47.781 [47.482--47.835] & 372.73 & 3.298 [3.298--3.303] \\
+\end{longtable}
+\noindent\footnotesize Medians of three measured runs after one warmup; brackets show observed minima and maxima. CPU is user plus system time. Pipeline peak RSS is the maximum stage peak.
+\endgroup

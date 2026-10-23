@@ -1,0 +1,22 @@
+% Requires \usepackage{booktabs,longtable}.
+\begingroup
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{longtable}{@{}lrrrr@{}}
+\caption{Official Pachter lab mature-plus-nascent (Ensembl 108) index construction at eight workers on Apple Silicon.}\label{tab:paper-index}\\
+\toprule
+Method & Wall, s & CPU, s & Peak RSS, GiB & Index, GiB \\
+\midrule
+\endfirsthead
+\toprule
+Method & Wall, s & CPU, s & Peak RSS, GiB & Index, GiB \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+kallistors & 98.732 [97.845--99.528] & 590.42 & 18.013 [17.711--18.162] & 5.944 \\
+piscem & 240.466 [240.300--241.950] & 1122.43 & 11.939 [11.858--13.139] & 3.079 \\
+Salmon & 255.781 [255.683--256.310] & 1129.54 & 15.424 [14.081--15.602] & 5.311 \\
+\end{longtable}
+\noindent\footnotesize Medians of three measured runs after one warmup; brackets show observed minima and maxima. CPU is user plus system time. Pipeline peak RSS is the maximum stage peak.
+\endgroup

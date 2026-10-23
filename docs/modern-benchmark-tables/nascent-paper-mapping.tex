@@ -1,0 +1,39 @@
+% Requires \usepackage{booktabs,longtable}.
+\begingroup
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{longtable}{@{}lrrrr@{}}
+\caption{Native mapping workflows including loading, decompression and intermediate output; output workloads differ.}\label{tab:paper-mapping}\\
+\toprule
+Method & Workers & Wall, s & CPU, s & Peak RSS, GiB \\
+\midrule
+\endfirsthead
+\toprule
+Method & Workers & Wall, s & CPU, s & Peak RSS, GiB \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{SRR10919051}} \\
+kallistors & 1 & 441.507 [437.651--441.541] & 441.25 & 8.733 [8.733--8.733] \\
+piscem + piscem-infer & 1 & 194.102 [194.097--194.557] & 193.99 & 3.132 [3.132--3.132] \\
+Salmon selective alignment & 1 & 786.441 [786.320--786.584] & 786.00 & 5.430 [5.430--5.430] \\
+Salmon sketch & 1 & 267.943 [267.453--268.083] & 267.78 & 3.159 [3.159--3.159] \\
+kallistors & 8 & 87.113 [86.983--87.165] & 635.83 & 8.741 [8.741--8.741] \\
+piscem + piscem-infer & 8 & 33.942 [33.775--34.056] & 266.68 & 3.217 [3.217--3.218] \\
+Salmon selective alignment & 8 & 128.986 [128.926--129.553] & 1023.82 & 5.607 [5.605--5.610] \\
+Salmon sketch & 8 & 45.377 [45.341--45.380] & 357.84 & 3.259 [3.257--3.262] \\
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{SRR10919051-se}} \\
+kallistors & 1 & 288.893 [287.623--289.813] & 288.72 & 9.889 [9.889--9.889] \\
+piscem + piscem-infer & 1 & 103.758 [103.747--103.996] & 103.66 & 3.125 [3.125--3.125] \\
+Salmon selective alignment & 1 & 638.218 [637.593--638.986] & 637.84 & 5.425 [5.425--5.425] \\
+Salmon sketch & 1 & 141.855 [141.799--142.328] & 141.76 & 3.154 [3.154--3.154] \\
+kallistors & 8 & 59.840 [59.717--60.124] & 407.02 & 9.911 [9.910--9.911] \\
+piscem + piscem-infer & 8 & 19.594 [19.435--19.682] & 135.78 & 3.189 [3.185--3.189] \\
+Salmon selective alignment & 8 & 114.732 [114.726--115.322] & 910.72 & 5.565 [5.559--5.573] \\
+Salmon sketch & 8 & 24.188 [24.004--24.796] & 189.09 & 3.218 [3.216--3.219] \\
+\end{longtable}
+\noindent\footnotesize Medians of three measured runs after one warmup; brackets show observed minima and maxima. CPU is user plus system time. Pipeline peak RSS is the maximum stage peak.
+\endgroup

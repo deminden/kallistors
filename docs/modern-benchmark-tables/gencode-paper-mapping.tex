@@ -1,0 +1,85 @@
+% Requires \usepackage{booktabs,longtable}.
+\begingroup
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{longtable}{@{}lrrrr@{}}
+\caption{Native mapping workflows including loading, decompression and intermediate output; output workloads differ.}\label{tab:paper-mapping}\\
+\toprule
+Method & Workers & Wall, s & CPU, s & Peak RSS, GiB \\
+\midrule
+\endfirsthead
+\toprule
+Method & Workers & Wall, s & CPU, s & Peak RSS, GiB \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{SRR13638690}} \\
+kallistors & 1 & 35.888 [35.423--35.906] & 35.85 & 1.430 [1.430--1.430] \\
+piscem + piscem-infer & 1 & 39.924 [39.895--39.944] & 39.88 & 0.659 [0.659--0.659] \\
+Salmon selective alignment & 1 & 192.897 [192.896--192.944] & 192.78 & 2.089 [2.089--2.089] \\
+Salmon sketch & 1 & 46.849 [46.814--47.158] & 46.80 & 0.704 [0.704--0.704] \\
+kallistors & 8 & 7.390 [7.382--7.417] & 51.87 & 1.450 [1.449--1.450] \\
+piscem + piscem-infer & 8 & 6.988 [6.983--7.078] & 54.17 & 0.791 [0.791--0.792] \\
+Salmon selective alignment & 8 & 32.587 [32.547--32.918] & 255.86 & 2.398 [2.392--2.405] \\
+Salmon sketch & 8 & 8.477 [8.375--8.500] & 65.51 & 0.884 [0.881--0.885] \\
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{SRR13638690-se}} \\
+kallistors & 1 & 24.608 [24.592--24.626] & 24.57 & 1.429 [1.429--1.429] \\
+piscem + piscem-infer & 1 & 19.584 [19.453--19.585] & 19.54 & 0.653 [0.653--0.653] \\
+Salmon selective alignment & 1 & 122.340 [122.265--122.410] & 122.25 & 2.082 [2.082--2.082] \\
+Salmon sketch & 1 & 24.127 [24.090--24.131] & 24.08 & 0.698 [0.698--0.698] \\
+kallistors & 8 & 5.425 [5.418--5.449] & 34.42 & 1.451 [1.450--1.451] \\
+piscem + piscem-infer & 8 & 3.999 [3.700--4.005] & 25.21 & 0.768 [0.759--0.771] \\
+Salmon selective alignment & 8 & 20.784 [20.704--20.889] & 162.71 & 2.344 [2.326--2.350] \\
+Salmon sketch & 8 & 4.466 [4.437--4.485] & 33.83 & 0.852 [0.847--0.885] \\
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{SRR307903}} \\
+kallistors & 1 & 238.278 [238.105--238.737] & 238.14 & 1.430 [1.430--1.430] \\
+piscem + piscem-infer & 1 & 238.658 [237.890--238.712] & 238.46 & 0.657 [0.657--0.657] \\
+Salmon selective alignment & 1 & 825.579 [822.726--825.912] & 825.10 & 2.098 [2.098--2.098] \\
+Salmon sketch & 1 & 275.002 [274.390--275.621] & 274.80 & 0.703 [0.703--0.703] \\
+kallistors & 8 & 43.227 [43.216--43.240] & 353.79 & 1.533 [1.521--1.535] \\
+piscem + piscem-infer & 8 & 41.503 [41.501--41.551] & 329.27 & 0.762 [0.761--0.765] \\
+Salmon selective alignment & 8 & 139.795 [139.793--139.854] & 1112.70 & 2.405 [2.403--2.443] \\
+Salmon sketch & 8 & 48.881 [48.818--48.902] & 387.59 & 0.900 [0.889--0.904] \\
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{SRR307903-se}} \\
+kallistors & 1 & 131.750 [131.671--131.952] & 131.65 & 1.429 [1.429--1.429] \\
+piscem + piscem-infer & 1 & 108.290 [108.143--108.373] & 108.05 & 0.653 [0.653--0.653] \\
+Salmon selective alignment & 1 & 516.577 [516.036--517.330] & 516.24 & 2.083 [2.083--2.091] \\
+Salmon sketch & 1 & 135.583 [135.369--135.736] & 135.43 & 0.697 [0.683--0.697] \\
+kallistors & 8 & 24.622 [24.591--24.660] & 195.82 & 1.450 [1.450--1.451] \\
+piscem + piscem-infer & 8 & 20.021 [19.924--20.157] & 146.49 & 0.746 [0.744--0.747] \\
+Salmon selective alignment & 8 & 89.166 [89.107--89.511] & 708.95 & 2.376 [2.346--2.378] \\
+Salmon sketch & 8 & 24.782 [24.695--24.813] & 194.72 & 0.885 [0.884--0.891] \\
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{fragment-truth}} \\
+kallistors & 1 & 38.053 [38.032--38.090] & 38.01 & 1.252 [1.252--1.252] \\
+piscem + piscem-infer & 1 & 34.043 [33.900--34.063] & 34.00 & 0.658 [0.658--0.658] \\
+Salmon selective alignment & 1 & 102.011 [101.774--102.051] & 101.93 & 2.089 [2.089--2.089] \\
+Salmon sketch & 1 & 41.892 [41.789--41.927] & 41.84 & 0.702 [0.702--0.702] \\
+kallistors & 8 & 7.822 [7.815--7.822] & 53.50 & 1.261 [1.261--1.262] \\
+piscem + piscem-infer & 8 & 6.152 [6.107--6.173] & 47.49 & 0.772 [0.771--0.776] \\
+Salmon selective alignment & 8 & 17.835 [17.817--17.903] & 138.66 & 2.413 [2.386--2.419] \\
+Salmon sketch & 8 & 7.726 [7.685--7.749] & 59.56 & 0.870 [0.859--0.875] \\
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{fragment-truth-se}} \\
+kallistors & 1 & 23.412 [23.296--23.474] & 23.37 & 1.429 [1.429--1.429] \\
+piscem + piscem-infer & 1 & 15.580 [15.502--15.599] & 15.54 & 0.659 [0.659--0.659] \\
+Salmon selective alignment & 1 & 78.827 [78.785--78.909] & 78.75 & 2.083 [2.083--2.083] \\
+Salmon sketch & 1 & 20.850 [20.797--20.865] & 20.80 & 0.702 [0.683--0.702] \\
+kallistors & 8 & 5.400 [5.396--5.400] & 32.37 & 1.450 [1.450--1.451] \\
+piscem + piscem-infer & 8 & 3.215 [3.174--3.410] & 23.34 & 0.995 [0.974--0.996] \\
+Salmon selective alignment & 8 & 14.620 [14.603--14.624] & 113.45 & 2.358 [2.357--2.380] \\
+Salmon sketch & 8 & 3.946 [3.945--3.983] & 29.91 & 0.909 [0.906--0.909] \\
+\addlinespace
+\multicolumn{5}{@{}l}{\textit{pbmc\_1k\_v3}} \\
+kallistors + bustools & 1 & 800.887 [798.470--846.099] & 800.42 & 1.549 [1.549--1.549] \\
+piscem + alevin-fry & 1 & 549.038 [548.724--569.756] & 548.71 & 0.671 [0.671--0.671] \\
+kallistors + bustools & 8 & 143.863 [143.813--146.307] & 1154.83 & 1.683 [1.669--1.697] \\
+piscem + alevin-fry & 8 & 101.264 [99.202--105.315] & 798.11 & 0.761 [0.759--0.762] \\
+\end{longtable}
+\noindent\footnotesize Medians of three measured runs after one warmup; brackets show observed minima and maxima. CPU is user plus system time. Pipeline peak RSS is the maximum stage peak.
+\endgroup

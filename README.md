@@ -9,6 +9,10 @@ A Rust implementation of kallisto-style pseudoalignment and RNA-seq quantificati
   and default `abundance.h5` output.
 - Supports single-cell BUS workflows, including supported BAM input and output modes.
 - Uses compact index/EM storage, cached exact matching and parallel quantification.
+- Keeps ordinary single-end and stranded counting graphs packed, with lossless compact positions
+  and shared worker EC keys. Small position groups fit inline when their complete values fit.
+  Borrows unchanged read ECs through exact positional fragment
+  and strand filtering while retaining the best placement and supplied fragment model.
 - Paired fragment estimation follows kallisto's sequence-buffer sampling rules; all reads
   contribute to EC counts. See [sampling behavior](docs/fragment_length_sampling.md).
 
@@ -86,6 +90,8 @@ Current validation and output compatibility:
   and run metadata against TSV. Bootstrap output is supported, but its RNG/sample values
   are not expected to match upstream exactly.
 - Exact abundance equality and real-data sequence-bias parity are not general claims.
+  A [controlled fragment-model audit](docs/benchmarks.md#quantification-model-audit) reproduces
+  all 24 saved unbiased paired outputs from four libraries to numerical precision.
 
 Sequence-specific bias correction is optional and enabled only with `--bias`.
 The index builder targets nucleotide transcript FASTA by default. Use `index --aa` for BUS indexes
@@ -137,6 +143,9 @@ kallistors bus \
     -o bus_out \
     -x 10XV3 \
     reads_1.fq reads_2.fq
+
+# Restrict 10x v3 cDNA reads to transcript orientation when required by the protocol
+kallistors bus -i path/to/index.idx -o bus_fw -x 10XV3 --fr-stranded reads_1.fq reads_2.fq
 
 # Generate BUS output by translating cDNA reads against an amino-acid index
 kallistors bus \
@@ -257,6 +266,10 @@ Notes:
 
 - Data preparation, benchmark commands and measurement methodology are in
   [docs/benchmarks.md](docs/benchmarks.md).
+- The [modern quantifier comparison](docs/modern-benchmarks.md) provides pinned
+  Salmon 2, piscem/piscem-infer and piscem/alevin-fry workflows, repeated resource
+  measurements, and separate accuracy and agreement tables. Cell Ranger execution
+  is deferred; alevin-fry end-to-end runs use 8 threads only.
 - Developer-facing trace workflows, abundance diffs, and parity-debug commands are in
   [docs/development.md](docs/development.md).
 - Instrumented upstream kallisto build notes are in
@@ -358,8 +371,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 Developer-facing checks, trace workflows, abundance-diff commands, and real-data
 parity workflows are in [docs/development.md](docs/development.md). The
-[source layout](docs/development.md#source-layout) describes mapping, quantification,
-diagnostics and BUS output modules.
+[source layout](docs/development.md#source-layout) describes the focused graph-building, index-loading, mapping, EM/model,
+diagnostic and BUS modules. Public entry points and index/output formats remain compatible.
 
 ## Contributing
 

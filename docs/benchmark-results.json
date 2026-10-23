@@ -10143,5 +10143,1139 @@
         "all_index_hashes_match": true
       }
     }
+  },
+  "quantification_variation_audit": {
+    "scope": {
+      "mode": "Default unbiased short-read paired quantification; no bootstraps",
+      "libraries": 4,
+      "retained_runs_per_program_per_library": 3,
+      "retained_outputs": 24,
+      "distinct_saved_fragment_histograms": 10,
+      "cross_program_pairs_per_library": 9,
+      "within_program_pairs_per_program_per_library": 3,
+      "data_preparation": "fastp",
+      "references": "GENCODE v50 ALL for three cDNA libraries; official Pachter Lab mature-plus-nascent for TT-seq",
+      "relative_error": "absolute difference / larger estimate; stated expression cutoff reached in either output",
+      "error_percentiles": "linear interpolation at (N-1)*p, all transcript rows including zeros",
+      "limitations": "Three retained repeats describe observed variation, without establishing distributional equivalence or biological isoform accuracy; fresh checks are single correctness runs, not performance estimates"
+    },
+    "production_binary_sha256": "9e17425c4f7e746cde11b0f43210606e598f77c47dcbf830f6871c91faa40aa4",
+    "original_binary_sha256": "d63cb85e29b18ef913ac2067882b95a9925b266510d1cbb4a721b71745f7f733",
+    "quantification_source_matches_retained_validation": true,
+    "quantification_source_sha256": {
+      "compact_ids.rs": "8351f68bc076d9292d7e346d45d5d8f50764d63620b4ec884bbe1db31c7cb9e4",
+      "mod.rs": "3c4bb059cf3d77a2535309e739f2a86e20f132f63c0c0b82ff96e063feef6076",
+      "components.rs": "b1cec0feba1c6cf8f5b7adc59f6b5db18243e14a17860ce5637f22d92088a0b3",
+      "output/tsv.rs": "4525bda919868fa4552757401fe211c6d62c5868c652c498e09b1f9a9c866396",
+      "output/hdf5.rs": "3b30464f8066d5cb7c27f4bd4bab4c29d05612096a16abd83fbb1fc10bc9fcb2",
+      "output/metadata.rs": "2b1c1ef8c054f1dd0f87248296e8f7c43ccd7f09e6bd5a099b24c08cd11c03f1",
+      "output/mod.rs": "51c41fafe2428de42e675807b9e3425d38bb8143341d473e4b4f1b17913e2086"
+    },
+    "audit_summary": {
+      "SRR13638690": {
+        "targets": 670670,
+        "unique_histograms": 3,
+        "original_unique_histograms": 3,
+        "candidate_unique_histograms": 1,
+        "cross_max_counts": 1.0795469358326955,
+        "original_within_max_counts": 1.0795469358326955,
+        "candidate_within_max_counts": 1.9208528101444244e-09,
+        "cross_max_tpm": 68.9829698743747,
+        "original_within_max_tpm": 68.9829698743738,
+        "candidate_within_max_tpm": 2.000888343900442e-11,
+        "cross_max_meaningful_relative_counts": 0.00968948895699325,
+        "cross_max_meaningful_relative_tpm": 0.15461957265275972
+      },
+      "SRR1039508": {
+        "targets": 670670,
+        "unique_histograms": 2,
+        "original_unique_histograms": 2,
+        "candidate_unique_histograms": 1,
+        "cross_max_counts": 5.2771579465056675,
+        "original_within_max_counts": 5.277157946507032,
+        "candidate_within_max_counts": 1.2460077414289117e-10,
+        "cross_max_tpm": 108.80742130069848,
+        "original_within_max_tpm": 108.80742130069848,
+        "candidate_within_max_tpm": 9.43600753089413e-12,
+        "cross_max_meaningful_relative_counts": 0.008872923018079534,
+        "cross_max_meaningful_relative_tpm": 0.07408839231402588
+      },
+      "SRR307903": {
+        "targets": 670670,
+        "unique_histograms": 2,
+        "original_unique_histograms": 2,
+        "candidate_unique_histograms": 1,
+        "cross_max_counts": 22.753560083714547,
+        "original_within_max_counts": 22.753560083685443,
+        "candidate_within_max_counts": 8.149072527885437e-10,
+        "cross_max_tpm": 28.25852999348399,
+        "original_within_max_tpm": 28.25852999348399,
+        "candidate_within_max_tpm": 2.4101609596982598e-11,
+        "cross_max_meaningful_relative_counts": 0.01637493083783627,
+        "cross_max_meaningful_relative_tpm": 0.05756134808296366
+      },
+      "SRR10919051": {
+        "targets": 267211,
+        "unique_histograms": 3,
+        "original_unique_histograms": 2,
+        "candidate_unique_histograms": 2,
+        "cross_max_counts": 2.9961535101756454,
+        "original_within_max_counts": 2.996153509709984,
+        "candidate_within_max_counts": 1.1172457379288971,
+        "cross_max_tpm": 65.5581731320126,
+        "original_within_max_tpm": 65.5581731320126,
+        "candidate_within_max_tpm": 26.85946839103417,
+        "cross_max_meaningful_relative_counts": 0.0042336290150291195,
+        "cross_max_meaningful_relative_tpm": 0.031369794318795725
+      }
+    },
+    "matched_model_replays": {
+      "SRR13638690": {
+        "models": 3,
+        "outputs_reproduced": 6,
+        "max_count_residual": 1.9208528101444244e-09,
+        "max_tpm_residual": 5.820766091346741e-11,
+        "max_efflength_residual": 0.0,
+        "every_iteration_count_matches": true
+      },
+      "SRR1039508": {
+        "models": 2,
+        "outputs_reproduced": 6,
+        "max_count_residual": 4.0745362639427185e-10,
+        "max_tpm_residual": 3.383320290595293e-10,
+        "max_efflength_residual": 0.0,
+        "every_iteration_count_matches": true
+      },
+      "SRR307903": {
+        "models": 2,
+        "outputs_reproduced": 6,
+        "max_count_residual": 1.280568540096283e-09,
+        "max_tpm_residual": 3.8562575355172157e-10,
+        "max_efflength_residual": 0.0,
+        "every_iteration_count_matches": true
+      },
+      "SRR10919051": {
+        "models": 3,
+        "outputs_reproduced": 6,
+        "max_count_residual": 4.656612873077393e-10,
+        "max_tpm_residual": 4.220055416226387e-10,
+        "max_efflength_residual": 0.0,
+        "every_iteration_count_matches": true
+      }
+    },
+    "sensitivity": {
+      "SRR13638690": {
+        "relative_error_maxima_by_expression_cutoff": {
+          "1": {
+            "counts": 0.0349861234944822,
+            "tpm": 0.1546195726527596
+          },
+          "10": {
+            "counts": 0.00968948895699325,
+            "tpm": 0.046415386101445126
+          },
+          "100": {
+            "counts": 0.0037024646959955393,
+            "tpm": 0.04224534044473951
+          },
+          "1000": {
+            "counts": 0.0003538315522554374,
+            "tpm": 0.019244129746248628
+          }
+        },
+        "largest_absolute": {
+          "counts": {
+            "pair": "kallisto-3--kallistors-2",
+            "id": 477630,
+            "target": "ENST00000251595.11|ENSG00000188536.15|OTTHUMG00000059924.3|OTTHUMT00000133194.2|HBA2-201|HBA2|576|protein_coding|",
+            "length": 576,
+            "left": 11003.840498542255,
+            "right": 11002.760951606422,
+            "absolute_difference": 1.0795469358326955,
+            "relative_to_larger": 9.810637803916819e-05,
+            "left_counts": 11003.840498542255,
+            "right_counts": 11002.760951606422,
+            "left_eff_length": 432.63150176830845,
+            "right_eff_length": 432.6714261574856,
+            "left_updates": 1422,
+            "right_updates": 1422
+          },
+          "tpm": {
+            "pair": "kallisto-3--kallistors-3",
+            "id": 576348,
+            "target": "ENST00000362761.1|ENSG00000199631.1|-|-|SNORD33-201|SNORD33|85|snoRNA|",
+            "length": 85,
+            "left": 3584.6240273775934,
+            "right": 3515.6410575032187,
+            "absolute_difference": 68.9829698743747,
+            "relative_to_larger": 0.019244129746248628,
+            "left_counts": 77.95958594478896,
+            "right_counts": 77.95875203529755,
+            "left_eff_length": 9.657766990291265,
+            "right_eff_length": 9.85446009389672,
+            "left_updates": 1422,
+            "right_updates": 1422,
+            "fixed_left_counts_candidate_effective_lengths_tpm": 3515.581608576209,
+            "effective_length_and_normalization_contribution": -69.04241880138443,
+            "count_reallocation_contribution": 0.059448927009725594
+          }
+        },
+        "CALR_same_observed_ECs": true
+      },
+      "SRR1039508": {
+        "relative_error_maxima_by_expression_cutoff": {
+          "1": {
+            "counts": 0.07373058326739615,
+            "tpm": 0.07408839231402577
+          },
+          "10": {
+            "counts": 0.008872923018079534,
+            "tpm": 0.019678071058517686
+          },
+          "100": {
+            "counts": 0.003228414272294206,
+            "tpm": 0.019678071058517686
+          },
+          "1000": {
+            "counts": 0.002786827564303125,
+            "tpm": 0.019678071058517686
+          }
+        },
+        "largest_absolute": {
+          "counts": {
+            "pair": "kallisto-2--kallistors-2",
+            "id": 114846,
+            "target": "ENST00000913532.1|ENSG00000174748.24|OTTHUMG00000130485.10|-|RPL15-233|RPL15|764|protein_coding|",
+            "length": 764,
+            "left": 3566.1390835805355,
+            "right": 3571.416241527041,
+            "absolute_difference": 5.2771579465056675,
+            "relative_to_larger": 0.001477609326279285,
+            "left_counts": 3566.1390835805355,
+            "right_counts": 3571.416241527041,
+            "left_eff_length": 620.3376284172035,
+            "right_eff_length": 620.3046852543835,
+            "left_updates": 1753,
+            "right_updates": 1753
+          },
+          "tpm": {
+            "pair": "kallisto-2--kallistors-1",
+            "id": 644267,
+            "target": "ENST00000387400.1|ENSG00000210135.1|-|-|MT-TN-201|MT-TN|73|Mt_tRNA|",
+            "length": 73,
+            "left": 8754.583651384082,
+            "right": 8645.776230083384,
+            "absolute_difference": 108.80742130069848,
+            "relative_to_larger": 0.012428623179983693,
+            "left_counts": 1554.0,
+            "right_counts": 1554.0,
+            "left_eff_length": 13.954545454545453,
+            "right_eff_length": 14.134730538922156,
+            "left_updates": 1753,
+            "right_updates": 1753,
+            "fixed_left_counts_candidate_effective_lengths_tpm": 8645.833306213173,
+            "effective_length_and_normalization_contribution": -108.75034517090899,
+            "count_reallocation_contribution": -0.05707612978949328
+          }
+        },
+        "CALR_same_observed_ECs": true
+      },
+      "SRR307903": {
+        "relative_error_maxima_by_expression_cutoff": {
+          "1": {
+            "counts": 0.04220954757121935,
+            "tpm": 0.05756134808296352
+          },
+          "10": {
+            "counts": 0.01637493083783627,
+            "tpm": 0.025712639216075563
+          },
+          "100": {
+            "counts": 0.011386309676686936,
+            "tpm": 0.021507453331057195
+          },
+          "1000": {
+            "counts": 0.007875106510878731,
+            "tpm": 0.021507453331057195
+          }
+        },
+        "largest_absolute": {
+          "counts": {
+            "pair": "kallisto-2--kallistors-2",
+            "id": 557969,
+            "target": "ENST00000316448.10|ENSG00000179218.17|OTTHUMG00000180574.3|OTTHUMT00000451952.2|CALR-201|CALR|1901|protein_coding|",
+            "length": 1901,
+            "left": 29054.824335318677,
+            "right": 29077.57789540239,
+            "absolute_difference": 22.753560083714547,
+            "relative_to_larger": 0.0007825122218075884,
+            "left_counts": 29054.824335318677,
+            "right_counts": 29077.57789540239,
+            "left_eff_length": 1711.7860130718955,
+            "right_eff_length": 1711.802960852329,
+            "left_updates": 2170,
+            "right_updates": 2176
+          },
+          "tpm": {
+            "pair": "kallisto-3--kallistors-3",
+            "id": 644291,
+            "target": "ENST00000387461.2|ENSG00000210196.2|-|-|MT-TP-201|MT-TP|68|Mt_tRNA|",
+            "length": 68,
+            "left": 1313.8947488812112,
+            "right": 1285.6362188877274,
+            "absolute_difference": 28.258529993483762,
+            "relative_to_larger": 0.021507453331057195,
+            "left_counts": 756.0,
+            "right_counts": 756.0,
+            "left_eff_length": 26.628571428571426,
+            "right_eff_length": 27.216216216216218,
+            "left_updates": 2170,
+            "right_updates": 2176,
+            "fixed_left_counts_candidate_effective_lengths_tpm": 1285.6371793431235,
+            "effective_length_and_normalization_contribution": -28.257569538087637,
+            "count_reallocation_contribution": -0.0009604553961253259
+          }
+        },
+        "CALR_same_observed_ECs": true
+      },
+      "SRR10919051": {
+        "relative_error_maxima_by_expression_cutoff": {
+          "1": {
+            "counts": 0.012246848636303629,
+            "tpm": 0.031369794318795725
+          },
+          "10": {
+            "counts": 0.0042336290150291195,
+            "tpm": 0.031369794318795725
+          },
+          "100": {
+            "counts": 0.001183035763581603,
+            "tpm": 0.000854405300317506
+          },
+          "1000": {
+            "counts": 0.0005674868513337356,
+            "tpm": 0.000854405300317506
+          }
+        },
+        "largest_absolute": {
+          "counts": {
+            "pair": "kallisto-1--kallistors-2",
+            "id": 251846,
+            "target": "ENSG00000278996.1",
+            "length": 30027,
+            "left": 2318346.7866018536,
+            "right": 2318349.7827553637,
+            "absolute_difference": 2.9961535101756454,
+            "relative_to_larger": 1.2923647382556357e-06,
+            "left_counts": 2318346.7866018536,
+            "right_counts": 2318349.7827553637,
+            "left_eff_length": 29892.41028697649,
+            "right_eff_length": 29892.448918891823,
+            "left_updates": 1062,
+            "right_updates": 1061
+          },
+          "tpm": {
+            "pair": "kallisto-1--kallistors-1",
+            "id": 132380,
+            "target": "ENST00000690366.2",
+            "length": 116,
+            "left": 93323.27912714206,
+            "right": 93257.72095401004,
+            "absolute_difference": 65.5581731320126,
+            "relative_to_larger": 0.0007024846720473383,
+            "left_counts": 3388.589744239711,
+            "right_counts": 3388.589369102271,
+            "left_eff_length": 15.621256633813502,
+            "right_eff_length": 15.635557967082661,
+            "left_updates": 1062,
+            "right_updates": 1061,
+            "fixed_left_counts_candidate_effective_lengths_tpm": 93256.62184901441,
+            "effective_length_and_normalization_contribution": -66.65727812764817,
+            "count_reallocation_contribution": 1.099104995635571
+          }
+        },
+        "CALR_same_observed_ECs": null
+      }
+    },
+    "fixed_iteration_CALR_crossover": [
+      {
+        "histogram": "original",
+        "updates": 2170,
+        "targets": {
+          "CALR-233": {
+            "effective_length": 1712.7860130718955,
+            "estimated_count": 8181.4783433047205,
+            "tpm": 221.0626270692022
+          },
+          "CALR-201": {
+            "effective_length": 1711.7860130718955,
+            "estimated_count": 29054.82433531877,
+            "tpm": 785.5167135763182
+          }
+        }
+      },
+      {
+        "histogram": "original",
+        "updates": 2176,
+        "targets": {
+          "CALR-233": {
+            "effective_length": 1712.7860130718955,
+            "estimated_count": 8159.153701694708,
+            "tpm": 220.4594125155292
+          },
+          "CALR-201": {
+            "effective_length": 1711.7860130718955,
+            "estimated_count": 29077.253937093818,
+            "tpm": 786.123094251968
+          }
+        }
+      },
+      {
+        "histogram": "candidate",
+        "updates": 2170,
+        "targets": {
+          "CALR-233": {
+            "effective_length": 1712.802960852329,
+            "estimated_count": 8181.672121984642,
+            "tpm": 221.08471916614027
+          },
+          "CALR-201": {
+            "effective_length": 1711.802960852329,
+            "estimated_count": 29055.14804715441,
+            "tpm": 785.585356387933
+          }
+        }
+      },
+      {
+        "histogram": "candidate",
+        "updates": 2176,
+        "targets": {
+          "CALR-233": {
+            "effective_length": 1712.802960852329,
+            "estimated_count": 8159.347233638052,
+            "tpm": 220.4814520399513
+          },
+          "CALR-201": {
+            "effective_length": 1711.802960852329,
+            "estimated_count": 29077.57789540233,
+            "tpm": 786.191790278893
+          }
+        }
+      }
+    ],
+    "one_vs_eight_threads": {
+      "bit_identical_values": true,
+      "max_effective_length_difference": 0.0,
+      "max_count_difference": 0.0,
+      "max_tpm_difference": 0.0,
+      "updates": 2176,
+      "replay_tables_byte_identical": true,
+      "replay_table_sha256": "10d921bd5b529297ac1d65e6f08e4efa2a10b6a82bbd740d982d0c5715df6ec3"
+    },
+    "fresh_full_library_checks": {
+      "SRR307903": {
+        "ec_parity": {
+          "exact": true,
+          "reference_nonzero_ecs": 738739,
+          "candidate_nonzero_ecs": 738739,
+          "reference_total_counts": 29275686,
+          "candidate_total_counts": 29275686,
+          "different_classes": 0,
+          "count_l1_difference": 0,
+          "first_differences": []
+        },
+        "n_processed": 32460465,
+        "n_targets": 670670,
+        "observations": 16144,
+        "fragment_mean": 190.19703914767095,
+        "updates": 2176,
+        "replay_errors": {
+          "counts": {
+            "max": 2.3283064365386963e-10,
+            "p99": 2.2737367544323206e-13,
+            "p99_9": 2.3305801732931286e-12,
+            "p99_99": 1.452149263060339e-11
+          },
+          "effective_lengths": {
+            "max": 0.0,
+            "p99": 0.0,
+            "p99_9": 0.0,
+            "p99_99": 0.0
+          },
+          "tpm": {
+            "max": 2.874003257602453e-10,
+            "p99": 1.936228954946273e-13,
+            "p99_9": 2.0747847884194925e-12,
+            "p99_99": 2.3859024622657635e-11
+          }
+        },
+        "against_retained_original": {
+          "kallisto-1": {
+            "max_count_difference": 3.4924596548080444e-10,
+            "max_tpm_difference": 1.0913936421275139e-11,
+            "histogram_identical": true
+          },
+          "kallisto-2": {
+            "max_count_difference": 22.75356008368908,
+            "max_tpm_difference": 28.25852999348399,
+            "histogram_identical": false
+          },
+          "kallisto-3": {
+            "max_count_difference": 22.75356008368908,
+            "max_tpm_difference": 28.25852999348399,
+            "histogram_identical": false
+          }
+        },
+        "scope": "One fresh full-library mapping and quantification correctness check; no performance comparison"
+      },
+      "SRR10919051": {
+        "ec_parity": {
+          "exact": true,
+          "reference_nonzero_ecs": 212767,
+          "candidate_nonzero_ecs": 212767,
+          "reference_total_counts": 8853005,
+          "candidate_total_counts": 8853005,
+          "different_classes": 0,
+          "count_l1_difference": 0,
+          "first_differences": []
+        },
+        "n_processed": 10172656,
+        "n_targets": 267211,
+        "observations": 59846,
+        "fragment_mean": 135.55108110817767,
+        "updates": 1061,
+        "replay_errors": {
+          "counts": {
+            "max": 1.4551915228366852e-11,
+            "p99": 2.842170943040401e-14,
+            "p99_9": 2.2737367544323206e-13,
+            "p99_99": 6.979803401907499e-13
+          },
+          "effective_lengths": {
+            "max": 0.0,
+            "p99": 0.0,
+            "p99_9": 0.0,
+            "p99_99": 0.0
+          },
+          "tpm": {
+            "max": 8.731149137020111e-11,
+            "p99": 1.7763568394002505e-14,
+            "p99_9": 9.947598300641403e-14,
+            "p99_99": 1.8189894035458565e-12
+          }
+        },
+        "against_retained_original": {
+          "kallisto-1": {
+            "max_count_difference": 2.996153509709984,
+            "max_tpm_difference": 65.5581731320126,
+            "histogram_identical": false
+          },
+          "kallisto-2": {
+            "max_count_difference": 1.4551915228366852e-11,
+            "max_tpm_difference": 1.4551915228366852e-11,
+            "histogram_identical": true
+          },
+          "kallisto-3": {
+            "max_count_difference": 2.996153509709984,
+            "max_tpm_difference": 65.5581731320126,
+            "histogram_identical": false
+          }
+        },
+        "scope": "One fresh full-library mapping and quantification correctness check; no performance comparison"
+      }
+    },
+    "checks": {
+      "formatting": true,
+      "strict_clippy": true,
+      "workspace_tests": 225,
+      "upstream_release_fixtures": 9
+    },
+    "models": {
+      "SRR13638690": {
+        "complete_ec_parity": {
+          "exact": true,
+          "reference_nonzero_ecs": 190711,
+          "candidate_nonzero_ecs": 190711,
+          "reference_total_counts": 4246701,
+          "candidate_total_counts": 4246701,
+          "different_classes": 0,
+          "count_l1_difference": 0,
+          "first_differences": []
+        },
+        "reference_ec_sha256": "e445c4b5e8be769bc1835395c28da28967e8771d0eae39c85334165208e02114",
+        "outputs": [
+          {
+            "label": "kallisto-1",
+            "sha256": "104c4b2174c35abcab65116e5f71f52d4bc7f4952f7da0d49cac115df467db2f",
+            "histogram_hash": "0d4ba0b23b2748dc25cb56ef413c9d61993a6ca8fff7fe611cd690fd754d585b",
+            "fragment_observations": 11644,
+            "fragment_mean": 144.32875300583993,
+            "updates": 1422
+          },
+          {
+            "label": "kallisto-2",
+            "sha256": "a98612448a5fc96e86dbfa111ae3c55ac71f663e835e252a7ce2813833a1652e",
+            "histogram_hash": "69128315354f4e44161a9cf22eb45e86571e7a76a194ed7666ec5df8a2a6c324",
+            "fragment_observations": 11836,
+            "fragment_mean": 144.32857384251437,
+            "updates": 1422
+          },
+          {
+            "label": "kallisto-3",
+            "sha256": "55471d290a575609a8e99ee024154d39f1466e96cf967e7fa56d83be92fa55ce",
+            "histogram_hash": "85d6adf1c7ef2291332029a8ce4282afb79dee40203a770de56960efbc27a7c6",
+            "fragment_observations": 11593,
+            "fragment_mean": 144.36849823169155,
+            "updates": 1422
+          },
+          {
+            "label": "kallistors-1",
+            "sha256": "2989fc3250a742d381fb3180019838716882e6aeabc1533a857455df808d6960",
+            "histogram_hash": "69128315354f4e44161a9cf22eb45e86571e7a76a194ed7666ec5df8a2a6c324",
+            "fragment_observations": 11836,
+            "fragment_mean": 144.32857384251437,
+            "updates": 1422
+          },
+          {
+            "label": "kallistors-2",
+            "sha256": "23e984d692416fe68e61d7608cb2096d0ac39ad0383e55d7e7589dd165265968",
+            "histogram_hash": "69128315354f4e44161a9cf22eb45e86571e7a76a194ed7666ec5df8a2a6c324",
+            "fragment_observations": 11836,
+            "fragment_mean": 144.32857384251437,
+            "updates": 1422
+          },
+          {
+            "label": "kallistors-3",
+            "sha256": "724a79685d2e746e56a82b430010a08c883add97b4425ff1ea2186c22cbe6c41",
+            "histogram_hash": "69128315354f4e44161a9cf22eb45e86571e7a76a194ed7666ec5df8a2a6c324",
+            "fragment_observations": 11836,
+            "fragment_mean": 144.32857384251437,
+            "updates": 1422
+          }
+        ]
+      },
+      "SRR1039508": {
+        "complete_ec_parity": {
+          "exact": true,
+          "reference_nonzero_ecs": 740955,
+          "candidate_nonzero_ecs": 740955,
+          "reference_total_counts": 21060756,
+          "candidate_total_counts": 21060756,
+          "different_classes": 0,
+          "count_l1_difference": 0,
+          "first_differences": []
+        },
+        "reference_ec_sha256": "9be258ed3469d67ee713bc3664364f37e856883e8249716b39576b677a9ee661",
+        "outputs": [
+          {
+            "label": "kallisto-1",
+            "sha256": "e7e5b38e70d254509495d82b2a66c6c586f62210ab35c37ac0f9c1ecef7ad606",
+            "histogram_hash": "2641162efe830e779292586a32a2ef6cbf3e54b9bc8b85d006e951870c82bad5",
+            "fragment_observations": 17395,
+            "fragment_mean": 144.69531474561654,
+            "updates": 1753
+          },
+          {
+            "label": "kallisto-2",
+            "sha256": "cde771af2dbc91f8cb3c798d754fccde2b15cee2815166b27edf25f6b4196792",
+            "histogram_hash": "9cc274f8dcb9f75b13cd45683175e2bcd75c9e4fb44d89fc97fea51dd906d575",
+            "fragment_observations": 17229,
+            "fragment_mean": 144.66237158279645,
+            "updates": 1753
+          },
+          {
+            "label": "kallisto-3",
+            "sha256": "8118eef8deba3ddd5734faea7bfab0f5aa33e8fb3f58b56e69cb22dee039524e",
+            "histogram_hash": "2641162efe830e779292586a32a2ef6cbf3e54b9bc8b85d006e951870c82bad5",
+            "fragment_observations": 17395,
+            "fragment_mean": 144.69531474561654,
+            "updates": 1753
+          },
+          {
+            "label": "kallistors-1",
+            "sha256": "a326bfd88c7e30cb83852c5c4a75d3bb9e17a930ecb549df5cf42515ef25ee7a",
+            "histogram_hash": "2641162efe830e779292586a32a2ef6cbf3e54b9bc8b85d006e951870c82bad5",
+            "fragment_observations": 17395,
+            "fragment_mean": 144.69531474561654,
+            "updates": 1753
+          },
+          {
+            "label": "kallistors-2",
+            "sha256": "8cf7d7905266c42c4c76100c28447efa8f23363d9869fc2b96a042a8dd6757c9",
+            "histogram_hash": "2641162efe830e779292586a32a2ef6cbf3e54b9bc8b85d006e951870c82bad5",
+            "fragment_observations": 17395,
+            "fragment_mean": 144.69531474561654,
+            "updates": 1753
+          },
+          {
+            "label": "kallistors-3",
+            "sha256": "3a40b446d7074c39e3bc3a1bacad04f5922faf6dc7757616488eef1958c22815",
+            "histogram_hash": "2641162efe830e779292586a32a2ef6cbf3e54b9bc8b85d006e951870c82bad5",
+            "fragment_observations": 17395,
+            "fragment_mean": 144.69531474561654,
+            "updates": 1753
+          }
+        ]
+      },
+      "SRR307903": {
+        "complete_ec_parity": {
+          "exact": true,
+          "reference_nonzero_ecs": 738739,
+          "candidate_nonzero_ecs": 738739,
+          "reference_total_counts": 29275686,
+          "candidate_total_counts": 29275686,
+          "different_classes": 0,
+          "count_l1_difference": 0,
+          "first_differences": []
+        },
+        "reference_ec_sha256": "e379a611a04cc59cec07e1236288dfe7146da5577fc91d57c98ad6de6820deb1",
+        "outputs": [
+          {
+            "label": "kallisto-1",
+            "sha256": "ccdd3b852acb0bfe2f532937972d03500435a8cec7b5b9233a0b144aa92c8d67",
+            "histogram_hash": "234074ca50ebac7484d975d5979debfe683fb6df90fe7aa675bed273415681f7",
+            "fragment_observations": 16144,
+            "fragment_mean": 190.19703914767095,
+            "updates": 2176
+          },
+          {
+            "label": "kallisto-2",
+            "sha256": "c247c0c22d2a63eaf5dd224f7034184726d5c95447e060e0d30b3fcf1a4db5fa",
+            "histogram_hash": "9078b997461c9047c994fb6f9c13b683ba5ce4a37a4654c891d3c69dbbd7428f",
+            "fragment_observations": 15300,
+            "fragment_mean": 190.2139869281046,
+            "updates": 2170
+          },
+          {
+            "label": "kallisto-3",
+            "sha256": "9692f1eb6db3ae04faf3d2b889ac022309366f146a780419791ca070a8f0de61",
+            "histogram_hash": "9078b997461c9047c994fb6f9c13b683ba5ce4a37a4654c891d3c69dbbd7428f",
+            "fragment_observations": 15300,
+            "fragment_mean": 190.2139869281046,
+            "updates": 2170
+          },
+          {
+            "label": "kallistors-1",
+            "sha256": "1aa23cc912f441a18c86f40b15ba6c0c02bfec8cd514603ef5d6e63c600519f3",
+            "histogram_hash": "234074ca50ebac7484d975d5979debfe683fb6df90fe7aa675bed273415681f7",
+            "fragment_observations": 16144,
+            "fragment_mean": 190.19703914767095,
+            "updates": 2176
+          },
+          {
+            "label": "kallistors-2",
+            "sha256": "0bc515833b8a88ff853e72a24dfed1279bed71dab243efa36917cf6a34962e86",
+            "histogram_hash": "234074ca50ebac7484d975d5979debfe683fb6df90fe7aa675bed273415681f7",
+            "fragment_observations": 16144,
+            "fragment_mean": 190.19703914767095,
+            "updates": 2176
+          },
+          {
+            "label": "kallistors-3",
+            "sha256": "ad602e9742fdaf7a9b652cb41285ff403077d76e217c8d87e7c50e4511514235",
+            "histogram_hash": "234074ca50ebac7484d975d5979debfe683fb6df90fe7aa675bed273415681f7",
+            "fragment_observations": 16144,
+            "fragment_mean": 190.19703914767095,
+            "updates": 2176
+          }
+        ]
+      },
+      "SRR10919051": {
+        "complete_ec_parity": {
+          "exact": true,
+          "reference_nonzero_ecs": 212767,
+          "candidate_nonzero_ecs": 212767,
+          "reference_total_counts": 8853005,
+          "candidate_total_counts": 8853005,
+          "different_classes": 0,
+          "count_l1_difference": 0,
+          "first_differences": []
+        },
+        "reference_ec_sha256": "52d18b17a32008e8a46593530247577ee1535ac86a8347fbed9dd74cb17dc7be",
+        "outputs": [
+          {
+            "label": "kallisto-1",
+            "sha256": "d8f9028928821e951a5583973bb45573e47c0006e7083fd195f50e86da60a86a",
+            "histogram_hash": "09fbb99f26fefb3b20e6287c02262c24ab69a1e93370dbf5e1f9fcab8164d6a8",
+            "fragment_observations": 57043,
+            "fragment_mean": 135.58971302350858,
+            "updates": 1062
+          },
+          {
+            "label": "kallisto-2",
+            "sha256": "d1164e692ebf31c1e57423ab4cfc61c3e6e42e140cdfb137f8b7fd913b16ecb3",
+            "histogram_hash": "60fcb4a15b809c687c93d38dbe53735c92ff0b5f684868a316405eff96de77a6",
+            "fragment_observations": 59846,
+            "fragment_mean": 135.55108110817767,
+            "updates": 1061
+          },
+          {
+            "label": "kallisto-3",
+            "sha256": "1ecbf0a474ce9d10a8a38bc5a102763394bb677da47546cbe3079bb99999bb52",
+            "histogram_hash": "09fbb99f26fefb3b20e6287c02262c24ab69a1e93370dbf5e1f9fcab8164d6a8",
+            "fragment_observations": 57043,
+            "fragment_mean": 135.58971302350858,
+            "updates": 1062
+          },
+          {
+            "label": "kallistors-1",
+            "sha256": "e261183b78fbc8d53a32dff2a00bd2c3827bf0dbe096fa15373e56e27aa18dcf",
+            "histogram_hash": "60fcb4a15b809c687c93d38dbe53735c92ff0b5f684868a316405eff96de77a6",
+            "fragment_observations": 59846,
+            "fragment_mean": 135.55108110817767,
+            "updates": 1061
+          },
+          {
+            "label": "kallistors-2",
+            "sha256": "30b3f3d3bbc962f96dfcf8220c1e1add5c40014438cc3ca6c9e874ef20e83cbd",
+            "histogram_hash": "60fcb4a15b809c687c93d38dbe53735c92ff0b5f684868a316405eff96de77a6",
+            "fragment_observations": 59846,
+            "fragment_mean": 135.55108110817767,
+            "updates": 1061
+          },
+          {
+            "label": "kallistors-3",
+            "sha256": "7d6395c194291bc2556079908fdfcbdfe7e029762a337e43ea206eb6601460db",
+            "histogram_hash": "8b3b5503160226bf63c0f55278b52c45f4fc678813dd969ddb733fe3708246ab",
+            "fragment_observations": 60058,
+            "fragment_mean": 135.5654866961937,
+            "updates": 1061
+          }
+        ]
+      }
+    },
+    "error_percentiles": {
+      "aggregation": "Maximum per-comparison percentile, not a pooled percentile",
+      "cases": {
+        "SRR13638690": {
+          "cross": {
+            "counts": {
+              "p99": 0.0015447762817248625,
+              "p99_9": 0.016134343435388873,
+              "p99_99": 0.13084742683857137,
+              "max": 1.0795469358326955
+            },
+            "tpm": {
+              "p99": 0.009358128843033131,
+              "p99_9": 0.1364590818299924,
+              "p99_99": 2.4693303407836855,
+              "max": 68.9829698743747
+            },
+            "effective_lengths": {
+              "p99": 0.07259081688221158,
+              "p99_9": 0.6754797441364602,
+              "p99_99": 1.7380952380952408,
+              "max": 11.0
+            }
+          },
+          "within_original": {
+            "counts": {
+              "p99": 0.001552037110154065,
+              "p99_9": 0.01613434343536758,
+              "p99_99": 0.13084742683773035,
+              "max": 1.0795469358326955
+            },
+            "tpm": {
+              "p99": 0.009358128843038034,
+              "p99_9": 0.136459081829983,
+              "p99_99": 2.4693303407832308,
+              "max": 68.9829698743738
+            },
+            "effective_lengths": {
+              "p99": 0.07259081688221158,
+              "p99_9": 0.6754797441364602,
+              "p99_99": 1.7380952380952408,
+              "max": 11.0
+            }
+          },
+          "within_candidate": {
+            "counts": {
+              "p99": 1.0658141036401503e-14,
+              "p99_9": 1.7053025658242404e-13,
+              "p99_99": 2.2130905108510798e-12,
+              "max": 1.9208528101444244e-09
+            },
+            "tpm": {
+              "p99": 4.884981308350689e-15,
+              "p99_9": 5.684341886080802e-14,
+              "p99_99": 9.094947017729282e-13,
+              "max": 2.000888343900442e-11
+            },
+            "effective_lengths": {
+              "p99": 0.0,
+              "p99_9": 0.0,
+              "p99_99": 0.0,
+              "max": 0.0
+            }
+          },
+          "matched_model_replays": {
+            "counts": {
+              "p99": 1.0658141036401503e-14,
+              "p99_9": 1.7053025658242404e-13,
+              "p99_99": 2.158148504350488e-12,
+              "max": 1.9208528101444244e-09
+            },
+            "tpm": {
+              "p99": 3.197442310920451e-14,
+              "p99_9": 3.694822225952521e-13,
+              "p99_99": 4.3124941839805435e-12,
+              "max": 5.820766091346741e-11
+            },
+            "effective_lengths": {
+              "p99": 0.0,
+              "p99_9": 0.0,
+              "p99_99": 0.0,
+              "max": 0.0
+            }
+          }
+        },
+        "SRR1039508": {
+          "cross": {
+            "counts": {
+              "p99": 0.010640519327669138,
+              "p99_9": 0.08858730845130408,
+              "p99_99": 0.5834170564709568,
+              "max": 5.2771579465056675
+            },
+            "tpm": {
+              "p99": 0.005684948857208762,
+              "p99_9": 0.06525592729363704,
+              "p99_99": 0.7945453337410787,
+              "max": 108.80742130069848
+            },
+            "effective_lengths": {
+              "p99": 0.041941703318244095,
+              "p99_9": 0.3504934210526329,
+              "p99_99": 0.416536499010725,
+              "max": 0.4176093514328869
+            }
+          },
+          "within_original": {
+            "counts": {
+              "p99": 0.01064051932745768,
+              "p99_9": 0.08858730845094812,
+              "p99_99": 0.5834170564544673,
+              "max": 5.277157946507032
+            },
+            "tpm": {
+              "p99": 0.0056849488572038595,
+              "p99_9": 0.06525592729364645,
+              "p99_99": 0.7945453337406769,
+              "max": 108.80742130069848
+            },
+            "effective_lengths": {
+              "p99": 0.041941703318244095,
+              "p99_9": 0.3504934210526329,
+              "p99_99": 0.416536499010725,
+              "max": 0.4176093514328869
+            }
+          },
+          "within_candidate": {
+            "counts": {
+              "p99": 1.8829382497642655e-13,
+              "p99_9": 1.8189894035458565e-12,
+              "p99_99": 9.534483069734015e-12,
+              "max": 1.2460077414289117e-10
+            },
+            "tpm": {
+              "p99": 5.329070518200751e-15,
+              "p99_9": 5.684341886080802e-14,
+              "p99_99": 4.680074994215579e-13,
+              "max": 9.43600753089413e-12
+            },
+            "effective_lengths": {
+              "p99": 0.0,
+              "p99_9": 0.0,
+              "p99_99": 0.0,
+              "max": 0.0
+            }
+          },
+          "matched_model_replays": {
+            "counts": {
+              "p99": 2.2737367544323206e-13,
+              "p99_9": 1.8260450929120734e-12,
+              "p99_99": 1.0913936421275139e-11,
+              "max": 4.0745362639427185e-10
+            },
+            "tpm": {
+              "p99": 2.0605739337042905e-13,
+              "p99_9": 2.1600499167107046e-12,
+              "p99_99": 2.772437710519258e-11,
+              "max": 3.383320290595293e-10
+            },
+            "effective_lengths": {
+              "p99": 0.0,
+              "p99_9": 0.0,
+              "p99_99": 0.0,
+              "max": 0.0
+            }
+          }
+        },
+        "SRR307903": {
+          "cross": {
+            "counts": {
+              "p99": 0.016035231934386586,
+              "p99_9": 0.24649828647051011,
+              "p99_99": 1.3929203068503249,
+              "max": 22.753560083714547
+            },
+            "tpm": {
+              "p99": 0.0014807371256146046,
+              "p99_9": 0.024844547654144875,
+              "p99_99": 0.20303065885840627,
+              "max": 28.25852999348399
+            },
+            "effective_lengths": {
+              "p99": 0.24093896713614527,
+              "p99_9": 0.7898393399913175,
+              "p99_99": 0.8380789022298458,
+              "max": 0.8439153439153415
+            }
+          },
+          "within_original": {
+            "counts": {
+              "p99": 0.01603523193440093,
+              "p99_9": 0.24649828647117658,
+              "p99_99": 1.3929203068589042,
+              "max": 22.753560083685443
+            },
+            "tpm": {
+              "p99": 0.001480737125617056,
+              "p99_9": 0.024844547654144875,
+              "p99_99": 0.20303065885795152,
+              "max": 28.25852999348399
+            },
+            "effective_lengths": {
+              "p99": 0.24093896713614527,
+              "p99_9": 0.7898393399913175,
+              "p99_99": 0.8380789022298458,
+              "max": 0.8439153439153415
+            }
+          },
+          "within_candidate": {
+            "counts": {
+              "p99": 2.5579538487363607e-13,
+              "p99_9": 2.7284841053187847e-12,
+              "p99_99": 1.8189894035458565e-11,
+              "max": 8.149072527885437e-10
+            },
+            "tpm": {
+              "p99": 5.329070518200751e-15,
+              "p99_9": 6.394884621840902e-14,
+              "p99_99": 6.821210263296962e-13,
+              "max": 2.4101609596982598e-11
+            },
+            "effective_lengths": {
+              "p99": 0.0,
+              "p99_9": 0.0,
+              "p99_99": 0.0,
+              "max": 0.0
+            }
+          },
+          "matched_model_replays": {
+            "counts": {
+              "p99": 2.4868995751603507e-13,
+              "p99_9": 2.7284841053187847e-12,
+              "p99_99": 1.5916157281026244e-11,
+              "max": 1.280568540096283e-09
+            },
+            "tpm": {
+              "p99": 2.6290081223123707e-13,
+              "p99_9": 2.8137492336099967e-12,
+              "p99_99": 3.228706191293895e-11,
+              "max": 3.8562575355172157e-10
+            },
+            "effective_lengths": {
+              "p99": 0.0,
+              "p99_9": 0.0,
+              "p99_99": 0.0,
+              "max": 0.0
+            }
+          }
+        },
+        "SRR10919051": {
+          "cross": {
+            "counts": {
+              "p99": 0.002691987897384963,
+              "p99_9": 0.013023357867634902,
+              "p99_99": 0.05974353395322396,
+              "max": 2.9961535101756454
+            },
+            "tpm": {
+              "p99": 0.0031006073632120503,
+              "p99_9": 0.01592478610867554,
+              "p99_99": 0.26037834870749066,
+              "max": 65.5581731320126
+            },
+            "effective_lengths": {
+              "p99": 0.06408964636528935,
+              "p99_9": 0.3365957446808565,
+              "p99_99": 1.0909090909090917,
+              "max": 1.1208791208791204
+            }
+          },
+          "within_original": {
+            "counts": {
+              "p99": 0.002691987897371818,
+              "p99_9": 0.013023357867606791,
+              "p99_99": 0.05974353395322396,
+              "max": 2.996153509709984
+            },
+            "tpm": {
+              "p99": 0.0031006073632088528,
+              "p99_9": 0.01592478610867554,
+              "p99_99": 0.26037834870749066,
+              "max": 65.5581731320126
+            },
+            "effective_lengths": {
+              "p99": 0.06408964636528935,
+              "p99_9": 0.3365957446808565,
+              "p99_99": 1.0909090909090917,
+              "max": 1.1208791208791204
+            }
+          },
+          "within_candidate": {
+            "counts": {
+              "p99": 0.0008311015827352727,
+              "p99_9": 0.003902778669662086,
+              "p99_99": 0.011560540400804809,
+              "max": 1.1172457379288971
+            },
+            "tpm": {
+              "p99": 0.0012404652056941983,
+              "p99_9": 0.00688474972754047,
+              "p99_99": 0.10920542865139693,
+              "max": 26.85946839103417
+            },
+            "effective_lengths": {
+              "p99": 0.01615610823125735,
+              "p99_9": 0.018042341104774096,
+              "p99_99": 0.01841444258508318,
+              "max": 0.04535756955112191
+            }
+          },
+          "matched_model_replays": {
+            "counts": {
+              "p99": 2.842170943040401e-14,
+              "p99_9": 1.7053025658242404e-13,
+              "p99_99": 6.821210263296962e-13,
+              "max": 4.656612873077393e-10
+            },
+            "tpm": {
+              "p99": 7.460698725481052e-14,
+              "p99_9": 4.263256414560601e-13,
+              "p99_99": 8.539700502288016e-12,
+              "max": 4.220055416226387e-10
+            },
+            "effective_lengths": {
+              "p99": 0.0,
+              "p99_9": 0.0,
+              "p99_99": 0.0,
+              "max": 0.0
+            }
+          }
+        }
+      }
+    }
   }
 }

@@ -636,3 +636,41 @@ and ambiguous isoform estimates even with identical ECs. Compare saved histogram
 interpreting model/EM speed. Fixed EC/model replays and matched iteration settings isolate EM
 behavior. Bulk poly(A) libraries can assess reference cost and compatibility; biological
 nascent-RNA accuracy requires suitable assays and independent evidence.
+
+### Quantification model audit
+
+The audit uses three retained eight-thread paired runs per tool on each complete fastp-trimmed
+library: SRR13638690 (4,411,003 pairs), SRR1039508 (22,176,801), SRR307903 (32,460,465) and
+SRR10919051 (10,172,656). The first three use GENCODE v50 ALL; the last uses the official
+Pachter Lab mature-plus-nascent reference. It compares all nine cross-tool run pairings and all
+three within-tool pairings per program, using native HDF5 values. These are correctness checks;
+the fresh full-library runs do not supply repeated performance estimates.
+
+| Library | Largest cross-tool count difference | Largest original-within-original count difference | Largest cross-tool / original-within-original TPM difference |
+| --- | ---: | ---: | ---: |
+| SRR13638690 | 1.080 | 1.080 | 68.983 / 68.983 |
+| SRR1039508 | 5.277 | 5.277 | 108.807 / 108.807 |
+| SRR307903 | 22.754 | 22.754 | 28.259 / 28.259 |
+| SRR10919051 | 2.996 | 2.996 | 65.558 / 65.558 |
+
+Within each cDNA library, the three retained kallistors runs agree to numerical precision;
+the nascent runs have modest sample-dependent variation. Replaying all ten distinct fragment
+histograms with the current quantifier reproduces every saved original/current output. All
+effective lengths and iteration counts match. Maximum residuals across all transcript rows are
+`1.921e-9` estimated counts and `4.221e-10` TPM. Fresh full fibroblast and nascent mappings also
+preserve complete counted EC maps, and their quantifications independently match a retained
+original run when their sampled histograms match.
+
+The largest relative count difference among transcripts reaching 10 estimated counts in either
+output is 1.64%, using absolute difference divided by the larger estimate. The 15.46% relative
+TPM outlier has only about 0.05 estimated counts. Large absolute TPM outliers are mainly explained
+by short-transcript effective lengths and normalization. These maxima describe these observations;
+three repeats do not establish distributional equivalence or bound other inputs.
+
+CALR-201 and CALR-233 have identical observed EC incidence in airway and fibroblast. Controlled
+fixed-update replays separate the small model change from six additional EM updates in the
+fibroblast case. The [sampling guide](fragment_length_sampling.md#interpreting-transcript-level-differences)
+explains this ambiguity and the existing all-observation option. Portable model fingerprints,
+error percentiles and the fresh checks are recorded under `quantification_variation_audit` in
+[the measurement evidence](benchmark-results.json). The audited mode is default unbiased
+short-read paired quantification without bootstrap sampling.
