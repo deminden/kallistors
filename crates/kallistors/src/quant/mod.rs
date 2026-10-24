@@ -225,6 +225,13 @@ fn em_quantify_input_threaded(
         None
     };
     let compact = em_pool.is_some() && !options.bias && options.max_iter != 0;
+    // Preserve the ordered scalar equations while keeping active alpha values
+    // contiguous. Original target IDs are retained for the final scatter.
+    let serial_dense = em_pool.is_none()
+        && !em_work.multi_ecs.is_empty()
+        && !options.bias
+        && options.max_iter != 0;
+    let mut scalar_components = None;
     let mut components = if compact {
         let mut components = em_work.group_components();
         components::configure_parallel(&mut components, &em_work, threads);
@@ -233,8 +240,21 @@ fn em_quantify_input_threaded(
         // Compact updates use only their own previous alpha after the denominator barrier.
         next_alpha = Vec::new();
         Some(components)
+    } else if serial_dense {
+        // Stable component layout groups independent ECs and active targets.
+        // Each target keeps exactly its original contribution order.
+        scalar_components = Some(em_work.group_components());
+        em_work.compact_transcript_ids();
+        alpha.truncate(em_work.active_transcripts.len());
+        next_alpha.truncate(em_work.active_transcripts.len());
+        None
     } else {
         None
+    };
+    let dense_active: Vec<usize> = if serial_dense {
+        (0..em_work.active_transcripts.len()).collect()
+    } else {
+        Vec::new()
     };
     let mut incoming = em_pool
         .as_ref()
@@ -245,6 +265,23 @@ fn em_quantify_input_threaded(
         )))
     } else {
         None
+    };
+    // The scalar update visits each EC twice. Retain its weighted alpha
+    // products in one reusable buffer so the second visit avoids gathering
+    // alpha and multiplying it by the same weight again.
+    let mut scalar_products = if em_pool.is_none() {
+        vec![
+            0.0;
+            em_work
+                .multi_ecs
+                .iter()
+                .map(|ec| ec.transcript_range.end - ec.transcript_range.start)
+                .max()
+                .unwrap_or(0)
+                .saturating_mul(2)
+        ]
+    } else {
+        Vec::new()
     };
     let mut scales = EcScales::new(if em_pool.is_some() {
         em_work.multi_ecs.len()
@@ -292,9 +329,13 @@ fn em_quantify_input_threaded(
     } else {
         0
     };
+    // Keep the existing model-size eligibility. Witness scheduling needs
+    // no speculative alpha snapshot; parallel and bias routes are unchanged.
+    let scalar_tiles = serial_dense && !alpha.is_empty() && alpha.len() <= 4 * 1024 * 1024 / 8;
     let mut final_round = false;
     let mut iterations = burn_in;
-    for iter in burn_in..options.max_iter {
+    let mut iter = burn_in;
+    while iter < options.max_iter {
         iterations = iter + 1;
         if options.bias
             && (iter == options.min_rounds || iter == options.min_rounds + 500)
@@ -317,11 +358,11 @@ fn em_quantify_input_threaded(
             }
         }
 
-        let mut parallel_changes = None;
+        let mut step_changes = None;
         if let (Some(pool), Some(incoming), Some(components)) =
             (&em_pool, &incoming, &mut components)
         {
-            parallel_changes = Some(match &compact_transcripts {
+            step_changes = Some(match &compact_transcripts {
                 Some(ids) => components::step::<_, true>(
                     pool,
                     components,
@@ -372,7 +413,7 @@ fn em_quantify_input_threaded(
                     });
             });
             if compact {
-                parallel_changes = Some(pool.install(|| {
+                step_changes = Some(pool.install(|| {
                     alpha
                         .par_iter_mut()
                         .enumerate()
@@ -411,31 +452,67 @@ fn em_quantify_input_threaded(
                 }
             }
         } else {
-            for &tr in &em_work.active_transcripts {
-                next_alpha[tr] = em_work.singleton_alpha[tr];
-            }
-            for ec in &em_work.multi_ecs {
-                let transcripts = &em_work.multi_transcripts[ec.transcript_range];
-                let weights = &em_work.multi_weights[ec.transcript_range];
-                let mut denom = 0.0;
-                for (&tr, &weight) in transcripts.iter().zip(weights) {
-                    denom += alpha[tr] * weight;
+            let active = if serial_dense {
+                &dense_active
+            } else {
+                &em_work.active_transcripts
+            };
+            step_changes = Some(if let Some(groups) = &mut scalar_components {
+                if !final_round && scalar_tiles {
+                    let (taken, changes) = components::scalar_tile(
+                        groups,
+                        &em_work,
+                        active,
+                        &mut alpha,
+                        &mut next_alpha,
+                        &mut scalar_products,
+                        iter,
+                        options.min_rounds,
+                        options.max_iter - iter,
+                    );
+                    iter += taken - 1;
+                    iterations = iter + 1;
+                    changes
+                } else {
+                    components::scalar_step(
+                        groups,
+                        &em_work,
+                        active,
+                        &mut alpha,
+                        &mut next_alpha,
+                        &mut scalar_products,
+                    )
                 }
-                if denom < TOLERANCE {
-                    continue;
-                }
-                let scale = ec.count / denom;
-                for (&tr, &weight) in transcripts.iter().zip(weights) {
-                    next_alpha[tr] += weight * alpha[tr] * scale;
-                }
+            } else {
+                em_work
+                    .scalar_step(
+                        Range {
+                            start: 0,
+                            end: em_work.multi_ecs.len(),
+                        },
+                        active,
+                        &mut alpha,
+                        &mut next_alpha,
+                        &mut scalar_products,
+                    )
+                    .0
+            });
+            if iter == 0 && !serial_dense {
+                // Inactive targets lose their initial uniform prior after iteration zero.
+                alpha.copy_from_slice(&next_alpha);
             }
         }
 
-        let chcount = if let Some(changes) = parallel_changes {
+        let chcount = if let Some(changes) = step_changes {
             changes
         } else {
             let mut changes = 0;
-            for &i in &em_work.active_transcripts {
+            let active = if serial_dense {
+                &dense_active
+            } else {
+                &em_work.active_transcripts
+            };
+            for &i in active {
                 if next_alpha[i] > ALPHA_CHANGE_LIMIT {
                     let rel = (next_alpha[i] - alpha[i]).abs() / next_alpha[i];
                     if rel > ALPHA_CHANGE {
@@ -460,19 +537,23 @@ fn em_quantify_input_threaded(
             if let Some(groups) = &mut components {
                 components::reset_fixed(groups);
             }
+            if let Some(groups) = &mut scalar_components {
+                components::reset_fixed(groups);
+            }
             for val in &mut alpha {
                 if *val < ALPHA_LIMIT / 10.0 {
                     *val = 0.0;
                 }
             }
         }
+        iter += 1;
     }
 
     if crate::timing::is_enabled() {
         eprintln!("[quant-em] iterations={iterations}");
     }
 
-    if compact {
+    if compact || serial_dense {
         let mut full_alpha = vec![0.0; num_trans];
         for (&original, &value) in em_work.active_transcripts.iter().zip(&alpha) {
             full_alpha[original] = value;

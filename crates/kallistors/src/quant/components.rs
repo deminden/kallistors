@@ -42,6 +42,7 @@ impl Components {
 pub(super) struct EmComponent {
     fixed: bool,
     parallel: bool,
+    last_changed: bool,
     // Each stable recursion interval stores its bit on its first component.
     // Ancestors share that component but use a different depth bit.
     fixed_subtrees: u64,
@@ -94,6 +95,7 @@ impl EmWork {
             components.push(EmComponent {
                 fixed: false,
                 parallel: false,
+                last_changed: true,
                 fixed_subtrees: 0,
                 transcripts: core::range::Range {
                     start: tr_start,
@@ -442,8 +444,155 @@ fn sum_incoming<I: super::IncomingEcId>(
 pub(super) fn reset_fixed(groups: &mut [EmComponent]) {
     for group in groups {
         group.fixed = false;
+        group.last_changed = true;
         group.fixed_subtrees = 0;
     }
+}
+
+/// Skip only components whose entire alpha vector is bitwise unchanged.
+/// Their weights and counts are immutable and no other component contributes
+/// to their transcripts. Global final pruning resets these certificates.
+pub(super) fn scalar_step(
+    groups: &mut [EmComponent],
+    work: &EmWork,
+    active: &[usize],
+    alpha: &mut [f64],
+    next_alpha: &mut [f64],
+    products: &mut [f64],
+) -> usize {
+    // Scalar component callers group and compact before entering this path.
+    debug_assert!(active.iter().copied().eq(0..alpha.len()));
+    let mut changes = 0;
+    for group in groups {
+        if group.fixed {
+            continue;
+        }
+        let (count, identical) = work.scalar_dense_step_mode::<2>(
+            group.ecs,
+            group.transcripts,
+            alpha,
+            next_alpha,
+            products,
+        );
+        changes += count;
+        group.last_changed = count != 0;
+        group.fixed = identical;
+    }
+    changes
+}
+
+// A nonzero component count proves the global count is nonzero. Advance one
+// witness to its first eligible zero (or the bounded cap), then advance every
+// other independent component to that same boundary. No possible global stop
+// is crossed, so neither an alpha snapshot nor speculative replay is needed.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn scalar_tile(
+    groups: &mut [EmComponent],
+    work: &EmWork,
+    active: &[usize],
+    alpha: &mut [f64],
+    next_alpha: &mut [f64],
+    products: &mut [f64],
+    first_iter: usize,
+    min_rounds: usize,
+    remaining: usize,
+) -> (usize, usize) {
+    debug_assert!(active.iter().copied().eq(0..alpha.len()));
+    let cap = remaining.min(64);
+    debug_assert!(cap > 0);
+    if cap == 1 {
+        return (
+            1,
+            scalar_step(groups, work, active, alpha, next_alpha, products),
+        );
+    }
+    let witness = groups
+        .iter()
+        .enumerate()
+        .filter(|(_, group)| !group.fixed)
+        .max_by_key(|(_, group)| (group.last_changed, group.ecs.end - group.ecs.start))
+        .map(|(index, _)| index);
+    let Some(witness) = witness else {
+        let taken = (0..cap)
+            .position(|offset| first_iter + offset > min_rounds)
+            .map_or(cap, |offset| offset + 1);
+        return (taken, 0);
+    };
+    let group = &mut groups[witness];
+    let mut taken = 0;
+    let mut changes = 0;
+    for offset in 0..cap {
+        let eligible = first_iter + offset > min_rounds;
+        let (count, identical) = if group.fixed {
+            (0, true)
+        } else if offset + 1 == cap {
+            work.scalar_dense_step_mode::<2>(
+                group.ecs,
+                group.transcripts,
+                alpha,
+                next_alpha,
+                products,
+            )
+        } else if eligible {
+            work.scalar_dense_step_mode::<1>(
+                group.ecs,
+                group.transcripts,
+                alpha,
+                next_alpha,
+                products,
+            )
+        } else {
+            work.scalar_dense_step_mode::<0>(
+                group.ecs,
+                group.transcripts,
+                alpha,
+                next_alpha,
+                products,
+            )
+        };
+        group.fixed = identical;
+        taken = offset + 1;
+        changes = count;
+        if eligible && count == 0 {
+            break;
+        }
+    }
+    // At a cap the full count was computed; at an earlier exit any-change
+    // returned zero, which is also the exact full count. Both are observable.
+    group.last_changed = changes != 0;
+    for (index, group) in groups.iter_mut().enumerate() {
+        if index == witness || group.fixed {
+            continue;
+        }
+        let mut last_count = 0;
+        for offset in 0..taken {
+            let (count, identical) = if offset + 1 == taken {
+                work.scalar_dense_step_mode::<2>(
+                    group.ecs,
+                    group.transcripts,
+                    alpha,
+                    next_alpha,
+                    products,
+                )
+            } else {
+                work.scalar_dense_step_mode::<0>(
+                    group.ecs,
+                    group.transcripts,
+                    alpha,
+                    next_alpha,
+                    products,
+                )
+            };
+            last_count = count;
+            group.fixed = identical;
+            if identical {
+                break;
+            }
+        }
+        group.last_changed = last_count != 0;
+        changes += last_count;
+    }
+    (taken, changes)
 }
 
 #[cfg(test)]
@@ -451,8 +600,245 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scalar_tiles_preserve_first_stop_and_reset() {
+        // Includes independent components that reach relative convergence at
+        // different times. Every returned boundary is checked against the
+        // original one-round full-count equations, including all intervening
+        // possible stops, rather than against the witness implementation.
+        let fixtures = [
+            (
+                vec![vec![0, 1]],
+                vec![5],
+                vec![1.0, 2.0],
+                vec![4.99975, 0.00025],
+            ),
+            (
+                vec![
+                    vec![0, 2],
+                    vec![1, 3],
+                    vec![4],
+                    vec![0, 2, 5],
+                    vec![1, 3, 6],
+                ],
+                vec![5, 11, 3, 7, 2],
+                vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+                vec![0.25; 7],
+            ),
+            (
+                vec![vec![0, 1], vec![0, 1], vec![0, 1], vec![2, 3]],
+                vec![1, 2, 2, 19],
+                vec![1.0, 2.0, 1.0, 2.0],
+                vec![4.99975, 0.00025, 0.5, 0.5],
+            ),
+            (
+                vec![vec![0], vec![1]],
+                vec![3, 7],
+                vec![1.0, 1.0],
+                vec![0.5, 0.5],
+            ),
+            (
+                vec![vec![2, 8], vec![8, 11], vec![4, 9]],
+                vec![5, 7, 11],
+                (0..12).map(|id| 1.0 + id as f64 * 0.25).collect(),
+                vec![0.25; 12],
+            ),
+            (vec![], vec![], vec![], vec![]),
+        ];
+        let mut early_boundary_checked = false;
+        let mut witness_switched = false;
+        for (classes, counts, lengths, initial) in fixtures {
+            for fill in [
+                None,
+                Some(0.0),
+                Some(-0.0),
+                Some(f64::from_bits(1)),
+                Some(f64::INFINITY),
+                Some(f64::from_bits(0x7ff8_0000_0000_0023)),
+            ] {
+                for (first_iter, min_rounds) in [(0, 0), (0, 2), (49, 50), (51, 50), (0, 200)] {
+                    for remaining in [1, 2, 7, 8, 9, 63, 64, 65, 130] {
+                        let mut work = super::super::prepare_em_work(&classes, &counts, &lengths);
+                        let mut groups = work.group_components();
+                        let mut actual: Vec<_> = work
+                            .active_transcripts
+                            .iter()
+                            .map(|&tr| fill.unwrap_or(initial[tr]))
+                            .collect();
+                        work.compact_transcript_ids();
+                        let active: Vec<_> = (0..actual.len()).collect();
+                        let mut expected = actual.clone();
+                        let mut next = vec![0.0; actual.len()];
+                        let max_ec = work
+                            .multi_ecs
+                            .iter()
+                            .map(|ec| ec.transcript_range.end - ec.transcript_range.start)
+                            .max()
+                            .unwrap_or(0);
+                        let mut products = vec![0.0; max_ec.saturating_mul(2)];
+                        let mut completed = 0;
+                        while completed < remaining {
+                            let wanted_witness = groups
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, group)| !group.fixed)
+                                .max_by_key(|(_, group)| {
+                                    (group.last_changed, group.ecs.end - group.ecs.start)
+                                })
+                                .map(|(index, _)| index);
+                            let (taken, count) = scalar_tile(
+                                &mut groups,
+                                &work,
+                                &active,
+                                &mut actual,
+                                &mut next,
+                                &mut products,
+                                first_iter + completed,
+                                min_rounds,
+                                remaining - completed,
+                            );
+                            assert!(taken > 0 && taken <= 64 && taken <= remaining - completed);
+                            let mut expected_count = 0;
+                            for offset in 0..taken {
+                                expected_count = work
+                                    .scalar_step(
+                                        core::range::Range {
+                                            start: 0,
+                                            end: work.multi_ecs.len(),
+                                        },
+                                        &active,
+                                        &mut expected,
+                                        &mut next,
+                                        &mut products,
+                                    )
+                                    .0;
+                                if offset + 1 < taken
+                                    && first_iter + completed + offset > min_rounds
+                                {
+                                    assert_ne!(
+                                        expected_count, 0,
+                                        "tile crossed the first valid global stop"
+                                    );
+                                }
+                            }
+                            assert_eq!(count, expected_count);
+                            assert!(
+                                actual
+                                    .iter()
+                                    .zip(&expected)
+                                    .all(|(a, b)| a.to_bits() == b.to_bits())
+                            );
+                            early_boundary_checked |=
+                                taken < (remaining - completed).min(64) && fill.is_none();
+                            let next_witness = groups
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, group)| !group.fixed)
+                                .max_by_key(|(_, group)| {
+                                    (group.last_changed, group.ecs.end - group.ecs.start)
+                                })
+                                .map(|(index, _)| index);
+                            witness_switched |= wanted_witness.is_some()
+                                && next_witness.is_some()
+                                && wanted_witness != next_witness;
+                            completed += taken;
+                            if count == 0 && first_iter + completed - 1 > min_rounds {
+                                break;
+                            }
+                        }
+                        // Independent iteration-by-iteration stop oracle.
+                        let mut reference: Vec<_> = work
+                            .active_transcripts
+                            .iter()
+                            .map(|&tr| fill.unwrap_or(initial[tr]))
+                            .collect();
+                        let mut stop = 0;
+                        for offset in 0..remaining {
+                            let count = work
+                                .scalar_step(
+                                    core::range::Range {
+                                        start: 0,
+                                        end: work.multi_ecs.len(),
+                                    },
+                                    &active,
+                                    &mut reference,
+                                    &mut next,
+                                    &mut products,
+                                )
+                                .0;
+                            stop += 1;
+                            if count == 0 && first_iter + offset > min_rounds {
+                                break;
+                            }
+                        }
+                        assert_eq!(completed, stop);
+                        assert!(
+                            actual
+                                .iter()
+                                .zip(&reference)
+                                .all(|(a, b)| a.to_bits() == b.to_bits())
+                        );
+                        // Final pruning must reset exact fixed certificates.
+                        for (a, b) in actual.iter_mut().zip(&mut expected) {
+                            if *a < super::super::ALPHA_LIMIT / 10.0 {
+                                *a = 0.0;
+                            }
+                            if *b < super::super::ALPHA_LIMIT / 10.0 {
+                                *b = 0.0;
+                            }
+                        }
+                        reset_fixed(&mut groups);
+                        assert!(
+                            groups
+                                .iter()
+                                .all(|group| !group.fixed && group.last_changed)
+                        );
+                        let expected_count = work
+                            .scalar_step(
+                                core::range::Range {
+                                    start: 0,
+                                    end: work.multi_ecs.len(),
+                                },
+                                &active,
+                                &mut expected,
+                                &mut next,
+                                &mut products,
+                            )
+                            .0;
+                        assert_eq!(
+                            scalar_step(
+                                &mut groups,
+                                &work,
+                                &active,
+                                &mut actual,
+                                &mut next,
+                                &mut products
+                            ),
+                            expected_count
+                        );
+                        assert!(
+                            actual
+                                .iter()
+                                .zip(&expected)
+                                .all(|(a, b)| a.to_bits() == b.to_bits())
+                        );
+                    }
+                }
+            }
+        }
+        assert!(early_boundary_checked);
+        assert!(witness_switched);
+        // The additional scheduling bool fits the existing layout padding.
+        assert_eq!(std::mem::size_of::<EmComponent>(), 48);
+    }
+
+    #[test]
     fn exact_fixed_components_resume_after_alpha_reset() {
-        for (parallel, wide) in [(false, false), (true, false), (true, true)] {
+        for (scalar, parallel, wide) in [
+            (true, false, false),
+            (false, false, false),
+            (false, true, false),
+            (false, true, true),
+        ] {
             let n = 70;
             let classes: Vec<_> = (0..n)
                 .map(|i| vec![(i * 2) as u32, (i * 2 + 1) as u32])
@@ -470,6 +856,9 @@ mod tests {
                     super::super::IncomingEcIds::Wide(ids.iter().map(|&id| id as usize).collect());
             }
             let mut scales = super::super::EcScales::new(n);
+            let active: Vec<_> = (0..work.active_transcripts.len()).collect();
+            let mut next = vec![0.0; active.len()];
+            let mut products = vec![0.0; 2];
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(2)
                 .build()
@@ -488,50 +877,89 @@ mod tests {
                     let second = 0.0 + 0.5 * pair[1] * scale;
                     pair.copy_from_slice(&[first, second]);
                 }
+                if scalar {
+                    scalar_step(
+                        &mut groups,
+                        &work,
+                        &active,
+                        &mut mixed,
+                        &mut next,
+                        &mut products,
+                    );
+                } else {
+                    step::<_, true>(
+                        &pool,
+                        &mut groups,
+                        &work,
+                        &incoming,
+                        &work.multi_transcripts,
+                        &mut mixed,
+                        &mut scales,
+                        1,
+                    );
+                }
+                assert_eq!(
+                    mixed.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                );
+                if scalar {
+                    assert!(groups[..n / 2].iter().all(|g| g.fixed));
+                } else {
+                    assert_ne!(groups[0].fixed_subtrees, 0);
+                    assert_eq!(groups[0].fixed_subtrees & 1, 0);
+                }
+            }
+            reset_fixed(&mut groups);
+            let mut alpha: Vec<_> = (0..n).flat_map(|_| [1.0, 0.0]).collect();
+            if scalar {
+                scalar_step(
+                    &mut groups,
+                    &work,
+                    &active,
+                    &mut alpha,
+                    &mut next,
+                    &mut products,
+                );
+            } else {
                 step::<_, true>(
                     &pool,
                     &mut groups,
                     &work,
                     &incoming,
                     &work.multi_transcripts,
-                    &mut mixed,
+                    &mut alpha,
                     &mut scales,
                     1,
                 );
-                assert_eq!(
-                    mixed.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                    expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
-                );
-                assert_ne!(groups[0].fixed_subtrees, 0);
-                assert_eq!(groups[0].fixed_subtrees & 1, 0);
             }
-            reset_fixed(&mut groups);
-            let mut alpha: Vec<_> = (0..n).flat_map(|_| [1.0, 0.0]).collect();
-            step::<_, true>(
-                &pool,
-                &mut groups,
-                &work,
-                &incoming,
-                &work.multi_transcripts,
-                &mut alpha,
-                &mut scales,
-                1,
-            );
             assert!(groups.iter().all(|g| g.fixed));
-            assert_ne!(groups[0].fixed_subtrees & 1, 0);
+            if !scalar {
+                assert_ne!(groups[0].fixed_subtrees & 1, 0);
+            }
             alpha.fill(0.5);
             reset_fixed(&mut groups);
             assert!(groups.iter().all(|g| !g.fixed && g.fixed_subtrees == 0));
-            step::<_, true>(
-                &pool,
-                &mut groups,
-                &work,
-                &incoming,
-                &work.multi_transcripts,
-                &mut alpha,
-                &mut scales,
-                1,
-            );
+            if scalar {
+                scalar_step(
+                    &mut groups,
+                    &work,
+                    &active,
+                    &mut alpha,
+                    &mut next,
+                    &mut products,
+                );
+            } else {
+                step::<_, true>(
+                    &pool,
+                    &mut groups,
+                    &work,
+                    &incoming,
+                    &work.multi_transcripts,
+                    &mut alpha,
+                    &mut scales,
+                    1,
+                );
+            }
             assert_eq!(
                 alpha,
                 (0..n)
@@ -570,5 +998,85 @@ mod tests {
         assert_eq!(visits(&work), before);
         assert!(work.active_transcripts[..32].iter().all(|tr| tr % 2 == 0));
         assert!(work.active_transcripts[32..].iter().all(|tr| tr % 2 == 1));
+
+        // Unequal row lengths, overlapping targets, odd final rows and
+        // near-zero denominators check the scalar two-row schedule against
+        // the original row-at-a-time arithmetic, bit for bit.
+        for rows in 1..=5 {
+            let classes = [
+                vec![0, 1, 2, 3],
+                vec![1, 3],
+                vec![0, 2, 3],
+                vec![0, 1],
+                vec![1, 2, 3],
+            ];
+            let counts = [17, 3, 101, 2, 7];
+            let work = super::super::prepare_em_work(
+                &classes[..rows],
+                &counts[..rows],
+                &[1.125, 2.75, 11.25, 17.0],
+            );
+            let active = work.active_transcripts.clone();
+            for initial in [
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [1e-16, 1e-16, 1e-16, 1e-16],
+                [0.125, 0.25, 0.375, 0.25],
+                [-0.0; 4],
+                [f64::from_bits(1); 4],
+                [f64::INFINITY; 4],
+                [f64::from_bits(0x7ff8_0000_0000_0023); 4],
+            ] {
+                let mut expected = initial.to_vec();
+                let mut actual = initial.to_vec();
+                let mut next = vec![0.0; 4];
+                let mut products = vec![0.0; 8];
+                for iteration in 0..20 {
+                    if iteration == 10 {
+                        expected[0] = 0.0;
+                        actual[0] = 0.0;
+                    }
+                    let mut wanted = work.singleton_alpha.clone();
+                    for ec in &work.multi_ecs {
+                        let ids = &work.multi_transcripts[ec.transcript_range];
+                        let weights = &work.multi_weights[ec.transcript_range];
+                        let mut denominator = 0.0;
+                        let products: Vec<_> = ids
+                            .iter()
+                            .zip(weights)
+                            .map(|(&id, &weight)| {
+                                let product = expected[id] * weight;
+                                denominator += product;
+                                product
+                            })
+                            .collect();
+                        if denominator < super::super::TOLERANCE {
+                            continue;
+                        }
+                        let scale = ec.count / denominator;
+                        for (&id, product) in ids.iter().zip(products) {
+                            wanted[id] += product * scale;
+                        }
+                    }
+                    for &id in &active {
+                        expected[id] = wanted[id];
+                    }
+                    work.scalar_step(
+                        core::range::Range {
+                            start: 0,
+                            end: rows,
+                        },
+                        &active,
+                        &mut actual,
+                        &mut next,
+                        &mut products,
+                    );
+                    assert_eq!(
+                        actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
     }
 }

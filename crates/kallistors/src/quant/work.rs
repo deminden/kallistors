@@ -246,3 +246,189 @@ pub(super) fn refresh_multi_weights(work: &mut EmWork, eff_lens: &[f64]) {
         }
     }
 }
+
+impl EmWork {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn scalar_step(
+        &self,
+        ecs: Range<usize>,
+        active: &[usize],
+        alpha: &mut [f64],
+        next_alpha: &mut [f64],
+        scalar_products: &mut [f64],
+    ) -> (usize, bool) {
+        self.scalar_step_mode::<2>(ecs, active, alpha, next_alpha, scalar_products)
+    }
+
+    // MODE 2 counts every changed target, MODE 1 only proves any change,
+    // MODE 0 omits a count that the independent witness proves unobservable.
+    // All modes retain the exact same updates and fixed-point predicate.
+    pub(super) fn scalar_step_mode<const MODE: u8>(
+        &self,
+        ecs: Range<usize>,
+        active: &[usize],
+        alpha: &mut [f64],
+        next_alpha: &mut [f64],
+        scalar_products: &mut [f64],
+    ) -> (usize, bool) {
+        self.scalar_targets::<MODE>(
+            ecs,
+            active.iter().copied(),
+            alpha,
+            next_alpha,
+            scalar_products,
+        )
+    }
+
+    pub(super) fn scalar_dense_step_mode<const MODE: u8>(
+        &self,
+        ecs: Range<usize>,
+        active: Range<usize>,
+        alpha: &mut [f64],
+        next_alpha: &mut [f64],
+        scalar_products: &mut [f64],
+    ) -> (usize, bool) {
+        self.scalar_targets::<MODE>(
+            ecs,
+            active.start..active.end,
+            alpha,
+            next_alpha,
+            scalar_products,
+        )
+    }
+
+    // Both monomorphizations visit exactly the same active target sequence.
+    // Dense component callers pass their proven compact coordinates directly,
+    // avoiding loads through the identity-ID vector. Row arithmetic is shared.
+    fn scalar_targets<const MODE: u8>(
+        &self,
+        ecs: Range<usize>,
+        active: impl Iterator<Item = usize> + Clone,
+        alpha: &mut [f64],
+        next_alpha: &mut [f64],
+        scalar_products: &mut [f64],
+    ) -> (usize, bool) {
+        for tr in active.clone() {
+            next_alpha[tr] = self.singleton_alpha[tr];
+        }
+        let ids = &self.multi_transcripts;
+
+        let rows = &self.multi_ecs[ecs];
+        let (pairs, tail) = rows.as_chunks::<2>();
+        for [left, right] in pairs {
+            let left_ids = &ids[left.transcript_range];
+            let right_ids = &ids[right.transcript_range];
+            let (left_products, rest) = scalar_products.split_at_mut(left_ids.len());
+            let right_products = &mut rest[..right_ids.len()];
+            let (left_denom, right_denom) = scalar_pair_products(
+                left_ids,
+                &self.multi_weights[left.transcript_range],
+                left_products,
+                right_ids,
+                &self.multi_weights[right.transcript_range],
+                right_products,
+                alpha,
+            );
+            // Scatter order is exactly the original EC order, including when
+            // these two rows contribute to the same transcript.
+            scalar_scatter(left, left_ids, left_products, left_denom, next_alpha);
+            scalar_scatter(right, right_ids, right_products, right_denom, next_alpha);
+        }
+        for ec in tail {
+            let transcripts = &ids[ec.transcript_range];
+            let weights = &self.multi_weights[ec.transcript_range];
+            let products = &mut scalar_products[..transcripts.len()];
+            let mut denom = 0.0;
+            for ((&tr, &weight), product) in
+                transcripts.iter().zip(weights).zip(products.iter_mut())
+            {
+                *product = alpha[tr.as_usize()] * weight;
+                denom += *product;
+            }
+            scalar_scatter(ec, transcripts, products, denom, next_alpha);
+        }
+        let mut changes = 0;
+        let mut identical = true;
+        for tr in active {
+            let next = next_alpha[tr];
+            let old = alpha[tr];
+            if MODE == 2 || (MODE == 1 && changes == 0) {
+                changes += usize::from(
+                    next > ALPHA_CHANGE_LIMIT && (next - old).abs() / next > ALPHA_CHANGE,
+                );
+            }
+            identical &= next.to_bits() == old.to_bits();
+            alpha[tr] = next;
+        }
+        (changes, identical)
+    }
+}
+
+// Alpha is immutable until this component's complete scatter has finished.
+// Interleave two independent denominator chains, preserving the original
+// multiplication and addition sequence within each row.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn scalar_pair_products<I: IncomingEcId>(
+    left_ids: &[I],
+    left_weights: &[f64],
+    left_products: &mut [f64],
+    right_ids: &[I],
+    right_weights: &[f64],
+    right_products: &mut [f64],
+    alpha: &[f64],
+) -> (f64, f64) {
+    let shared = left_ids.len().min(right_ids.len());
+    let mut left_denom = 0.0;
+    let mut right_denom = 0.0;
+    for (((&left, &lw), lp), ((&right, &rw), rp)) in left_ids
+        .iter()
+        .zip(left_weights)
+        .zip(&mut left_products[..shared])
+        .zip(
+            right_ids
+                .iter()
+                .zip(right_weights)
+                .zip(&mut right_products[..shared]),
+        )
+    {
+        *lp = alpha[left.as_usize()] * lw;
+        left_denom += *lp;
+        *rp = alpha[right.as_usize()] * rw;
+        right_denom += *rp;
+    }
+    for ((&tr, &weight), product) in left_ids[shared..]
+        .iter()
+        .zip(&left_weights[shared..])
+        .zip(&mut left_products[shared..])
+    {
+        *product = alpha[tr.as_usize()] * weight;
+        left_denom += *product;
+    }
+    for ((&tr, &weight), product) in right_ids[shared..]
+        .iter()
+        .zip(&right_weights[shared..])
+        .zip(&mut right_products[shared..])
+    {
+        *product = alpha[tr.as_usize()] * weight;
+        right_denom += *product;
+    }
+    (left_denom, right_denom)
+}
+
+#[inline]
+fn scalar_scatter<I: IncomingEcId>(
+    ec: &EmMultiEc,
+    ids: &[I],
+    products: &[f64],
+    denom: f64,
+    next: &mut [f64],
+) {
+    if denom < TOLERANCE {
+        return;
+    }
+    let scale = ec.count / denom;
+    for (&tr, &product) in ids.iter().zip(products) {
+        next[tr.as_usize()] += product * scale;
+    }
+}
