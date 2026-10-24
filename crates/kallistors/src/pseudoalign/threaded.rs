@@ -144,6 +144,25 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
         None
     };
     if threads <= 1 {
+        // Ordinary synchronous counting consumes only sequences. Reuse the
+        // threaded parser and mapper without spawning a producer or worker.
+        // Bias sampling retains the existing complete-record route.
+        if !options.bias {
+            let mut counts = EcCounts::new(false);
+            let mut map = EcCountMap::default();
+            while let Some(batch) = reader.next_packed_seq_batch(4_096)? {
+                super::single::pseudoalign_single_end_bifrost_batch_into(
+                    index,
+                    batch,
+                    strand,
+                    filter,
+                    options,
+                    &mut counts,
+                    &mut map,
+                );
+            }
+            return Ok(counts);
+        }
         return super::single::pseudoalign_single_end_bifrost_with_options(
             index, reader, strand, filter, options,
         );

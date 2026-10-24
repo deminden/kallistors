@@ -25,3 +25,5 @@ pub(super) use runtime::MatchCacheBudgetScope;
 pub(crate) use runtime::reset_thread_local_caches;
 
 pub(crate) use filters::filter_ec_by_fragment_and_strand_cow;
+
+pub(crate) use fast::{try_paired_counting_batch, try_single_counting_batch};

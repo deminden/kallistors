@@ -1,15 +1,21 @@
 //! Lossless directory widths; tags only select candidates for full verification.
+mod dense19;
 use super::{OFFSET_MASK, TAG_MASK, WordSpan};
 
 #[cfg_attr(test, derive(Debug))]
 pub(super) enum WordDirectory {
     Wide(Box<[u64]>),
-    Tiny11 {
-        entries: Box<[u16]>,
+    HashedWide(Box<[u64]>),
+    Dense19 {
+        entries: Box<[u32]>,
         spans: Box<[u64]>,
     },
-    Dense16 {
+    HashedDense19 {
         entries: Box<[u32]>,
+        spans: Box<[u64]>,
+    },
+    Tiny11 {
+        entries: Box<[u16]>,
         spans: Box<[u64]>,
     },
     Narrow {
@@ -27,11 +33,16 @@ impl WordDirectory {
         let multiple = keys.iter().filter(|key| key.end != 0).count();
         source_len <= 128 && multiple <= 128 && multiple * 8 < keys.len() * 4
     }
-    pub(super) fn payload_bytes(keys: &[WordSpan], narrow: bool) -> usize {
-        if narrow {
-            keys.len() * 4 + keys.iter().filter(|key| key.end != 0).count() * 8
+    pub(super) fn payload_bytes(keys: &[WordSpan], narrow: bool, hashed: bool) -> usize {
+        let count = if hashed {
+            hash_slots(keys.len())
         } else {
-            keys.len() * 8
+            keys.len()
+        };
+        if narrow {
+            count * 4 + keys.iter().filter(|key| key.end != 0).count() * 8
+        } else {
+            count * 8
         }
     }
     pub(super) fn build(keys: &[WordSpan], narrow: bool) -> Self {
@@ -83,42 +94,10 @@ impl WordDirectory {
                 arrange(keys, entries, node * 2 + 2, rank);
             }
             arrange(keys, &mut entries, 0, &mut 0);
-            Self::Wide(entries.into_boxed_slice())
-        }
-    }
-    pub(super) fn build_dense(keys: &[WordSpan]) -> Self {
-        let mut entries = vec![0u32; keys.len()];
-        let mut spans = Vec::with_capacity(keys.iter().filter(|key| key.end != 0).count());
-        fn arrange(
-            keys: &[WordSpan],
-            entries: &mut [u32],
-            spans: &mut Vec<u64>,
-            node: usize,
-            rank: &mut usize,
-        ) {
-            if node >= keys.len() {
-                return;
+            match hashed_entries::<_, TAG_MASK>(&entries, u64::MAX) {
+                Some(entries) => Self::HashedWide(entries),
+                None => Self::Wide(entries.into_boxed_slice()),
             }
-            arrange(keys, entries, spans, node * 2 + 1, rank);
-            let key = &keys[*rank];
-            assert!(key.word <= 0xffff);
-            let descriptor = if key.end == 0 {
-                assert!(key.first < 32768);
-                key.first
-            } else {
-                assert!(spans.len() < 32768);
-                let slot = spans.len() as u32;
-                spans.push((u64::from(key.first) << 24) | (u64::from(key.end) << 44));
-                32768 | slot
-            };
-            entries[node] = key.word | (descriptor << 16);
-            *rank += 1;
-            arrange(keys, entries, spans, node * 2 + 2, rank);
-        }
-        arrange(keys, &mut entries, &mut spans, 0, &mut 0);
-        Self::Dense16 {
-            entries: entries.into_boxed_slice(),
-            spans: spans.into_boxed_slice(),
         }
     }
     pub(super) fn tiny_layout(keys: &[WordSpan]) -> bool {
@@ -164,7 +143,7 @@ impl WordDirectory {
     }
     fn expand(&self, entry: u64) -> u64 {
         match self {
-            Self::Wide(_) => entry,
+            Self::Wide(_) | Self::HashedWide(_) => entry,
             Self::Tiny11 { spans, .. } => {
                 let descriptor = (entry >> 11) as usize;
                 let tag = (entry & 0x7ff) << 13;
@@ -174,13 +153,13 @@ impl WordDirectory {
                     tag | spans[descriptor & 15]
                 }
             }
-            Self::Dense16 { spans, .. } => {
-                let descriptor = (entry >> 16) as usize;
-                let tag = (entry & 0xffff) << 8;
-                if descriptor < 32768 {
+            Self::Dense19 { spans, .. } | Self::HashedDense19 { spans, .. } => {
+                let descriptor = (entry >> 19) as usize;
+                let tag = (entry & 0x7ffff) << 5;
+                if descriptor < 4096 {
                     tag | ((descriptor as u64) << 24)
                 } else {
-                    tag | spans[descriptor & 32767]
+                    tag | spans[descriptor & 4095]
                 }
             }
             Self::Narrow { spans, .. } => {
@@ -197,11 +176,68 @@ impl WordDirectory {
     pub(super) fn entry(&self, tag: u64) -> Option<u64> {
         let result = match self {
             Self::Wide(entries) => search::<_, TAG_MASK>(entries, tag),
+            Self::HashedWide(entries) => hash_search::<_, TAG_MASK>(entries, tag, u64::MAX),
+            Self::HashedDense19 { entries, .. } => {
+                hash_search::<_, 0x7ffff>(entries, tag >> 5, u32::MAX)
+            }
+            Self::Dense19 { entries, .. } => search::<_, 0x7ffff>(entries, tag >> 5),
             Self::Tiny11 { entries, .. } => search::<_, 0x7ff>(entries, tag >> 13),
             Self::Narrow { entries, .. } => search::<_, TAG_MASK>(entries, tag),
-            Self::Dense16 { entries, .. } => search::<_, 0xffff>(entries, tag >> 8),
         };
         result.map(|entry| self.expand(entry))
+    }
+}
+
+// A table has at least one empty slot and at most 3/4 nominal occupancy.
+// Complete selector values still decide membership; a hash collision merely
+// probes another slot. Real all-ones entries retain the tree representation.
+fn hash_slots(entries: usize) -> usize {
+    if entries == 0 {
+        return 0;
+    }
+    entries
+        .checked_add(entries.div_ceil(3))
+        .and_then(usize::checked_next_power_of_two)
+        .expect("bounded candidate directory")
+}
+
+fn hashed_entries<T: Copy + Into<u64> + PartialEq, const MASK: u64>(
+    entries: &[T],
+    empty: T,
+) -> Option<Box<[T]>> {
+    if entries.contains(&empty) {
+        return None;
+    }
+    let slots = hash_slots(entries.len());
+    let mut table = vec![empty; slots];
+    for &entry in entries {
+        let mut slot = (entry.into() & MASK) as usize & (slots - 1);
+        while table[slot] != empty {
+            slot = (slot + 1) & (slots - 1);
+        }
+        table[slot] = entry;
+    }
+    Some(table.into_boxed_slice())
+}
+
+#[inline]
+fn hash_search<T: Copy + Into<u64> + PartialEq, const MASK: u64>(
+    entries: &[T],
+    tag: u64,
+    empty: T,
+) -> Option<u64> {
+    let mask = entries.len().checked_sub(1)?;
+    let mut slot = tag as usize & mask;
+    loop {
+        let value = entries[slot];
+        if value == empty {
+            return None;
+        }
+        let value = value.into();
+        if value & MASK == tag {
+            return Some(value);
+        }
+        slot = (slot + 1) & mask;
     }
 }
 
@@ -260,45 +296,48 @@ mod tests {
                 );
             }
         }
-    }
-}
 
-#[cfg(test)]
-mod dense_tests {
-    use super::*;
-    #[test]
-    fn dense_inline_and_list_descriptors_preserve_all_postings() {
-        let keys: Vec<_> = (0..32768u32)
-            .map(|i| WordSpan {
-                word: i * 2,
-                first: if i == 32767 { OFFSET_MASK as u32 } else { i },
-                end: if i == 32767 { OFFSET_MASK as u32 } else { 2 },
-            })
-            .collect();
-        let dense = WordDirectory::build_dense(&keys);
-        for key in &keys {
-            let expected = (u64::from(key.word) << 8)
-                | (u64::from(key.first) << 24)
-                | (u64::from(key.end) << 44);
-            for low in [0, 1, 255] {
+        // Independent sorted membership through wraparound probe clusters,
+        // absent tags, empty tables and an actual reserved-sentinel value.
+        for len in [0, 1, 2, 3, 7, 8, 9, 63, 64, 65, 257] {
+            let values: Vec<u64> = (0..len)
+                .map(|i| ((i * 1024 + 1023) as u64) | ((i as u64) << 24))
+                .collect();
+            let hashed =
+                super::hashed_entries::<_, { super::TAG_MASK }>(&values, u64::MAX).unwrap();
+            for query in (0..=(len * 1024 + 1024) as u64)
+                .step_by(31)
+                .chain(values.iter().map(|v| v & super::TAG_MASK))
+            {
+                let expected = values
+                    .iter()
+                    .copied()
+                    .find(|v| v & super::TAG_MASK == query);
                 assert_eq!(
-                    dense.entry((u64::from(key.word) << 8) | low),
-                    Some(expected)
+                    super::hash_search::<_, { super::TAG_MASK }>(&hashed, query, u64::MAX,),
+                    expected
                 );
-                assert_eq!(dense.entry((u64::from(key.word + 1) << 8) | low), None);
             }
-        }
-        for ordinal in [0, 127, 128, 4095, 32767] {
-            let dense = WordDirectory::build_dense(&[WordSpan {
-                word: 65535,
-                first: ordinal,
-                end: 0,
-            }]);
             assert_eq!(
-                dense.entry(TAG_MASK),
-                Some(0xffff00 | (u64::from(ordinal) << 24))
+                super::hash_search::<_, { super::TAG_MASK }>(
+                    &hashed,
+                    super::TAG_MASK + 1,
+                    u64::MAX,
+                ),
+                None
             );
         }
+        assert!(super::hashed_entries::<_, { super::TAG_MASK }>(&[u64::MAX], u64::MAX,).is_none());
+        // The tree fallback must retain the complete all-ones descriptor.
+        let extreme = super::WordDirectory::build(
+            &[super::WordSpan {
+                word: super::TAG_MASK as u32,
+                first: super::OFFSET_MASK as u32,
+                end: super::OFFSET_MASK as u32,
+            }],
+            false,
+        );
+        assert_eq!(extreme.entry(super::TAG_MASK), Some(u64::MAX));
     }
 }
 

@@ -413,41 +413,18 @@ fn count_paired_borrowed_batch(
     ec_map: &mut EcCountMap,
 ) {
     let mut merged = Vec::new();
-    for idx in range {
-        if super::reset_all_caches_per_read() {
-            super::reset_thread_local_caches();
-        }
+    let mut count = |a: Option<super::BorrowedReadEc<'_>>, b: Option<super::BorrowedReadEc<'_>>| {
         counts.reads_processed = counts.reads_processed.saturating_add(1);
-        // SAFETY: caller proved both batch lengths equal and this range in bounds.
-        let a_seq = unsafe { left.seq_unchecked(idx) };
-        let b_seq = unsafe { right.seq_unchecked(idx) };
-        let a = super::core::ec_for_read_bifrost_counting_borrowed(index, a_seq, strand, options)
-            .map(|v| {
-                if let Some(mode) = options.strand_specific {
-                    v.filter_strand(index, mode, true)
-                } else {
-                    v
-                }
-            });
-        if a.as_ref().is_some_and(|v| v.read.hard_reject_pair) {
-            continue;
+        if a.as_ref().is_some_and(|read| read.read.hard_reject_pair)
+            || b.as_ref().is_some_and(|read| read.read.hard_reject_pair)
+        {
+            return;
         }
-        let b = super::core::ec_for_read_bifrost_counting_borrowed(index, b_seq, strand, options)
-            .map(|v| {
-                if let Some(mode) = options.strand_specific {
-                    v.filter_strand(index, mode, false)
-                } else {
-                    v
-                }
-            });
-        if b.as_ref().is_some_and(|v| v.read.hard_reject_pair) {
-            continue;
-        }
-        let a = a.as_ref().filter(|v| !v.ec().is_empty());
-        let b = b.as_ref().filter(|v| !v.ec().is_empty());
+        let a = a.as_ref().filter(|read| !read.ec().is_empty());
+        let b = b.as_ref().filter(|read| !read.ec().is_empty());
         let ec = match (a, b) {
-            (None, None) => continue,
-            (Some(v), None) | (None, Some(v)) => v.ec(),
+            (None, None) => return,
+            (Some(read), None) | (None, Some(read)) => read.ec(),
             (Some(a), Some(b)) if std::ptr::eq(a.ec(), b.ec()) => a.ec(),
             (Some(a), Some(b)) => {
                 super::intersect_sorted(a.ec(), b.ec(), &mut merged);
@@ -455,10 +432,50 @@ fn count_paired_borrowed_batch(
             }
         };
         if ec.is_empty() {
-            continue;
+            return;
         }
         counts.reads_aligned = counts.reads_aligned.saturating_add(1);
         super::utils::add_ec_count_slice(counts, ec_map, ec);
+    };
+    if super::core::try_paired_counting_batch(
+        index,
+        left,
+        right,
+        range.clone(),
+        strand,
+        options,
+        &mut count,
+    ) {
+        return;
+    }
+    for idx in range {
+        if super::reset_all_caches_per_read() {
+            super::reset_thread_local_caches();
+        }
+        // SAFETY: caller proved both batch lengths equal and this range in bounds.
+        let a_seq = unsafe { left.seq_unchecked(idx) };
+        let b_seq = unsafe { right.seq_unchecked(idx) };
+        let a = super::core::ec_for_read_bifrost_counting_borrowed(index, a_seq, strand, options)
+            .map(|read| {
+                if let Some(mode) = options.strand_specific {
+                    read.filter_strand(index, mode, true)
+                } else {
+                    read
+                }
+            });
+        if a.as_ref().is_some_and(|read| read.read.hard_reject_pair) {
+            count(a, None);
+            continue;
+        }
+        let b = super::core::ec_for_read_bifrost_counting_borrowed(index, b_seq, strand, options)
+            .map(|read| {
+                if let Some(mode) = options.strand_specific {
+                    read.filter_strand(index, mode, false)
+                } else {
+                    read
+                }
+            });
+        count(a, b);
     }
 }
 

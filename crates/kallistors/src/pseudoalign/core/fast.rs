@@ -198,6 +198,142 @@ pub(super) fn ec_for_read_bifrost_fast_counting_borrowed<'index, const PLACEMENT
     })
 }
 
+// Scope existing per-thread state over an ordered sequence batch. The same
+// scanner handles every read; reset/diagnostic/alternate paths keep old calls.
+pub(crate) fn try_single_counting_batch<'index>(
+    index: &'index BifrostIndex,
+    batch: &crate::io::PackedSeqBatch,
+    strand: Strand,
+    options: PseudoalignOptions,
+    mut count: impl FnMut(Option<BorrowedReadEc<'index>>),
+) -> bool {
+    if index.k == 0
+        || super::super::reset_all_caches_per_read()
+        || options.investigation.any_enabled()
+        || !super::runtime::fast_path_enabled(index, false, options)
+    {
+        return false;
+    }
+    super::runtime::ensure_cache_context(index);
+    super::runtime::with_mphf_lookup_cache(|cache| {
+        let mut scratch = cache.scan_scratch.take().unwrap_or_default();
+        for record in batch.records() {
+            if record.seq.len() < index.k {
+                count(None);
+                continue;
+            }
+            scratch.clear();
+            count(ec_for_read_bifrost_fast_with_cache::<false, true, true>(
+                index,
+                record.seq,
+                strand,
+                None,
+                options,
+                cache,
+                &mut scratch,
+            ));
+        }
+        cache.scan_scratch = Some(scratch);
+    });
+    true
+}
+
+// Use the established read scanner with one cache/scratch borrow per ordered
+// batch. Filtering mate one before scanning mate two preserves hard rejection
+// and the existing cache access order. The caller has exhausted sampling.
+pub(crate) fn try_paired_counting_batch<'index>(
+    index: &'index BifrostIndex,
+    left: &crate::io::PackedSeqBatch,
+    right: &crate::io::PackedSeqBatch,
+    range: std::ops::Range<usize>,
+    strand: Strand,
+    options: PseudoalignOptions,
+    count: impl FnMut(Option<BorrowedReadEc<'index>>, Option<BorrowedReadEc<'index>>),
+) -> bool {
+    if index.k == 0
+        || super::super::reset_all_caches_per_read()
+        || options.investigation.any_enabled()
+        || !super::runtime::fast_path_enabled(index, false, options)
+    {
+        return false;
+    }
+    super::runtime::ensure_cache_context(index);
+    if options.strand_specific.is_some() {
+        paired_counting_batch_with_cache::<true>(index, left, right, range, strand, options, count);
+    } else {
+        paired_counting_batch_with_cache::<false>(
+            index, left, right, range, strand, options, count,
+        );
+    }
+    true
+}
+
+fn paired_counting_batch_with_cache<'index, const PLACEMENT: bool>(
+    index: &'index BifrostIndex,
+    left: &crate::io::PackedSeqBatch,
+    right: &crate::io::PackedSeqBatch,
+    range: std::ops::Range<usize>,
+    strand: Strand,
+    options: PseudoalignOptions,
+    mut count: impl FnMut(Option<BorrowedReadEc<'index>>, Option<BorrowedReadEc<'index>>),
+) {
+    super::runtime::with_mphf_lookup_cache(|cache| {
+        let mut scratch = cache.scan_scratch.take().unwrap_or_default();
+        let prefetch = index.k == 31
+            && index.g == 23
+            && cache.prefetch_match_capacity()
+            && !super::runtime::env_flag(
+                &super::runtime::DISABLE_MATCH_CACHE,
+                "KALLISTORS_DISABLE_MATCH_CACHE",
+            );
+        for idx in range {
+            // SAFETY: the caller validated both batch lengths and this range.
+            let left_sequence = unsafe { left.seq_unchecked(idx) };
+            let right_sequence = unsafe { right.seq_unchecked(idx) };
+            // Pure encoding and read-only hardware hints. Actual matcher gets,
+            // puts, filters, rejected mates and callback order remain unchanged.
+            if prefetch {
+                cache.prefetch_initial_match_words(left_sequence, right_sequence);
+            }
+            let mut scan = |seq: &[u8]| {
+                if seq.len() < index.k {
+                    return None;
+                }
+                scratch.clear();
+                ec_for_read_bifrost_fast_with_cache::<false, true, PLACEMENT>(
+                    index,
+                    seq,
+                    strand,
+                    None,
+                    options,
+                    cache,
+                    &mut scratch,
+                )
+            };
+            let a = scan(left_sequence).map(|read| {
+                if let Some(mode) = options.strand_specific {
+                    read.filter_strand(index, mode, true)
+                } else {
+                    read
+                }
+            });
+            if a.as_ref().is_some_and(|read| read.read.hard_reject_pair) {
+                count(a, None);
+                continue;
+            }
+            let b = scan(right_sequence).map(|read| {
+                if let Some(mode) = options.strand_specific {
+                    read.filter_strand(index, mode, false)
+                } else {
+                    read
+                }
+            });
+            count(a, b);
+        }
+        cache.scan_scratch = Some(scratch);
+    });
+}
+
 #[cfg(test)]
 mod uppercase_tests {
     use super::all_ascii_uppercase;

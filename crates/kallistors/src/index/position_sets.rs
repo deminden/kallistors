@@ -440,9 +440,9 @@ impl PositionSets {
     // orientation directly from those bits, without a cached summary or any
     // additional work when constructing the index.
     #[inline]
-    pub(crate) fn inline_uniform_strand(&self) -> Option<u8> {
+    pub(crate) fn uniform_singleton_strand(&self) -> Option<u8> {
         if self.groups & INLINE == 0 {
-            return None;
+            return self.allocated_uniform_singleton_strand();
         }
         let mask: u64 = match self.len() {
             1 => 1 << 31,
@@ -455,6 +455,64 @@ impl PositionSets {
             signs if signs == mask => Some(0),
             _ => None,
         }
+    }
+
+    // A validated singleton arena contains complete sign bits already. Inspect
+    // those packed bits directly; mixed signs retain per-transcript filtering.
+    // Repeated-position arenas and wide descriptors keep their ordinary path.
+    fn allocated_uniform_singleton_strand(&self) -> Option<u8> {
+        if self.groups & ALL_SINGLE == 0 || self.groups & WIDE != 0 {
+            return None;
+        }
+        let groups = self.len();
+        if groups == 0 {
+            return None;
+        }
+        let reverse = if self.groups & NARROW != 0 {
+            let reverse = self.data[0] & 0x8000 != 0;
+            let wanted = if reverse { 0x8000_8000 } else { 0 };
+            let (whole, tail) = self.data[..groups.div_ceil(2)].split_at(groups / 2);
+            if !whole.iter().all(|word| word & 0x8000_8000 == wanted)
+                || tail
+                    .first()
+                    .is_some_and(|word| word & 0x8000 != wanted & 0x8000)
+            {
+                return None;
+            }
+            reverse
+        } else if self.groups & MEDIUM != 0 {
+            let reverse = self.data[0] & 0x0080_0000 != 0;
+            // Four 24-bit descriptors occupy exactly three words. Their sign
+            // bits are 23, 47, 71 and 95 relative to this complete group.
+            let masks = [0x0080_0000, 0x0000_8000, 0x8000_0080];
+            let wanted = if reverse { masks } else { [0; 3] };
+            let full = groups / 4;
+            for words in self.data[..full * 3].as_chunks::<3>().0 {
+                if words[0] & masks[0] != wanted[0]
+                    || words[1] & masks[1] != wanted[1]
+                    || words[2] & masks[2] != wanted[2]
+                {
+                    return None;
+                }
+            }
+            for group in full * 4..groups {
+                let bit = group * 24 + 23;
+                if (self.data[bit / 32] >> (bit % 32) & 1 != 0) != reverse {
+                    return None;
+                }
+            }
+            reverse
+        } else {
+            let reverse = self.data[0] & 0x8000_0000 != 0;
+            if !self.data[..groups]
+                .iter()
+                .all(|word| (word & 0x8000_0000 != 0) == reverse)
+            {
+                return None;
+            }
+            reverse
+        };
+        Some(u8::from(!reverse))
     }
 
     // Strand filtering consumes only signs. Decode singleton descriptors or
@@ -686,7 +744,9 @@ mod tests {
                         );
                     }
                 }
-                let uniform = if packed.groups & INLINE != 0 {
+                let uniform = if packed.groups & INLINE != 0
+                    || (packed.groups & ALL_SINGLE != 0 && packed.groups & WIDE == 0)
+                {
                     let first = expected[0][0] >> 31;
                     expected
                         .iter()
@@ -695,7 +755,7 @@ mod tests {
                 } else {
                     None
                 };
-                assert_eq!(packed.inline_uniform_strand(), uniform);
+                assert_eq!(packed.uniform_singleton_strand(), uniform);
                 assert_eq!(packed.len(), expected.len());
                 assert!(packed.get(expected.len()).is_none());
                 assert!(packed.strand_summary_at(expected.len()).is_none());
@@ -715,6 +775,31 @@ mod tests {
                     for query in [0, 1, 17, 123, 0x7fff_ffff, 0x8000_0000, u32::MAX] {
                         assert_eq!(set.contains(query), expected.binary_search(&query).is_ok());
                         assert_eq!(set.any(|raw| raw == query), expected.contains(&query));
+                    }
+                }
+            }
+        }
+
+        // Every sign position and packed-word boundary uses independently
+        // assembled raw coordinates. This includes the 24-bit three-word
+        // pattern, unused final bits, full-u32 and unsupported repeated groups.
+        for groups in [4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 65] {
+            for coordinate in [17u32, 0x8000, 0x80_0000] {
+                for sign in [0, 0x8000_0000] {
+                    let values: Vec<_> = (0..groups)
+                        .map(|i| (coordinate + i as u32) | sign)
+                        .collect();
+                    let packed = PositionSets::from_singletons(values.iter().copied());
+                    let supported = packed.groups & ALL_SINGLE != 0 && packed.groups & WIDE == 0;
+                    assert_eq!(
+                        packed.uniform_singleton_strand(),
+                        supported.then_some(u8::from(sign == 0))
+                    );
+                    for flipped in 0..groups {
+                        let mut mixed = values.clone();
+                        mixed[flipped] ^= 0x8000_0000;
+                        let packed = PositionSets::from_singletons(mixed.iter().copied());
+                        assert_eq!(packed.uniform_singleton_strand(), None);
                     }
                 }
             }

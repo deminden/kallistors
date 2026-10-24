@@ -1,4 +1,4 @@
-//! Bounded conservative word lookup with exact ordered verification for BUS buckets.
+//! Bounded conservative word lookup with exact ordered candidate verification.
 use super::BifrostIndex;
 mod directory;
 use directory::WordDirectory;
@@ -6,9 +6,14 @@ use rayon::prelude::*;
 
 const MINIMUM_BUCKET: usize = 8;
 // Share conservative word selectors across ordered postings. The transient
-// BUS directory has a fixed payload ceiling; small indexes allocate only the
-// entries they can use, and bulk never prepares this accelerator.
-const MAX_BYTES: usize = 24 * 1024 * 1024;
+// directory has a fixed payload ceiling; small indexes allocate only the
+// entries they can use. Quantification and BUS share the exact verifier.
+const MAX_BYTES: usize = 48 * 1024 * 1024;
+// At most nine word/ordinal pairs per posting. Charge temporary vectors,
+// both directory representations during conversion, span/ordinal storage,
+// geometric capacity rounding and a possible shrink copy conservatively.
+// This bound also governs parallel microbatches and oversized fallbacks.
+const CONSTRUCTION_BYTES_PER_POSTING: usize = 768;
 const TAG_MASK: u64 = (1 << 24) - 1;
 const OFFSET_MASK: u64 = (1 << 20) - 1;
 
@@ -30,8 +35,8 @@ struct WordSpan {
 }
 
 impl BifrostIndex {
-    /// Prepare a bounded, transient accelerator for supported BUS workloads.
-    /// No serialized index or bulk mapping representation changes.
+    /// Prepare a bounded, transient accelerator for supported read workloads.
+    /// The serialized index and exact mapping semantics are unchanged.
     #[doc(hidden)]
     pub fn prepare_single_cell_candidate_cache(&mut self) {
         self.prepare_single_cell_candidate_cache_with_threads(1);
@@ -85,9 +90,13 @@ impl BifrostIndex {
             };
             let mut end = begin + 1;
             if pool.is_some() {
-                let mut scratch = candidates[begin].1.saturating_mul(256);
+                let mut scratch = candidates[begin]
+                    .1
+                    .saturating_mul(CONSTRUCTION_BYTES_PER_POSTING);
                 while end < candidates.len() && end - begin < 256 {
-                    let next = candidates[end].1.saturating_mul(256);
+                    let next = candidates[end]
+                        .1
+                        .saturating_mul(CONSTRUCTION_BYTES_PER_POSTING);
                     if scratch.saturating_add(next) > 8 * 1024 * 1024 {
                         break;
                     }
@@ -150,7 +159,10 @@ impl BifrostIndex {
         // Bound temporary construction independently of retained data.
         // Oversized or mixed buckets always keep the ordinary verifier.
         if positions.len() >= u16::MAX as usize
-            || positions.len().saturating_mul(160) > 8 * 1024 * 1024
+            || positions
+                .len()
+                .saturating_mul(CONSTRUCTION_BYTES_PER_POSTING)
+                > 8 * 1024 * 1024
             || self.minz_positions.get_with_overcrowded(bucket).1
         {
             return None;
@@ -189,7 +201,7 @@ impl BifrostIndex {
                 let tag = if tiny {
                     tag >> 13
                 } else if dense {
-                    tag >> 8
+                    tag >> 5
                 } else {
                     tag
                 };
@@ -239,11 +251,16 @@ impl BifrostIndex {
         if tiny && !WordDirectory::tiny_layout(&keys) {
             return None;
         }
+        // More precise tags use the descriptor bits guaranteed unused by
+        // <=4096-source buckets. An unsupported span shape retains verification.
+        if dense && !WordDirectory::dense19_layout(&keys) {
+            return None;
+        }
         let narrow = !tiny && !dense && WordDirectory::narrow_layout(&keys, positions.len());
         let directory_bytes = if tiny {
             WordDirectory::tiny_payload_bytes(&keys)
         } else {
-            WordDirectory::payload_bytes(&keys, narrow || dense)
+            WordDirectory::payload_bytes(&keys, narrow || dense, dense || !narrow)
         };
         let size = directory_bytes
             + ordinals.len() * std::mem::size_of::<u16>()
@@ -254,7 +271,7 @@ impl BifrostIndex {
         let directory = if tiny {
             WordDirectory::build_tiny(&keys)
         } else if dense {
-            WordDirectory::build_dense(&keys)
+            WordDirectory::build_dense19(&keys)?
         } else {
             WordDirectory::build(&keys, narrow)
         };
@@ -566,12 +583,10 @@ mod tests {
             .values
             .copy_from_slice(&groups.concat());
         index.prepare_candidate_cache(1, 1 << 20);
-        assert!(
-            index
-                .large_candidate_cache
-                .iter()
-                .any(|b| matches!(b.directory, super::WordDirectory::Dense16 { .. }))
-        );
+        assert!(index.large_candidate_cache.iter().any(|b| matches!(
+            b.directory,
+            super::WordDirectory::Dense19 { .. } | super::WordDirectory::HashedDense19 { .. }
+        )));
         assert!(
             index
                 .large_candidate_cache
@@ -654,6 +669,15 @@ mod tests {
                     );
                     queries.insert(collision);
                     let other =
+                        (folded.wrapping_mul(0x9e37_79b9) ^ 0x1000).wrapping_mul(0x144c_bc89);
+                    let collision = (word & !0xffff_ffff) | u64::from(other ^ (word >> 32) as u32);
+                    assert_ne!(super::candidate_tag(word), super::candidate_tag(collision));
+                    assert_eq!(
+                        super::candidate_tag(word) >> 5,
+                        super::candidate_tag(collision) >> 5
+                    );
+                    queries.insert(collision);
+                    let other =
                         (folded.wrapping_mul(0x9e37_79b9) ^ 0x10000).wrapping_mul(0x144c_bc89);
                     let collision = (word & !0xffff_ffff) | u64::from(other ^ (word >> 32) as u32);
                     assert_ne!(super::candidate_tag(word), super::candidate_tag(collision));
@@ -675,8 +699,12 @@ mod tests {
                 let tag = super::candidate_tag(word);
                 if matches!(bucket.directory, super::WordDirectory::Tiny11 { .. }) {
                     tag >> 13
-                } else if matches!(bucket.directory, super::WordDirectory::Dense16 { .. }) {
-                    tag >> 8
+                } else if matches!(
+                    bucket.directory,
+                    super::WordDirectory::Dense19 { .. }
+                        | super::WordDirectory::HashedDense19 { .. }
+                ) {
+                    tag >> 5
                 } else {
                     tag
                 }

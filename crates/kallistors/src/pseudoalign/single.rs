@@ -274,6 +274,21 @@ pub(crate) fn pseudoalign_single_end_bifrost_batch_into(
     counts: &mut EcCounts,
     ec_map: &mut EcCountMap,
 ) {
+    if !super::bias_sampling_pending(counts.bias.as_ref(), options.max_bias)
+        && super::counting_filters_supported(index, options)
+        && super::core::try_single_counting_batch(index, &batch, strand, options, |read| {
+            counts.reads_processed = counts.reads_processed.saturating_add(1);
+            if let Some(read) = read {
+                let ec = single_counting_ec(index, read, filter, options);
+                if !ec.is_empty() {
+                    counts.reads_aligned = counts.reads_aligned.saturating_add(1);
+                    super::utils::add_ec_count_slice(counts, ec_map, &ec);
+                }
+            }
+        })
+    {
+        return;
+    }
     for idx in 0..batch.len() {
         let seq = unsafe { batch.seq_unchecked(idx) };
         if super::reset_all_caches_per_read() {

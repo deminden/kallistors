@@ -115,71 +115,89 @@ fn threaded_single_end_matches_single_thread() {
     )
     .expect("single-thread");
 
-    let mut reader = FastqReader::new(Cursor::new(fq));
-    let threaded = pseudoalign_single_end_bifrost_with_options_threaded(
-        &index,
-        &mut reader,
-        Strand::Unstranded,
-        None,
-        PseudoalignOptions::default(),
-        4,
-    )
-    .expect("threaded");
-
     assert_eq!(single.reads_processed, 25_001);
     assert!(single.reads_aligned > 0 && single.reads_aligned < single.reads_processed);
     assert!(single.ec_list.iter().any(|ec| ec.len() == 1));
     assert!(single.ec_list.iter().any(|ec| ec.len() > 1));
-    assert_eq!(single.reads_processed, threaded.reads_processed);
-    assert_eq!(single.reads_aligned, threaded.reads_aligned);
-    assert_eq!(to_ec_map(&single), to_ec_map(&threaded));
+    for threads in [0, 1, 4] {
+        let mut reader = FastqReader::new(Cursor::new(&fq));
+        let threaded = pseudoalign_single_end_bifrost_with_options_threaded(
+            &index,
+            &mut reader,
+            Strand::Unstranded,
+            None,
+            PseudoalignOptions::default(),
+            threads,
+        )
+        .expect("threaded");
+        assert_eq!(single.reads_processed, threaded.reads_processed);
+        assert_eq!(single.reads_aligned, threaded.reads_aligned);
+        assert_eq!(to_ec_map(&single), to_ec_map(&threaded));
+    }
 }
 
 #[test]
 fn threaded_paired_matches_single_thread() {
+    use kallistors::pseudoalign::{
+        StrandSpecific, build_bifrost_index_with_positions,
+        pseudoalign_paired_bifrost_debug_with_options,
+    };
     let dataset = helpers::build_synthetic_index();
-    let index = build_bifrost_index(&dataset.index_path).expect("bifrost index");
+    let index = build_bifrost_index_with_positions(&dataset.index_path, true).unwrap();
     let mut pairs = synthesize_paired_reads(&dataset.transcripts, 50, 90, 25_001);
     for (left, right) in pairs.iter_mut().step_by(17) {
         left.fill(b'N');
         right.fill(b'N');
     }
-    let options = PseudoalignOptions {
-        fragment_length_samples: 0,
-        ..Default::default()
-    };
+    for (left, _) in pairs.iter_mut().step_by(31) {
+        left.truncate(index.k.saturating_sub(1));
+    }
+    for (left, right) in pairs.iter_mut().step_by(37) {
+        std::mem::swap(left, right);
+    }
     let (fq1, fq2) = to_fastq_pairs(&pairs);
-
-    let mut r1 = FastqReader::new(Cursor::new(fq1.clone()));
-    let mut r2 = FastqReader::new(Cursor::new(fq2.clone()));
-    let single = pseudoalign_paired_bifrost_with_options(
-        &index,
-        &mut r1,
-        &mut r2,
-        Strand::Unstranded,
-        options,
-    )
-    .expect("single-thread");
-
-    let mut r1 = FastqReader::new(Cursor::new(fq1));
-    let mut r2 = FastqReader::new(Cursor::new(fq2));
-    let threaded = pseudoalign_paired_bifrost_with_options_threaded(
-        &index,
-        &mut r1,
-        &mut r2,
-        Strand::Unstranded,
-        options,
-        4,
-    )
-    .expect("threaded");
-
-    assert_eq!(single.reads_processed, 25_001);
-    assert!(single.reads_aligned > 0 && single.reads_aligned < single.reads_processed);
-    assert!(single.ec_list.iter().any(|ec| ec.len() == 1));
-    assert!(single.ec_list.iter().any(|ec| ec.len() > 1));
-    assert_eq!(single.reads_processed, threaded.reads_processed);
-    assert_eq!(single.reads_aligned, threaded.reads_aligned);
-    assert_eq!(to_ec_map(&single), to_ec_map(&threaded));
+    // Cross serial parser batches after the first fragment observation. The
+    // diagnostic oracle keeps complete scans, including strand rejection.
+    for mode in [None, Some(StrandSpecific::FR), Some(StrandSpecific::RF)] {
+        for fragment_length_samples in [0, 1] {
+            let options = PseudoalignOptions {
+                fragment_length_samples,
+                strand_specific: mode,
+                ..Default::default()
+            };
+            let (expected, _) = pseudoalign_paired_bifrost_debug_with_options(
+                &index,
+                &mut FastqReader::new(Cursor::new(&fq1)),
+                &mut FastqReader::new(Cursor::new(&fq2)),
+                Strand::Unstranded,
+                0,
+                options,
+            )
+            .unwrap();
+            assert_eq!(expected.reads_processed, 25_001);
+            assert!(
+                expected.reads_aligned > 0 && expected.reads_aligned < expected.reads_processed
+            );
+            if mode.is_none() {
+                assert!(expected.ec_list.iter().any(|ec| ec.len() == 1));
+                assert!(expected.ec_list.iter().any(|ec| ec.len() > 1));
+            }
+            for threads in [1, 8] {
+                let got = pseudoalign_paired_bifrost_with_options_threaded(
+                    &index,
+                    &mut FastqReader::new(Cursor::new(&fq1)),
+                    &mut FastqReader::new(Cursor::new(&fq2)),
+                    Strand::Unstranded,
+                    options,
+                    threads,
+                )
+                .unwrap();
+                assert_eq!(expected.reads_processed, got.reads_processed);
+                assert_eq!(expected.reads_aligned, got.reads_aligned);
+                assert_eq!(to_ec_map(&expected), to_ec_map(&got));
+            }
+        }
+    }
 }
 
 #[test]

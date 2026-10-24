@@ -233,7 +233,7 @@ pub(crate) fn filter_ec_by_strand_cow<'a>(
     let same_ec = std::ptr::eq(ec.as_ref(), block.ec.as_ref());
     if same_ec
         && positions.len() == ec.len()
-        && let Some(sense) = positions.inline_uniform_strand()
+        && let Some(sense) = positions.uniform_singleton_strand()
     {
         if ((!hit.used_revcomp) == (sense == 1)) == target {
             return ec;

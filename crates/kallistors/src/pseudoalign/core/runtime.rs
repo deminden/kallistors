@@ -60,6 +60,28 @@ impl MphfLookupCache {
     }
 
     #[inline]
+    pub(crate) fn prefetch_match_capacity(&self) -> bool {
+        cfg!(any(target_arch = "aarch64", target_arch = "x86_64"))
+            && self.matches.entries.len() >= (1 << 21)
+    }
+
+    #[inline]
+    pub(crate) fn prefetch_initial_match_words(&self, left: &[u8], right: &[u8]) {
+        for sequence in [left, right] {
+            if let Some(prefix) = sequence.get(..31)
+                && let Some((forward, _)) = crate::dna::encode_kmer_pair(prefix)
+            {
+                let slot = self.matches.slot(forward);
+                // SAFETY: cache construction/scoped resizing ensures a nonzero
+                // power-of-two table; slot masks into this live allocation.
+                // The hint retains no pointer and performs no software lookup.
+                let pointer = unsafe { self.matches.entries.as_ptr().add(slot) }.cast::<u8>();
+                prefetch_match_cache_line(pointer);
+            }
+        }
+    }
+
+    #[inline]
     pub(crate) fn query_fingerprint_matches(
         &mut self,
         forward: u64,
@@ -767,5 +789,70 @@ mod cache_context_tests {
             cache.get(collision),
             Some(vec![(0x6789_ab00u64.to_le_bytes(), 7)])
         );
+    }
+}
+
+#[inline]
+fn prefetch_match_cache_line(pointer: *const u8) {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: the caller supplies a pointer into a live immutable table. PRFM
+    // is a hardware read hint; it does not store data or retain the pointer.
+    unsafe {
+        std::arch::asm!("prfm pldl1keep, [{pointer}]",pointer=in(reg)pointer,options(readonly,nostack,preserves_flags));
+    }
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: SSE is part of the x86-64 baseline and the address is valid.
+    unsafe {
+        std::arch::x86_64::_mm_prefetch(pointer.cast::<i8>(), std::arch::x86_64::_MM_HINT_T0);
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let _ = pointer;
+}
+
+#[cfg(test)]
+mod paired_match_prefetch_tests {
+    use super::*;
+    #[test]
+    fn hints_do_not_insert_evict_or_change_exact_match_answers() {
+        let mut cache = MphfLookupCache::default();
+        let sequence = b"ACGTACGTACGTACGTACGTACGTACGTACG";
+        let (key, _) = crate::dna::encode_kmer_pair(sequence).unwrap();
+        let value = FastKmerMatch {
+            unitig_id: 13,
+            start: 23,
+            block_idx: 8,
+            used_revcomp: true,
+            forward_strand: false,
+            matched_relaxed: true,
+        };
+        cache.match_put(key, 15, Some(value));
+        cache.match_put(key ^ 1, 14, None);
+        let before = cache.matches.entries.as_ptr();
+        let length = cache.matches.entries.len();
+        for sequence in [
+            sequence.as_slice(),
+            b"ACGT".as_slice(),
+            b"NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN".as_slice(),
+            b"acgtacgtacgtacgtacgtacgtacgtacg".as_slice(),
+        ] {
+            cache.prefetch_initial_match_words(sequence, sequence);
+        }
+        let got = cache.match_get(key, 15).flatten().unwrap();
+        assert_eq!(
+            (
+                got.unitig_id,
+                got.start,
+                got.block_idx,
+                got.used_revcomp,
+                got.forward_strand,
+                got.matched_relaxed
+            ),
+            (13, 23, 8, true, false, true)
+        );
+        assert!(matches!(cache.match_get(key ^ 1, 14), Some(None)));
+        assert!(cache.match_get(key, 14).is_none());
+        assert_eq!(before, cache.matches.entries.as_ptr());
+        assert_eq!(length, cache.matches.entries.len());
+        assert!(!cache.prefetch_match_capacity());
     }
 }
