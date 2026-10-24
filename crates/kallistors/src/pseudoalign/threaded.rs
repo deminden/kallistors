@@ -134,6 +134,15 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
     options: PseudoalignOptions,
     threads: usize,
 ) -> Result<EcCounts> {
+    let cache_entries = options
+        .match_cache_size
+        .allocation(threads)?
+        .entries_per_worker();
+    let _cache_budget = if threads <= 1 {
+        Some(super::core::MatchCacheBudgetScope::enter(cache_entries)?)
+    } else {
+        None
+    };
     if threads <= 1 {
         return super::single::pseudoalign_single_end_bifrost_with_options(
             index, reader, strand, filter, options,
@@ -162,6 +171,7 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
             let key_pool = Arc::clone(&key_pool);
             handles.push(
                 scope.spawn(move || -> Result<(EcCounts, super::utils::SharedEcKeys)> {
+                    let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
                     let mut acc = EcCounts::new(options.bias);
                     let mut acc_map = EcCountMap::shared(key_pool);
                     while let Ok(batch) = rx.recv() {
@@ -260,6 +270,15 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
     options: PseudoalignOptions,
     threads: usize,
 ) -> Result<EcCounts> {
+    let cache_entries = options
+        .match_cache_size
+        .allocation(threads)?
+        .entries_per_worker();
+    let _cache_budget = if threads <= 1 {
+        Some(super::core::MatchCacheBudgetScope::enter(cache_entries)?)
+    } else {
+        None
+    };
     if threads <= 1 {
         // Final-pair diagnostics consume names and qualities. Ordinary mapping
         // can parse sequence-only batches on this same thread, without workers.
@@ -320,6 +339,7 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
             let key_pool = Arc::clone(&key_pool);
             handles.push(
                 scope.spawn(move || -> Result<(EcCounts, super::utils::SharedEcKeys)> {
+                    let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
                     let mut acc = EcCounts::new(options.bias);
                     let mut acc_map = EcCountMap::shared(key_pool);
                     while let Ok(chunks) = rx.recv() {

@@ -15,6 +15,8 @@ use crate::index::{parse_graph_section, read_block_array_blocks};
 use crate::{Error, Result};
 
 mod bias;
+mod cache_budget;
+pub use cache_budget::{MatchCacheAllocation, MatchCacheSize};
 mod bifrost;
 mod core;
 mod debug;
@@ -443,6 +445,8 @@ pub struct PseudoalignOptions {
     pub max_bias: usize,
     /// Paired fragment observations used for estimation; zero collects all.
     pub fragment_length_samples: usize,
+    /// Aggregate exact-match cache allowance for bulk mapping workers.
+    pub match_cache_size: MatchCacheSize,
     pub investigation: InvestigationOptions,
 }
 
@@ -466,6 +470,7 @@ impl Default for PseudoalignOptions {
             bias: false,
             max_bias: 1_000_000,
             fragment_length_samples: 10_000,
+            match_cache_size: MatchCacheSize::AUTO,
             investigation: InvestigationOptions::default(),
         }
     }

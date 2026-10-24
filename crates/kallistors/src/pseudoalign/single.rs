@@ -346,6 +346,9 @@ fn pseudoalign_single_end_bifrost_inner<R: ReadSource>(
     filter: Option<FragmentFilter>,
     options: PseudoalignOptions,
 ) -> Result<EcCounts> {
+    let _cache_budget = super::core::MatchCacheBudgetScope::enter(
+        options.match_cache_size.allocation(1)?.entries_per_worker(),
+    )?;
     let mut ec_list: Vec<Vec<u32>> = Vec::new();
     let mut ec_map: EcCountMap = EcCountMap::default();
     let mut counts: Vec<u32> = Vec::new();

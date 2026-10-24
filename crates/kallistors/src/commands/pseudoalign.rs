@@ -10,6 +10,7 @@ pub fn run(
     reads2: Option<&Path>,
     out: &Path,
     threads: usize,
+    match_cache_size: kallistors::pseudoalign::MatchCacheSize,
     timings: bool,
     debug_out: Option<&Path>,
     debug_max: usize,
@@ -45,6 +46,15 @@ pub fn run(
         ));
     }
 
+    let cache_allocation =
+        match_cache_size.allocation(if debug_out.is_some() { 1 } else { threads })?;
+    eprintln!(
+        "[pseudoalign] match cache: {} ({} bytes per worker; {} bytes total across {} workers)",
+        match_cache_size,
+        cache_allocation.bytes_per_worker(),
+        cache_allocation.total_bytes(),
+        cache_allocation.workers()
+    );
     let mut reader = kallistors::io::open_fastq_reader(reads)?;
     let mut reader2 = if let Some(path) = reads2 {
         Some(kallistors::io::open_fastq_reader(path)?)
@@ -81,6 +91,7 @@ pub fn run(
         bias,
         max_bias: 1_000_000,
         fragment_length_samples,
+        match_cache_size,
         investigation: super::investigation_options_from_env(),
     };
     let filter =

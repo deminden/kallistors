@@ -41,6 +41,25 @@ fn run_info_preserves_schema_values_and_escaped_strings() {
     );
     assert_eq!(json["start_time"].as_str(), Some(info.start_time.as_str()));
     assert_eq!(json["call"].as_str(), Some(info.call.as_str()));
+    let allocation = kallistors::pseudoalign::MatchCacheSize::from_bytes(96)
+        .unwrap()
+        .allocation(2)
+        .unwrap();
+    let cache_path = dir.path().join("with-cache.json");
+    info.write_json_with_match_cache(&cache_path, allocation)
+        .unwrap();
+    let with_cache: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(cache_path).unwrap()).unwrap();
+    for (field, value) in json.as_object().unwrap() {
+        assert_eq!(&with_cache[field], value, "existing field {field}");
+    }
+    assert_eq!(
+        with_cache["match_cache"],
+        serde_json::json!({
+            "policy":"96B", "requested_bytes":96, "allocated_bytes":64,
+            "bytes_per_worker":32, "workers":2,
+        })
+    );
 }
 
 #[test]

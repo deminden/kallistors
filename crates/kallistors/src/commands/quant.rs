@@ -30,6 +30,7 @@ pub struct QuantArgs {
     pub kallisto_bifrost_find: bool,
     pub kallisto_sparse_hits: bool,
     pub threads: usize,
+    pub match_cache_size: kallistors::pseudoalign::MatchCacheSize,
     pub pseudobam: bool,
     pub genomebam: bool,
 }
@@ -122,13 +123,27 @@ pub fn run(args: QuantArgs) -> Result<()> {
         bias: args.bias,
         max_bias: 1_000_000,
         fragment_length_samples: args.fragment_length_samples,
+        match_cache_size: args.match_cache_size,
         investigation: super::investigation_options_from_env(),
     };
+
+    let cache_allocation = args.match_cache_size.allocation(args.threads)?;
+    eprintln!(
+        "[quant] match cache: {} ({} bytes per worker; {} bytes total across {} workers)",
+        args.match_cache_size,
+        cache_allocation.bytes_per_worker(),
+        cache_allocation.total_bytes(),
+        cache_allocation.workers()
+    );
 
     mark_phase("index_begin");
     let mut index =
         super::build_quant_index(&args.index, load_positional_info, args.threads, options)
             .map_err(|err| anyhow!("pseudoalign failed: {err}"))?;
+    // Reuse the bounded exact candidate selectors for both read layouts.
+    // Preparation is included in index loading; selected postings still receive
+    // full verification with the same fragment and strand semantics.
+    index.prepare_single_cell_candidate_cache_with_threads(args.threads.max(1));
     mark_phase("index_end");
 
     let mut reader1 = kallistors::io::open_fastq_reader(reads1)?;
@@ -356,7 +371,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
         start_time,
         call: std::env::args().collect::<Vec<_>>().join(" "),
     };
-    run_info.write_json(&run_info_path)?;
+    run_info.write_json_with_match_cache(&run_info_path, cache_allocation)?;
     drop(output_timing);
     mark_phase("output_end");
 

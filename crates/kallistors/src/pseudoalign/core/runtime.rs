@@ -244,7 +244,9 @@ struct FastKmerMatchCache {
 impl FastKmerMatchCache {
     fn new() -> Self {
         Self {
-            entries: vec![FastKmerMatchCacheEntry::default(); 1 << 14],
+            // Full PE working-set evidence supports this bounded table.
+            // Complete query/flag keys still decide every positive/negative hit.
+            entries: vec![FastKmerMatchCacheEntry::default(); MATCH_CACHE_ENTRIES.with(Cell::get)],
         }
     }
 
@@ -309,7 +311,74 @@ impl FastKmerMatchCache {
     }
 }
 
+// Each worker owns a private table. The coordinator resolves the aggregate
+// allowance once; retention alone changes, and full keys/flags decide hits.
+const MATCH_CACHE_DEFAULT_ENTRIES: usize = 1 << 18;
+const _: () = assert!(
+    std::mem::size_of::<FastKmerMatchCacheEntry>()
+        == super::super::cache_budget::MATCH_CACHE_ENTRY_BYTES
+);
+
+pub(crate) struct MatchCacheBudgetScope {
+    previous: usize,
+}
+
+impl MatchCacheBudgetScope {
+    pub(crate) fn enter(entries: usize) -> crate::Result<Self> {
+        assert!(entries.is_power_of_two());
+        // Bootstrap an uninitialized TLS cache with a small table. Larger
+        // requested allocations use the fallible reserve below; smaller ones
+        // do not briefly allocate the default table first.
+        let previous = MATCH_CACHE_ENTRIES
+            .with(|current| current.replace(entries.min(MATCH_CACHE_DEFAULT_ENTRIES)));
+        if let Err(error) = resize_match_cache(entries) {
+            // An unsuccessful reserve leaves an empty table. Restore the
+            // previous usable capacity before returning to library callers.
+            MATCH_CACHE_ENTRIES.with(|current| current.set(previous));
+            resize_match_cache(previous)
+                .expect("restore exact-match cache after allocation failure");
+            return Err(error);
+        }
+        MATCH_CACHE_ENTRIES.with(|current| current.set(entries));
+        Ok(Self { previous })
+    }
+}
+
+impl Drop for MatchCacheBudgetScope {
+    fn drop(&mut self) {
+        MATCH_CACHE_ENTRIES.with(|current| current.set(self.previous));
+        resize_match_cache(self.previous).expect("restore exact-match cache scope");
+    }
+}
+
+fn resize_match_cache(entries: usize) -> crate::Result<()> {
+    MPHF_LOOKUP_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.matches.entries.len() != entries {
+            // Slot placement changes with capacity. Release old pages before
+            // reserving the replacement, then start with an empty exact cache.
+            crate::index::scratch_pages::retire(std::mem::take(&mut cache.matches.entries));
+            cache
+                .matches
+                .entries
+                .try_reserve_exact(entries)
+                .map_err(|error| {
+                    crate::Error::Io(std::io::Error::other(format!(
+                        "cannot allocate exact-match cache ({entries} entries, {} bytes): {error}",
+                        entries * std::mem::size_of::<FastKmerMatchCacheEntry>()
+                    )))
+                })?;
+            cache
+                .matches
+                .entries
+                .resize(entries, FastKmerMatchCacheEntry::default());
+        }
+        Ok(())
+    })
+}
+
 thread_local! {
+    static MATCH_CACHE_ENTRIES: Cell<usize> = const { Cell::new(MATCH_CACHE_DEFAULT_ENTRIES) };
     static MPHF_LOOKUP_CACHE: RefCell<MphfLookupCache> = RefCell::new(MphfLookupCache::default());
     static CACHE_CONTEXT: Cell<Option<(u64, usize, usize)>> = const { Cell::new(None) };
     static BLOCK_LOOKUP_CACHE: RefCell<BlockLookupCache> =
@@ -545,6 +614,39 @@ pub(crate) fn minimizer_bucket_has_overcrowded_marker(
 #[cfg(test)]
 mod cache_context_tests {
     use super::*;
+
+    #[test]
+    fn worker_budget_bounds_and_restores_exact_match_cache() {
+        let length = || MPHF_LOOKUP_CACHE.with(|cache| cache.borrow().matches.entries.len());
+        assert_eq!(length(), MATCH_CACHE_DEFAULT_ENTRIES);
+        {
+            let _outer = MatchCacheBudgetScope::enter(1 << 10).unwrap();
+            assert_eq!(length(), 1 << 10);
+            write_fast_match_cache(42, 7, None);
+            assert!(matches!(read_fast_match_cache(42, 7), Some(None)));
+            {
+                let _inner = MatchCacheBudgetScope::enter(1 << 8).unwrap();
+                assert_eq!(length(), 1 << 8);
+                assert!(read_fast_match_cache(42, 7).is_none());
+                reset_thread_local_caches();
+                assert_eq!(length(), 1 << 8);
+            }
+            assert_eq!(length(), 1 << 10);
+            reset_thread_local_caches();
+            assert_eq!(length(), 1 << 10);
+        }
+        assert_eq!(length(), MATCH_CACHE_DEFAULT_ENTRIES);
+        let result = std::panic::catch_unwind(|| {
+            let _scope = MatchCacheBudgetScope::enter(1 << 10).unwrap();
+            panic!("scope unwind oracle");
+        });
+        assert!(result.is_err());
+        assert_eq!(length(), MATCH_CACHE_DEFAULT_ENTRIES);
+        assert_eq!(
+            MATCH_CACHE_ENTRIES.with(Cell::get),
+            MATCH_CACHE_DEFAULT_ENTRIES
+        );
+    }
 
     #[test]
     fn compact_match_entries_keep_all_bits_and_reject_wide_coordinates() {

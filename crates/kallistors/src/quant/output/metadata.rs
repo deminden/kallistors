@@ -5,6 +5,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use crate::Result;
+use crate::pseudoalign::MatchCacheAllocation;
 
 /// Run metadata matching kallisto's `run_info.json` fields.
 pub struct RunInfo {
@@ -24,9 +25,22 @@ pub struct RunInfo {
 
 impl RunInfo {
     pub fn write_json(&self, path: &Path) -> Result<()> {
+        self.write_json_inner(path, None)
+    }
+
+    /// Include requested and effective match-cache allocation for reproducibility.
+    pub fn write_json_with_match_cache(
+        &self,
+        path: &Path,
+        cache: MatchCacheAllocation,
+    ) -> Result<()> {
+        self.write_json_inner(path, Some(cache))
+    }
+
+    fn write_json_inner(&self, path: &Path, cache: Option<MatchCacheAllocation>) -> Result<()> {
         let file = File::create(path)?;
         let mut writer = BufWriter::new(file);
-        let entries = vec![
+        let mut entries = vec![
             ("n_targets", self.n_targets.to_json()),
             ("n_bootstraps", self.n_bootstraps.to_json()),
             ("n_processed", self.n_processed.to_json()),
@@ -40,6 +54,13 @@ impl RunInfo {
             ("start_time", self.start_time.to_json()),
             ("call", self.call.to_json()),
         ];
+        if let Some(cache) = cache {
+            entries.push(("match_cache", format!(
+                "{{\"policy\":{},\"requested_bytes\":{},\"allocated_bytes\":{},\"bytes_per_worker\":{},\"workers\":{}}}",
+                cache.policy().to_string().to_json(), cache.requested_bytes(),
+                cache.total_bytes(), cache.bytes_per_worker(), cache.workers(),
+            )));
+        }
         writeln!(writer, "{{")?;
         for (idx, (key, value)) in entries.iter().enumerate() {
             let sep = if idx + 1 == entries.len() { "" } else { "," };

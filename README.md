@@ -262,6 +262,11 @@ Notes:
   multi-sequence custom technologies are rejected for BAM output and strand-specific processing
   until their placement semantics are made explicit.
 
+For bulk mapping, `quant` and `pseudoalign` accept `--match-cache-size auto`
+(the default) or an aggregate budget such as `256MiB` or `4GiB`. Automatic budgets
+scale with the number of mapping workers. See [match-cache sizing](docs/match-cache.md)
+for the defaults, rounding and memory accounting.
+
 ### Performance and validation
 
 - Data preparation, benchmark commands and measurement methodology are in

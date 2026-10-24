@@ -225,6 +225,7 @@ pub fn run(
         bias: false,
         max_bias: 0,
         fragment_length_samples: 10_000,
+        match_cache_size: Default::default(),
         investigation: kallistors::pseudoalign::InvestigationOptions::default(),
     };
     let index = super::build_mapping_index(index, load_positional_info, 1, baseline, true)?;

@@ -216,6 +216,7 @@ pub fn run(
         bias: false,
         max_bias: 0,
         fragment_length_samples: 10_000,
+        match_cache_size: Default::default(),
         investigation: super::investigation_options_from_env(),
     };
 

@@ -104,6 +104,9 @@ enum Commands {
         out: std::path::PathBuf,
         #[arg(long, default_value_t = 1)]
         threads: usize,
+        /// Aggregate match-cache budget across workers; auto scales with threads.
+        #[arg(long, default_value = "auto", value_name = "SIZE")]
+        match_cache_size: kallistors::pseudoalign::MatchCacheSize,
         #[arg(long)]
         timings: bool,
         #[arg(long)]
@@ -161,6 +164,9 @@ enum Commands {
         out_dir: std::path::PathBuf,
         #[arg(short = 't', long, default_value_t = 1)]
         threads: usize,
+        /// Aggregate match-cache budget across workers; auto scales with threads.
+        #[arg(long, default_value = "auto", value_name = "SIZE")]
+        match_cache_size: kallistors::pseudoalign::MatchCacheSize,
         #[arg(long)]
         timings: bool,
         #[arg(long)]
@@ -523,6 +529,7 @@ fn main() -> Result<()> {
             reads2,
             out,
             threads,
+            match_cache_size,
             timings,
             debug_out,
             debug_max,
@@ -553,6 +560,7 @@ fn main() -> Result<()> {
             reads2.as_deref(),
             &out,
             threads,
+            match_cache_size,
             timings,
             debug_out.as_deref(),
             debug_max,
@@ -586,6 +594,7 @@ fn main() -> Result<()> {
             index,
             out_dir,
             threads,
+            match_cache_size,
             timings,
             single,
             bias,
@@ -637,6 +646,7 @@ fn main() -> Result<()> {
             kallisto_bifrost_find,
             kallisto_sparse_hits,
             threads,
+            match_cache_size,
             timings,
             pseudobam,
             genomebam,
@@ -867,4 +877,66 @@ enum Strand {
     Unstranded,
     Forward,
     Reverse,
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    use kallistors::pseudoalign::MatchCacheSize;
+
+    #[test]
+    fn bulk_commands_accept_and_validate_match_cache_budgets() {
+        for command in ["quant", "pseudoalign"] {
+            let base = if command == "quant" {
+                vec![
+                    "kallistors",
+                    "quant",
+                    "-i",
+                    "index",
+                    "-o",
+                    "out",
+                    "reads.fq",
+                ]
+            } else {
+                vec![
+                    "kallistors",
+                    "pseudoalign",
+                    "--index",
+                    "index",
+                    "--out",
+                    "out",
+                    "--reads",
+                    "reads.fq",
+                ]
+            };
+            let size = |args: Vec<&str>| match Cli::try_parse_from(args).unwrap().command {
+                Commands::Quant {
+                    match_cache_size, ..
+                }
+                | Commands::Pseudoalign {
+                    match_cache_size, ..
+                } => match_cache_size,
+                _ => unreachable!(),
+            };
+            assert_eq!(size(base.clone()), MatchCacheSize::AUTO);
+            for (text, expected) in [
+                ("auto", MatchCacheSize::AUTO),
+                ("256KiB", MatchCacheSize::from_bytes(256 << 10).unwrap()),
+            ] {
+                let mut args = base.clone();
+                args.extend(["--match-cache-size", text]);
+                assert_eq!(size(args), expected);
+            }
+            if usize::BITS >= 64 {
+                let mut args = base.clone();
+                args.extend(["--match-cache-size", "4GiB"]);
+                assert_eq!(size(args), MatchCacheSize::from_bytes(4 << 30).unwrap());
+            }
+            for invalid in ["0", "1.5GiB", "4bananas"] {
+                let mut args = base.clone();
+                args.extend(["--match-cache-size", invalid]);
+                assert!(Cli::try_parse_from(args).is_err());
+            }
+        }
+    }
 }
