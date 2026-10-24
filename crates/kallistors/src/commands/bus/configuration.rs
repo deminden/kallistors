@@ -383,11 +383,18 @@ pub(super) fn prepare(args: &BusArgs) -> Result<BusConfiguration<'_>> {
 
 pub(super) fn load_index(
     args: &BusArgs,
-    spec: &TechnologySpec,
     index_path: &std::path::Path,
 ) -> Result<kallistors::pseudoalign::BifrostIndex> {
     // Strand filtering needs transcript orientation even without fragment positions.
     let load_strand_annotations = args.fr_stranded || args.rf_stranded;
+    let strand = if args.fr_stranded {
+        Some(kallistors::pseudoalign::StrandSpecific::FR)
+    } else if args.rf_stranded {
+        Some(kallistors::pseudoalign::StrandSpecific::RF)
+    } else {
+        None
+    };
+    let options = bus_pseudoalign_options(args, strand);
     let mut index = if args.kallisto_direct_kmer {
         kallistors::pseudoalign::build_bifrost_index_with_kmer_pos(
             index_path,
@@ -398,36 +405,22 @@ pub(super) fn load_index(
             index_path,
             load_strand_annotations,
         )
-    } else if fast::supports(args, spec)
-        || normalized::supports(args)
-        || (args.bam && counting::supports(args))
-    {
-        let strand = if args.fr_stranded {
-            Some(kallistors::pseudoalign::StrandSpecific::FR)
-        } else if args.rf_stranded {
-            Some(kallistors::pseudoalign::StrandSpecific::RF)
-        } else {
-            None
-        };
-        super::super::build_quant_index(
-            index_path,
-            false,
-            args.threads.max(1),
-            bus_pseudoalign_options(args, strand),
+    } else if counting::supports(args) {
+        super::super::build_quant_index(index_path, false, args.threads.max(1), options).and_then(
+            |index| {
+                if index.use_shade {
+                    // Shade filtering needs the full annotation representation.
+                    drop(index);
+                    kallistors::pseudoalign::build_bifrost_index_with_positions_threaded(
+                        index_path,
+                        load_strand_annotations,
+                        args.threads.max(1),
+                    )
+                } else {
+                    Ok(index)
+                }
+            },
         )
-        .and_then(|index| {
-            if index.use_shade {
-                // Shade filtering needs the full annotation representation.
-                drop(index);
-                kallistors::pseudoalign::build_bifrost_index_with_positions_threaded(
-                    index_path,
-                    load_strand_annotations,
-                    args.threads.max(1),
-                )
-            } else {
-                Ok(index)
-            }
-        })
     } else {
         kallistors::pseudoalign::build_bifrost_index_with_positions_threaded(
             index_path,
@@ -436,8 +429,10 @@ pub(super) fn load_index(
         )
     }
     .map_err(|err| anyhow!("pseudoalign failed: {err}"))?;
-    if fast::supports(args, spec) && !index.use_shade {
-        index.prepare_single_cell_candidate_cache_with_threads(args.threads.max(1));
+    // All ordinary counting layouts share the exact scanner, including
+    // normalized FASTQ and BAM. Input layout does not change selector semantics.
+    if counting::supports(args) {
+        index.prepare_read_mapping(options, args.threads.max(1));
     }
     Ok(index)
 }

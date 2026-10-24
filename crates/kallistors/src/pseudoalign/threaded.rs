@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-use crossbeam_channel::{Receiver, Sender, bounded};
+use crossbeam_channel::{Sender, bounded};
 
 use crate::io::{PackedSeqBatch, PackedSeqBatchSource, ReadSource};
 use crate::timing::{self, Stage};
@@ -103,25 +103,15 @@ impl PairedBatchBuilder {
 
 fn produce_batches<R: PackedSeqBatchSource>(
     reader: &mut R,
-    tx: &Sender<Result<PackedSeqBatch>>,
+    tx: &Sender<PackedSeqBatch>,
     batch_size: usize,
 ) -> Result<()> {
     while let Some(batch) = reader.next_packed_seq_batch(batch_size)? {
-        if tx.send(Ok(batch)).is_err() {
+        if tx.send(batch).is_err() {
             return Ok(());
         }
     }
     Ok(())
-}
-
-fn recv_batch(
-    rx: &Receiver<Result<PackedSeqBatch>>,
-) -> std::result::Result<Option<PackedSeqBatch>, Error> {
-    match rx.recv() {
-        Ok(Ok(batch)) => Ok(Some(batch)),
-        Ok(Err(err)) => Err(err),
-        Err(_) => Ok(None),
-    }
 }
 
 pub fn pseudoalign_single_end_bifrost_with_options_threaded<
@@ -134,38 +124,34 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
     options: PseudoalignOptions,
     threads: usize,
 ) -> Result<EcCounts> {
+    // Bias sampling retains the complete-record route, which owns its budget.
+    if threads <= 1 && options.bias {
+        return super::single::pseudoalign_single_end_bifrost_with_options(
+            index, reader, strand, filter, options,
+        );
+    }
     let cache_entries = options
         .match_cache_size
         .allocation(threads)?
         .entries_per_worker();
-    let _cache_budget = if threads <= 1 {
-        Some(super::core::MatchCacheBudgetScope::enter(cache_entries)?)
-    } else {
-        None
-    };
     if threads <= 1 {
+        let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
         // Ordinary synchronous counting consumes only sequences. Reuse the
         // threaded parser and mapper without spawning a producer or worker.
-        // Bias sampling retains the existing complete-record route.
-        if !options.bias {
-            let mut counts = EcCounts::new(false);
-            let mut map = EcCountMap::default();
-            while let Some(batch) = reader.next_packed_seq_batch(4_096)? {
-                super::single::pseudoalign_single_end_bifrost_batch_into(
-                    index,
-                    batch,
-                    strand,
-                    filter,
-                    options,
-                    &mut counts,
-                    &mut map,
-                );
-            }
-            return Ok(counts);
+        let mut counts = EcCounts::new(false);
+        let mut map = EcCountMap::default();
+        while let Some(batch) = reader.next_packed_seq_batch(4_096)? {
+            super::single::pseudoalign_single_end_bifrost_batch_into(
+                index,
+                batch,
+                strand,
+                filter,
+                options,
+                &mut counts,
+                &mut map,
+            );
         }
-        return super::single::pseudoalign_single_end_bifrost_with_options(
-            index, reader, strand, filter, options,
-        );
+        return Ok(counts);
     }
 
     let threads = threads.max(1);
@@ -177,7 +163,7 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
     thread::scope(|scope| {
         // One prefetched batch overlaps decoding; rendezvous dispatch bounds read
         // storage independently of worker count without dropping or reordering input.
-        let (producer_tx, producer_rx) = bounded::<Result<PackedSeqBatch>>(1);
+        let (producer_tx, producer_rx) = bounded::<PackedSeqBatch>(1);
         let (work_tx, work_rx) = bounded::<PackedSeqBatch>(0);
         let mut handles = Vec::with_capacity(threads);
 
@@ -210,19 +196,10 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
         }
 
         drop(work_rx);
-        loop {
-            match recv_batch(&producer_rx) {
-                Ok(Some(batch)) => {
-                    if work_tx.send(batch).is_err() {
-                        final_error = Some(Error::InvalidFormat("worker queue closed".into()));
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(err) => {
-                    final_error = Some(err);
-                    break;
-                }
+        while let Ok(batch) = producer_rx.recv() {
+            if work_tx.send(batch).is_err() {
+                final_error = Some(Error::InvalidFormat("worker queue closed".into()));
+                break;
             }
         }
         drop(work_tx);
@@ -289,23 +266,19 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
     options: PseudoalignOptions,
     threads: usize,
 ) -> Result<EcCounts> {
+    // Final-pair diagnostics consume names and qualities and own their budget.
+    if threads <= 1 && std::env::var_os("KALLISTORS_PAIRED_FINAL_TRACE").is_some() {
+        return super::paired::pseudoalign_paired_bifrost_with_options(
+            index, reader1, reader2, strand, options,
+        );
+    }
     let cache_entries = options
         .match_cache_size
         .allocation(threads)?
         .entries_per_worker();
-    let _cache_budget = if threads <= 1 {
-        Some(super::core::MatchCacheBudgetScope::enter(cache_entries)?)
-    } else {
-        None
-    };
     if threads <= 1 {
-        // Final-pair diagnostics consume names and qualities. Ordinary mapping
-        // can parse sequence-only batches on this same thread, without workers.
-        if std::env::var_os("KALLISTORS_PAIRED_FINAL_TRACE").is_some() {
-            return super::paired::pseudoalign_paired_bifrost_with_options(
-                index, reader1, reader2, strand, options,
-            );
-        }
+        let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
+        // Ordinary mapping parses sequence-only batches without workers.
         let mut counts = EcCounts::new(options.bias);
         let mut ec_map = EcCountMap::default();
         let sampler = super::paired::FragmentLengthSampler::new(options.fragment_length_samples);
@@ -340,8 +313,8 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
     let key_pool = Arc::new(super::utils::SharedEcPool::default());
     let sampler = super::paired::FragmentLengthSampler::new(options.fragment_length_samples);
     thread::scope(|scope| {
-        let (left_tx, left_rx) = bounded::<Result<PackedSeqBatch>>(1);
-        let (right_tx, right_rx) = bounded::<Result<PackedSeqBatch>>(1);
+        let (left_tx, left_rx) = bounded::<PackedSeqBatch>(1);
+        let (right_tx, right_rx) = bounded::<PackedSeqBatch>(1);
         let (work_tx, work_rx) = bounded::<Vec<PairedChunk>>(0);
         let mut handles = Vec::with_capacity(threads);
 
@@ -388,10 +361,10 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
 
         let mut batch_builder = PairedBatchBuilder::default();
         loop {
-            let left = recv_batch(&left_rx);
-            let right = recv_batch(&right_rx);
+            let left = left_rx.recv().ok();
+            let right = right_rx.recv().ok();
             match (left, right) {
-                (Ok(Some(left_batch)), Ok(Some(right_batch))) => {
+                (Some(left_batch), Some(right_batch)) => {
                     let limit = if options.fragment_length_samples != 0 && sampler.remaining() > 0 {
                         PAIRED_SAMPLING_BUFFER_BYTES
                     } else {
@@ -416,13 +389,9 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
                         }
                     }
                 }
-                (Ok(None), Ok(None)) => break,
-                (Ok(None), Ok(Some(_))) | (Ok(Some(_)), Ok(None)) => {
+                (None, None) => break,
+                (None, Some(_)) | (Some(_), None) => {
                     final_error = Some(Error::InvalidFormat("paired FASTQ length mismatch".into()));
-                    break;
-                }
-                (Err(err), _) | (_, Err(err)) => {
-                    final_error = Some(err);
                     break;
                 }
             }

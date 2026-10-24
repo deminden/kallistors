@@ -174,7 +174,7 @@ pub fn run(args: BusArgs) -> Result<()> {
     } = prepare(&args)?;
 
     let start = Instant::now();
-    let mut index = load_index(&args, &spec, index_path)?;
+    let mut index = load_index(&args, index_path)?;
     let threshold = if args.long {
         let choice = long_read_threshold(args.threshold, args.error_rate, index.k);
         if let Some(report) = choice.report.as_ref() {

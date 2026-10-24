@@ -21,8 +21,8 @@ pub(super) use read::{
     ec_for_read_bifrost, ec_for_read_bifrost_counting, ec_for_read_bifrost_counting_borrowed,
     ec_for_read_bifrost_single, ec_for_read_bifrost_single_borrowed,
 };
-pub(super) use runtime::MatchCacheBudgetScope;
 pub(crate) use runtime::reset_thread_local_caches;
+pub(super) use runtime::{MatchCacheBudgetScope, fast_path_enabled};
 
 pub(crate) use filters::filter_ec_by_fragment_and_strand_cow;
 

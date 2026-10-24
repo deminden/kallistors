@@ -143,7 +143,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
     // Reuse the bounded exact candidate selectors for both read layouts.
     // Preparation is included in index loading; selected postings still receive
     // full verification with the same fragment and strand semantics.
-    index.prepare_single_cell_candidate_cache_with_threads(args.threads.max(1));
+    index.prepare_read_mapping(options, args.threads.max(1));
     mark_phase("index_end");
 
     let mut reader1 = kallistors::io::open_fastq_reader(reads1)?;

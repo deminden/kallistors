@@ -1,5 +1,6 @@
 //! Bounded conservative word lookup with exact ordered candidate verification.
 use super::BifrostIndex;
+use crate::pseudoalign::{PseudoalignOptions, core::fast_path_enabled};
 mod directory;
 use directory::WordDirectory;
 use rayon::prelude::*;
@@ -39,12 +40,26 @@ impl BifrostIndex {
     /// The serialized index and exact mapping semantics are unchanged.
     #[doc(hidden)]
     pub fn prepare_single_cell_candidate_cache(&mut self) {
-        self.prepare_single_cell_candidate_cache_with_threads(1);
+        self.prepare_candidate_selectors(1);
     }
 
     /// Prepare the same bounded selectors with the requested worker limit.
     #[doc(hidden)]
     pub fn prepare_single_cell_candidate_cache_with_threads(&mut self, threads: usize) {
+        self.prepare_candidate_selectors(threads);
+    }
+
+    /// Prepare bounded exact selectors when the requested mapping can use them.
+    /// Bulk and BUS callers share the scanner's eligibility policy. Diagnostic
+    /// callers that require the general scanner should leave the index unprepared.
+    #[doc(hidden)]
+    pub fn prepare_read_mapping(&mut self, options: PseudoalignOptions, threads: usize) {
+        if fast_path_enabled(self, false, options) {
+            self.prepare_candidate_selectors(threads);
+        }
+    }
+
+    fn prepare_candidate_selectors(&mut self, threads: usize) {
         if self.k == 31 && self.g == 23 {
             self.encoded_unitigs.unitig_bases.inline_short_words();
         }

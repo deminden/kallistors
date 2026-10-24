@@ -241,20 +241,24 @@ See the benchmark guide for runnable commands, manifests, trimming and reporting
 | Graph construction | `index/graph_build.rs` coordinates `graph_build/{collection,compaction,joins,locations,payloads,minimizers}.rs` |
 | Exact graph lookup and edge storage | `index/graph_build/{lookup,edges,keys,relative_edges,sparse_locations}.rs` |
 | Index loading | `pseudoalign/bifrost.rs` exposes constructors; `bifrost/{loader,encoded,ec_storage,buckets,decoding}.rs` own loading, storage and decoding |
-| Read matching | `pseudoalign/core/fast/{matching,rescue,scanner}.rs`; `core/read.rs` retains the full fallback scanner |
+| Native index codecs | `index/{binary,bitmap,hashing}.rs` share integer encoding, bitmap decoding and exact minimizer hashing; native and portable-compatible bitmap policies remain explicit |
+| MPHF storage and construction | `index/bifrost.rs` owns lookup storage; `index/writer/mphf.rs` owns native MPHF construction and serialization |
+| Read matching | `pseudoalign/core/fast/{matching,rescue,scanner}.rs`; `core/read.rs` dispatches to the fast path or `read/{probe,general,finish}.rs` for ordered general probes, scanning and final EC folding |
+| Worker caches and ownership | `pseudoalign/core/runtime.rs` owns thread-local context; `runtime/{match_cache,minimizer_cache,block_cache,budget}.rs` own cache records, lookup policies and scoped allocation |
 | Single/paired counting and sampling | `pseudoalign/{single,paired}.rs`; single-end fragment/strand filtering is shared across serial and batched counting |
 | Threaded input and EC aggregation | `pseudoalign/threaded.rs` |
 | EC dumps, minimizer lookup and read traces | `pseudoalign/diagnostics/{ec_dump,minimizer,tracing,paired}.rs` |
-| EM scheduling and arithmetic | `quant/mod.rs`, `quant/{work,components}.rs` |
+| EM scheduling and arithmetic | `quant/mod.rs` coordinates `quant/work.rs`; `quant/components.rs` groups independent components and `components/{scalar,parallel}.rs` schedule their exact updates |
 | Fragment/bias models, input and bootstraps | `quant/{models,input,bootstrap}.rs` |
 | Abundance TSV/HDF5 and run metadata | `quant/output/{tsv,hdf5,metadata}.rs` |
 | BUS configuration, tags and general alignment | `commands/bus/{configuration,tags,alignment}.rs` |
 | BUS FASTQ/BAM input, records and technology definitions | `commands/bus/{input,bam_input,output,technology}.rs` |
-| BUS packed input, ordered parallel counting and bounded reader shutdown | `commands/bus/fast.rs` |
+| BUS packed input, ordered parallel counting and bounded reader shutdown | `commands/bus/fast.rs`; `bus/{normalized,bam_counting,counting}.rs` share mapping for compound FASTQ and BAM input |
 | Exact shared cDNA reuse and collision/replacement regression | `commands/bus/fast/query_cache.rs` |
 | BUS genome projection and BAM output | `commands/bus/{genome,pseudobam}.rs` |
 | BUS unit/integration tests | `commands/bus/tests.rs`; `tests/bus.rs` contains shared fixtures and `tests/bus/` groups distinct regressions |
 | Graph regressions | `index/graph_build/tests/` groups collection, compaction, lookup/edges, minimizers and payload checks |
+| Codec, cache and EM regressions | Existing tests live beside their implementations in `index/{bifrost,writer}/`, `index/skipped_position_tests.rs`, `core/runtime/` and `quant/components/tests.rs` |
 
 Public index-loading, diagnostic and quantification APIs are re-exported from their parent modules.
 Implementation modules stay private to their subsystem. Keep independent naive/fallback mapping
@@ -262,6 +266,25 @@ paths as correctness oracles; their lack of production fast-path traffic does no
 Keep module boundaries separate from algorithm changes. Changes to mapping must preserve
 candidate/fallback order, EC contribution order, cache ownership and wide-value handling.
 Changes to EM must preserve per-transcript addition order and convergence rules.
+
+### Mapping routes
+
+| Workload | Route |
+| --- | --- |
+| Ordinary single-end and paired-end bulk, unstranded or FR/RF | Encoded fast scanner at one or multiple threads; counting batches reuse worker scratch |
+| Fragment and bias sampling | Retain placement/hit observations while sampling; use count-only shortcuts when the required quotas are complete and filters permit |
+| Standard single-cDNA BUS FASTQ layouts | Packed sequence input and exact shared cDNA-answer cache |
+| Compound, tagged and paired BUS FASTQ layouts; ordinary BAM counting | Normalize required input fields, then use shared counting; single-cDNA reads reuse the exact answer cache and paired reads use the paired counting API |
+| Shade indexes, union and alternate compatibility policies | General scanner preserves the requested filtering and candidate order |
+| Traces, BAM projection, long-read, amino-acid and unmapped diagnostics | Retain the metadata and processing required by the requested output; scanner eligibility is checked independently |
+
+Bulk quantification, non-debug pseudoalignment and ordinary BUS counting use
+`prepare_read_mapping`, including compound FASTQ and BAM counting. It checks the same
+eligibility policy as the fast scanner before preparing bounded selectors. Selectors currently
+support k=31/g=23, retain their existing 48 MiB payload ceiling and only narrow the candidate
+search: every selected candidate still requires exact verification. Shade indexes and explicit
+general-scanner policies skip preparation. Legacy `prepare_single_cell_candidate_cache*`
+APIs retain their unconditional preparation behaviour and share the same selector builder.
 
 Validate structural changes with complete EC maps, matched-model abundances, native HDF5
 readback and diagnostic/BAM output checks. Compare one- and eight-thread whole-process timing
