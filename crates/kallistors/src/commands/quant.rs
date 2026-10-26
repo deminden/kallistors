@@ -179,10 +179,18 @@ pub fn run(args: QuantArgs) -> Result<()> {
     };
 
     mark_phase("reads_end");
+    // Mapping is complete. Retain output/model metadata and release the graph,
+    // minimizer tables and caches before allocating transcript sequences and EM/output arrays.
+    let transcript_names = index.take_transcript_names();
+    let transcript_lengths = std::mem::take(&mut index.transcript_lengths);
+    let index_version = index.index_version;
+    let k = index.k;
+    index.retire();
+
     let transcript_seqs = if args.bias {
         Some(kallistors::quant::load_transcript_sequences(
             args.transcripts.as_ref().unwrap(),
-            &index.transcript_names,
+            transcript_names.eager_slice(),
         )?)
     } else {
         None
@@ -216,14 +224,6 @@ pub fn run(args: QuantArgs) -> Result<()> {
         ec_list: kallistors::ec::EcList { classes: ec_list },
         counts,
     };
-
-    // Mapping is complete. Retain output/model metadata and release the graph,
-    // minimizer tables and caches before allocating EM/output working arrays.
-    let transcript_names = index.take_transcript_names();
-    let transcript_lengths = std::mem::take(&mut index.transcript_lengths);
-    let index_version = index.index_version;
-    let k = index.k;
-    index.retire();
 
     let quant_options = kallistors::quant::QuantOptions {
         mean_fragment_length,

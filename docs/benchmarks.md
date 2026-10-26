@@ -411,8 +411,10 @@ Scheduling uses the counted EC graph and requested thread count. Components exce
 262,144 edges and one worker's fair share of all multi-EC edges share their ordered denominator
 and transcript work across the same pool. Smaller components retain local rounds and cache
 reuse. Each scalar sum stays in its original order; only integer changes and fixed-point flags
-are reduced. Single-thread and bias kernels retain their existing paths. No tissue, accession,
-read-count cutoff or user-selected mode controls the switch.
+are reduced. Eligible single-thread and bias-corrected runs share the compact component engine;
+bias weight refreshes retain their original boundaries and reset fixed-work certificates.
+Zero-iteration and exceptional model cases keep their general fallbacks. Graph topology and
+requested workers select component scheduling, independently of tissue or accession.
 
 The largest component accounts for 6.0% of multi-EC edges in the small library, 84.8% in airway,
 85.4% in fibroblast and 91.6% in TT-seq. This topology explains why scheduling across components

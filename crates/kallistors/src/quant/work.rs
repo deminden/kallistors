@@ -122,6 +122,7 @@ pub(super) struct EmIncoming {
     pub(super) edge_indices: Vec<usize>,
     pub(super) ec_indices: IncomingEcIds,
     pub(super) weights: Vec<f64>,
+    pub(super) finite_weights: bool,
 }
 
 impl EmIncoming {
@@ -144,6 +145,7 @@ impl EmIncoming {
             },
             ec_indices: IncomingEcIds::new(edges, work.multi_ecs.len()),
             weights: vec![0.0; edges],
+            finite_weights: true,
         };
         for (ec_id, ec) in work.multi_ecs.iter().enumerate() {
             for edge in ec.transcript_range {
@@ -157,6 +159,7 @@ impl EmIncoming {
                 incoming.weights[slot] = work.multi_weights[edge];
             }
         }
+        incoming.finite_weights = incoming.weights.iter().all(|x| x.is_finite());
         incoming
     }
 
@@ -184,6 +187,7 @@ impl EmIncoming {
         for (weight, &edge) in self.weights.iter_mut().zip(&self.edge_indices) {
             *weight = work.multi_weights[edge];
         }
+        self.finite_weights = self.weights.iter().all(|x| x.is_finite());
     }
 }
 
@@ -238,11 +242,26 @@ pub(super) fn prepare_em_work(ec_classes: &[Vec<u32>], counts: &[u32], eff_lens:
 }
 
 pub(super) fn refresh_multi_weights(work: &mut EmWork, eff_lens: &[f64]) {
-    for ec in &work.multi_ecs {
+    refresh_multi_weights_with_ids(
+        &work.multi_ecs,
+        &work.multi_transcripts,
+        &mut work.multi_weights,
+        eff_lens,
+    );
+}
+
+#[inline]
+pub(super) fn refresh_multi_weights_with_ids<I: IncomingEcId>(
+    ecs: &[EmMultiEc],
+    ids: &[I],
+    weights: &mut [f64],
+    eff_lens: &[f64],
+) {
+    for ec in ecs {
         for i in ec.transcript_range {
-            let tr = work.multi_transcripts[i];
+            let tr = ids[i].as_usize();
             let len = eff_lens.get(tr).copied().unwrap_or(1.0);
-            work.multi_weights[i] = ec.count / len;
+            weights[i] = ec.count / len;
         }
     }
 }
@@ -430,5 +449,49 @@ fn scalar_scatter<I: IncomingEcId>(
     let scale = ec.count / denom;
     for (&tr, &product) in ids.iter().zip(products) {
         next[tr.as_usize()] += product * scale;
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+
+    #[test]
+    fn narrow_bias_refresh_preserves_ordered_weights_and_missing_length_fallback() {
+        let mut work = prepare_em_work(&[vec![0, 1, 2], vec![2, 3, 1]], &[7, 11], &[1.0; 4]);
+        let ids: Vec<u32> = work.multi_transcripts.iter().map(|&id| id as u32).collect();
+        for lengths in [
+            &[0.0, -0.0, f64::NAN, f64::INFINITY][..],
+            &[f64::from_bits(1), f64::MAX, -1.0][..],
+            &[][..],
+        ] {
+            let mut expected = vec![0.0; ids.len()];
+            for ec in &work.multi_ecs {
+                for edge in ec.transcript_range {
+                    let length = lengths
+                        .get(work.multi_transcripts[edge])
+                        .copied()
+                        .unwrap_or(1.0);
+                    expected[edge] = ec.count / length;
+                }
+            }
+            refresh_multi_weights(&mut work, lengths);
+            assert_eq!(
+                work.multi_weights
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
+                expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+            );
+            work.multi_weights.fill(0.0);
+            refresh_multi_weights_with_ids(&work.multi_ecs, &ids, &mut work.multi_weights, lengths);
+            assert_eq!(
+                work.multi_weights
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect::<Vec<_>>(),
+                expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+            );
+        }
     }
 }

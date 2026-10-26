@@ -188,7 +188,7 @@ impl OwnedEcBlocks {
     pub(crate) fn is_empty(&self) -> bool {
         self.len == 0
     }
-    #[inline]
+    #[inline(always)]
     pub(crate) fn get(&self, index: usize) -> Option<&[EcBlock]> {
         let span = self.rows.get(index)?;
         if span.len == 0 {

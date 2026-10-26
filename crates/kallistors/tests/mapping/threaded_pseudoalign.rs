@@ -23,7 +23,8 @@ fn completed_bias_sampling_preserves_ecs_samples_and_fragment_histograms() {
     let reads = to_fastq(&synthesize_reads(&dataset.transcripts, 50, 512));
     let (left, right) = to_fastq_pairs(&synthesize_paired_reads(&dataset.transcripts, 50, 90, 512));
     for mode in [None, Some(StrandSpecific::FR), Some(StrandSpecific::RF)] {
-        for limit in [0, 1, 3] {
+        // Also exercise a bias sample still pending for the entire batch.
+        for limit in [0, 1, 3, usize::MAX] {
             let options = PseudoalignOptions {
                 bias: true,
                 max_bias: limit,
@@ -88,7 +89,7 @@ fn completed_bias_sampling_preserves_ecs_samples_and_fragment_histograms() {
                 got.bias.as_ref().unwrap().total,
                 expected.bias.as_ref().unwrap().total
             );
-            if mode.is_none() {
+            if mode.is_none() && limit != usize::MAX {
                 assert_eq!(got.bias.unwrap().total, limit as u64);
             }
         }

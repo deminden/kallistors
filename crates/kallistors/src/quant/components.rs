@@ -5,7 +5,7 @@ use super::{EmMultiEc, EmWork};
 mod parallel;
 mod scalar;
 
-pub(super) use parallel::step;
+pub(super) use parallel::{step, tile as parallel_tile};
 pub(super) use scalar::{scalar_step, scalar_tile};
 
 #[cfg(test)]
@@ -56,6 +56,16 @@ pub(super) struct EmComponent {
     fixed_subtrees: u64,
     transcripts: core::range::Range<usize>,
     ecs: core::range::Range<usize>,
+}
+
+#[inline]
+fn witness(groups: &[EmComponent]) -> Option<usize> {
+    groups
+        .iter()
+        .enumerate()
+        .filter(|(_, group)| !group.fixed)
+        .max_by_key(|(_, group)| (group.last_changed, group.ecs.end - group.ecs.start))
+        .map(|(index, _)| index)
 }
 
 impl EmWork {

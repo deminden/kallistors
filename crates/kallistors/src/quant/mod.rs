@@ -8,13 +8,14 @@ mod work;
 pub use bootstrap::bootstrap_quantify;
 pub use input::{load_ec_counts, load_transcript_sequences};
 use models::{
-    calc_eff_lens, empirical_frag_lens_by_transcript, mean_frag_lens_by_transcript, update_eff_lens,
+    calc_eff_lens, empirical_frag_lens_by_transcript, mean_frag_lens_by_transcript,
+    update_eff_lens_with_pool as update_eff_lens,
 };
 #[cfg(test)]
 use work::sum_scaled_edges;
 use work::{
     EcScales, EmIncoming, EmMultiEc, EmWork, IncomingEcId, IncomingEcIds, prepare_em_work,
-    refresh_multi_weights, weighted_alpha_sum,
+    refresh_multi_weights, refresh_multi_weights_with_ids, weighted_alpha_sum,
 };
 
 use core::range::Range;
@@ -224,12 +225,19 @@ fn em_quantify_input_threaded(
     } else {
         None
     };
-    let compact = em_pool.is_some() && !options.bias && options.max_iter != 0;
+    // A positive first model boundary guarantees inactive priors have already
+    // become zero. Keep iteration-zero/overflow/absent-model fallbacks intact.
+    let compact_bias = options.bias
+        && options.min_rounds > 0
+        && options.min_rounds.checked_add(500).is_some()
+        && bias_counts.is_some()
+        && transcript_sequences.is_some();
+    let compact = em_pool.is_some() && (!options.bias || compact_bias) && options.max_iter != 0;
     // Preserve the ordered scalar equations while keeping active alpha values
     // contiguous. Original target IDs are retained for the final scatter.
     let serial_dense = em_pool.is_none()
         && !em_work.multi_ecs.is_empty()
-        && !options.bias
+        && (!options.bias || compact_bias)
         && options.max_iter != 0;
     let mut scalar_components = None;
     let mut components = if compact {
@@ -298,7 +306,12 @@ fn em_quantify_input_threaded(
     let burn_in = if let (Some(pool), Some(incoming), Some(components)) =
         (&em_pool, &incoming, &mut components)
     {
-        let rounds = options.max_iter.min(options.min_rounds.saturating_add(1));
+        // Bias refresh precedes its iteration's first denominator phase.
+        let rounds = options.max_iter.min(if options.bias {
+            options.min_rounds
+        } else {
+            options.min_rounds.saturating_add(1)
+        });
         match &compact_transcripts {
             Some(ids) => {
                 components::step::<_, false>(
@@ -329,8 +342,8 @@ fn em_quantify_input_threaded(
     } else {
         0
     };
-    // Keep the existing model-size eligibility. Witness scheduling needs
-    // no speculative alpha snapshot; parallel and bias routes are unchanged.
+    // Retain bounded scalar working-set eligibility; model-boundary limits
+    // below keep bias refreshes at their original iterations.
     let scalar_tiles = serial_dense && !alpha.is_empty() && alpha.len() <= 4 * 1024 * 1024 / 8;
     let mut final_round = false;
     let mut iterations = burn_in;
@@ -342,19 +355,53 @@ fn em_quantify_input_threaded(
             && let (Some(bias_counts), Some(transcript_sequences)) =
                 (bias_counts, transcript_sequences)
         {
+            let full_bias_alpha = if compact || serial_dense {
+                let mut full = vec![0.0; num_trans];
+                for (&original, &value) in em_work.active_transcripts.iter().zip(&alpha) {
+                    full[original] = value;
+                }
+                Some(full)
+            } else {
+                None
+            };
             let (updated_eff, bias_model) = update_eff_lens(
                 &means,
                 bias_counts,
                 transcript_sequences,
-                &alpha,
+                full_bias_alpha.as_deref().unwrap_or(&alpha),
                 &eff_lens,
                 options.strand_specific,
+                em_pool.as_ref(),
             );
             eff_lens = updated_eff;
             post_bias = Some(bias_model);
-            refresh_multi_weights(&mut em_work, &eff_lens);
+            if compact || serial_dense {
+                let dense_lengths: Vec<_> = em_work
+                    .active_transcripts
+                    .iter()
+                    .map(|&original| eff_lens[original])
+                    .collect();
+                if let Some(ids) = &compact_transcripts {
+                    refresh_multi_weights_with_ids(
+                        &em_work.multi_ecs,
+                        ids,
+                        &mut em_work.multi_weights,
+                        &dense_lengths,
+                    );
+                } else {
+                    refresh_multi_weights(&mut em_work, &dense_lengths);
+                }
+            } else {
+                refresh_multi_weights(&mut em_work, &eff_lens);
+            }
             if let Some(incoming) = &mut incoming {
                 incoming.refresh_weights(&em_work);
+            }
+            if let Some(groups) = &mut components {
+                components::reset_fixed(groups);
+            }
+            if let Some(groups) = &mut scalar_components {
+                components::reset_fixed(groups);
             }
         }
 
@@ -362,8 +409,8 @@ fn em_quantify_input_threaded(
         if let (Some(pool), Some(incoming), Some(components)) =
             (&em_pool, &incoming, &mut components)
         {
-            step_changes = Some(match &compact_transcripts {
-                Some(ids) => components::step::<_, true>(
+            let (taken, changes) = match &compact_transcripts {
+                Some(ids) => components::parallel_tile(
                     pool,
                     components,
                     &em_work,
@@ -371,9 +418,20 @@ fn em_quantify_input_threaded(
                     ids,
                     &mut alpha,
                     &mut scales,
-                    1,
+                    iter,
+                    options.min_rounds,
+                    if final_round {
+                        1
+                    } else {
+                        bias_tile_rounds(
+                            iter,
+                            options.min_rounds,
+                            options.max_iter - iter,
+                            options.bias,
+                        )
+                    },
                 ),
-                None => components::step::<_, true>(
+                None => components::parallel_tile(
                     pool,
                     components,
                     &em_work,
@@ -381,9 +439,23 @@ fn em_quantify_input_threaded(
                     &em_work.multi_transcripts,
                     &mut alpha,
                     &mut scales,
-                    1,
+                    iter,
+                    options.min_rounds,
+                    if final_round {
+                        1
+                    } else {
+                        bias_tile_rounds(
+                            iter,
+                            options.min_rounds,
+                            options.max_iter - iter,
+                            options.bias,
+                        )
+                    },
                 ),
-            });
+            };
+            iter += taken - 1;
+            iterations = iter + 1;
+            step_changes = Some(changes);
         } else if let (Some(pool), Some(incoming)) = (&em_pool, &incoming) {
             pool.install(|| {
                 scales
@@ -468,7 +540,12 @@ fn em_quantify_input_threaded(
                         &mut scalar_products,
                         iter,
                         options.min_rounds,
-                        options.max_iter - iter,
+                        bias_tile_rounds(
+                            iter,
+                            options.min_rounds,
+                            options.max_iter - iter,
+                            options.bias,
+                        ),
                     );
                     iter += taken - 1;
                     iterations = iter + 1;
@@ -588,6 +665,21 @@ fn em_quantify_input_threaded(
     })
 }
 
+// Scalar witness tiles cannot cross a scheduled change of effective lengths.
+fn bias_tile_rounds(iter: usize, minimum: usize, remaining: usize, bias: bool) -> usize {
+    if !bias {
+        return remaining;
+    }
+    let second = minimum.saturating_add(500);
+    if iter < minimum {
+        remaining.min(minimum - iter)
+    } else if iter < second {
+        remaining.min(second - iter)
+    } else {
+        remaining
+    }
+}
+
 fn counts_to_tpm(est_counts: &[f64], eff_lens: &[f64]) -> Vec<f64> {
     let mut tpm = vec![0.0; est_counts.len()];
     let mut total_mass = 0.0;
@@ -673,6 +765,30 @@ mod scale_presence_tests {
                 assert!(
                     result.to_bits() == expected.to_bits() || result.is_nan() && expected.is_nan()
                 );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bias_boundary_tests {
+    use super::bias_tile_rounds;
+    #[test]
+    fn scalar_witness_tiles_stop_before_each_bias_refresh() {
+        for minimum in [1usize, 5, 50, usize::MAX - 500] {
+            let second = minimum + 500;
+            for iter in [0, minimum - 1, minimum, second - 1, second] {
+                for remaining in [0, 1, 3, 64, 1000] {
+                    let remaining = remaining.min(usize::MAX - iter);
+                    let expected = (0..remaining)
+                        .take_while(|&offset| {
+                            let round = iter + offset;
+                            offset == 0 || round != minimum && round != second
+                        })
+                        .count();
+                    assert_eq!(bias_tile_rounds(iter, minimum, remaining, true), expected);
+                    assert_eq!(bias_tile_rounds(iter, minimum, remaining, false), remaining);
+                }
             }
         }
     }

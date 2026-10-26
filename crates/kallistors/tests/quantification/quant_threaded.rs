@@ -65,7 +65,11 @@ fn threaded_em_preserves_serial_bits_with_bias_histograms_and_sparse_targets() {
     for input in [input, disconnected] {
         for hist in [None, Some(histogram.as_slice())] {
             for use_bias in [false, true] {
-                let minimums: &[usize] = if use_bias { &[1] } else { &[0, 1, usize::MAX] };
+                let minimums: &[usize] = if use_bias {
+                    &[0, 1]
+                } else {
+                    &[0, 1, usize::MAX]
+                };
                 for &min_rounds in minimums {
                     for max_iter in [0, 1, 2, 100] {
                         let options = QuantOptions {
@@ -100,8 +104,11 @@ fn threaded_em_preserves_serial_bits_with_bias_histograms_and_sparse_targets() {
                             assert!((serial.tpm.iter().sum::<f64>() - 1e6).abs() < 1e-8);
                             assert!(serial.est_counts[25..31].iter().all(|&v| v == 0.0));
                         }
-                        assert_eq!(serial.post_bias.is_some(), use_bias && max_iter >= 2);
-                        if use_bias && max_iter >= 2 {
+                        assert_eq!(
+                            serial.post_bias.is_some(),
+                            use_bias && max_iter > min_rounds
+                        );
+                        if use_bias && max_iter > min_rounds {
                             let unbiased = em_quantify_with_fragment_histogram(
                                 &input,
                                 &lengths,

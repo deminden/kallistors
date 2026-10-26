@@ -124,22 +124,16 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
     options: PseudoalignOptions,
     threads: usize,
 ) -> Result<EcCounts> {
-    // Bias sampling retains the complete-record route, which owns its budget.
-    if threads <= 1 && options.bias {
-        return super::single::pseudoalign_single_end_bifrost_with_options(
-            index, reader, strand, filter, options,
-        );
-    }
     let cache_entries = options
         .match_cache_size
         .allocation(threads)?
         .entries_per_worker();
     if threads <= 1 {
         let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
-        // Ordinary synchronous counting consumes only sequences. Reuse the
-        // threaded parser and mapper without spawning a producer or worker.
+        // Synchronous counting uses the same bias-aware sequence batches
+        // and cap semantics without spawning a producer or worker.
         let mut pairs = super::core::ScopedEcPairs::new(index, threads.max(1));
-        let mut counts = EcCounts::new(false);
+        let mut counts = EcCounts::new(options.bias);
         let mut map = EcCountMap::default();
         while let Some(batch) = reader.next_packed_seq_batch(4_096)? {
             super::single::pseudoalign_single_end_bifrost_batch_into(

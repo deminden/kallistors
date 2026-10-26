@@ -54,6 +54,11 @@ minimizer selection, encoding and sampling quotas. Integration helpers live in
 `crates/kallistors/tests/helpers/mod.rs`. Avoid duplicate fixtures and success-only checks when
 an existing case can verify the same option together with its output.
 
+Arithmetic oracles compare non-NaN results bit for bit, including subnormals, infinities and
+signed zero. Check NaN propagation by classification: Rust does not guarantee arithmetic NaN
+payloads or signs, even for identical expressions. Use runtime operands when testing optimized
+kernels. See [Rust's NaN contract](https://doc.rust-lang.org/std/primitive.f32.html#nan-bit-patterns).
+
 BUS validation, input inference, barcode geometry and corrected-tag variants use labelled case
 tables with shared tiny fixtures. Keep separate cases for distinct parser branches and error
 conditions; every matrix assertion should identify its case. Reuse output checks for verbose
@@ -380,11 +385,28 @@ and memory with alternating controls. Use the same executable for all validation
   edges shares its independent EC denominators and transcript updates across the same pool.
   All component denominators finish before alpha updates; scalar additions stay ordered, and only
   integer change counts and fixed-point flags are reduced. Smaller components keep local
-  iterations for cache reuse and lower synchronization cost. Single-thread and bias paths retain
-  their existing kernels. Only bitwise fixed components skip repeated work. Mandatory iterations,
-  convergence and the final threshold update remain intact; bias correction uses the general path. Work is partitioned by connected
-  component and within dominant components, so a large connected graph can use the requested
-  threads without splitting or approximating its ECs.
+  iterations for cache reuse and lower synchronization cost. Eligible ordinary and bias-corrected
+  runs use the same compact component engine and ordered update kernels. Bias refreshes project
+  active alpha values to the original target order, refresh weights and invalidate fixed-point
+  certificates at their original iteration boundaries. Iteration-zero, absent-model and other
+  exceptional cases retain the general path.
+  A changing component can witness that convergence is still impossible; other components then
+  catch up in bounded tiles using the same updates. This preserves the first global stop,
+  mandatory iterations and final threshold update. Only bitwise fixed components skip repeated
+  updates. Incoming sums can also omit a proven positive-zero result when the previous alpha
+  and singleton are both positive zero and every actual weight and current scale is finite.
+  All denominators still execute before this decision; signed-zero and nonfinite cases retain
+  literal arithmetic. Work is partitioned by connected component and within dominant components,
+  so a large connected graph can use the requested threads without approximating its ECs.
+- **Bias model:** observed/expected histograms and their normalization remain ordered. Independent
+  per-transcript effective-length rescales can use the existing requested EM pool. One shared
+  equation implementation has serial and parallel scheduling specializations; small adapters
+  preserve scalar execution without maintaining a second model implementation.
+- **Bias FASTA:** release completed mapping storage before allocating transcript sequences.
+  Header lookups borrow existing eager names and assign sequence buffers directly to requested
+  slots. Preserve requested order, independent copies for duplicate requests, last-record wins
+  for duplicate FASTA headers and UTF-8 validation of the complete source. Ordinary quantification
+  keeps deferred-name loading; the eager-name view does not allocate a second name table.
 - **Output:** bounded ordered TSV chunks preserve serial bytes. Threaded output overlaps TSV
   and HDF5. DEFLATE level 6 and chunks of at most 16,384 elements preserve dataset names,
   types and shapes; native HDF5 readback independently verifies interoperability.

@@ -48,6 +48,11 @@ impl TranscriptNames {
             deferred: Some((file, start, count)),
         }
     }
+    /// Borrow already loaded names; deferred owners keep an empty eager view.
+    #[doc(hidden)]
+    pub fn eager_slice(&self) -> &[String] {
+        &self.eager
+    }
     /// Stream selected transcript names without retaining a second name table.
     pub fn write_lines(self, writer: &mut impl Write, onlist: Option<&[bool]>) -> Result<usize> {
         let selected = |id: usize| onlist.is_none_or(|mask| mask.get(id).copied().unwrap_or(false));
@@ -284,6 +289,11 @@ mod tests {
                         names.len(),
                     ),
                 ] {
+                    if source.deferred.is_some() {
+                        assert!(source.eager_slice().is_empty());
+                    } else {
+                        assert_eq!(source.eager_slice(), eager.names.as_slice());
+                    }
                     let mut actual = Vec::new();
                     let count = source.write_lines(&mut actual, mask.as_deref()).unwrap();
                     assert_eq!(actual, text.as_bytes());

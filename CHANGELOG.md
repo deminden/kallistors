@@ -55,7 +55,15 @@
 - Bound queued reads and share complete worker EC keys. Release graph storage before EM.
   Adapt EM scheduling to graph work: keep small components local and share dominant components
   across the same worker pool. Preserve scalar arithmetic order, stopping rules and the final
-  update; skip only bitwise fixed work.
+  update. Share compact components and exact witness scheduling with eligible bias-corrected
+  runs, resetting certificates at model refreshes. Skip repeated bitwise fixed work and incoming
+  sums whose positive-zero result is proved from finite operands; retain every denominator.
+- Compute independent bias effective-length rescales through the existing requested pool,
+  sharing one equation implementation across serial and parallel scheduling. Keep histograms,
+  normalization and each transcript's contribution order unchanged.
+- Release completed mapping storage before loading bias sequences. Borrow requested header
+  keys and assign sequence buffers directly to output slots, preserving duplicate/missing-name
+  behavior and complete UTF-8 validation without retaining a second name table.
 - Build indexes with byte-proven repeat-window exclusion, bounded packed collections, parallel
   radix sorting and batched exact edge lookups. Compact graph/EC scratch and retire completed
   allocations before later stages. Preserve ordered graph claims, all minimizer ties and

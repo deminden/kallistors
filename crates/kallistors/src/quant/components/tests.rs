@@ -478,3 +478,196 @@ fn balanced_union_trees_preserve_every_transcripts_ec_order() {
         }
     }
 }
+
+#[test]
+fn parallel_witness_preserves_first_stop_tree_ownership_and_reset() {
+    use super::super::{EcScales, EmIncoming, IncomingEcIds, prepare_em_work};
+    for threads in [1, 3] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        for parallel in [false, true] {
+            for wide in [false, true] {
+                for minimum in [0, 50] {
+                    let mut classes: Vec<_> = (0..70)
+                        .map(|i| vec![(2 * i) as u32, (2 * i + 1) as u32])
+                        .collect();
+                    // Leading largest component exposes incorrect depth-bit
+                    // ownership if a singleton subtree is used as witness.
+                    classes.extend((0..8).map(|_| vec![0, 1]));
+                    let counts = vec![1; classes.len()];
+                    let lengths: Vec<_> = (0..70).flat_map(|_| [1.0, 2.0]).collect();
+                    let mut work = prepare_em_work(&classes, &counts, &lengths);
+                    let mut actual_groups = work.group_components();
+                    let mut reference_groups = work.group_components();
+                    work.compact_transcript_ids();
+                    for group in actual_groups.iter_mut().chain(&mut reference_groups) {
+                        group.parallel = parallel;
+                    }
+                    let mut incoming = EmIncoming::new(&work, false);
+                    if wide && let IncomingEcIds::Compact(ids) = &incoming.ec_indices {
+                        incoming.ec_indices =
+                            IncomingEcIds::Wide(ids.iter().map(|&x| x as usize).collect());
+                    }
+                    let mut actual_scales = EcScales::new(work.multi_ecs.len());
+                    let mut reference_scales = EcScales::new(work.multi_ecs.len());
+                    for epoch in 0..2 {
+                        let mut actual: Vec<_> = work
+                            .active_transcripts
+                            .iter()
+                            .map(|&id| {
+                                if id / 2 != 0 && id / 2 < 35 {
+                                    if id % 2 == 0 { 1.0 } else { 0.0 }
+                                } else {
+                                    0.5
+                                }
+                            })
+                            .collect();
+                        let mut expected = actual.clone();
+                        reset_fixed(&mut actual_groups);
+                        reset_fixed(&mut reference_groups);
+                        let mut completed = 0;
+                        while completed < 200 {
+                            let (taken, changed) = parallel::tile(
+                                &pool,
+                                &mut actual_groups,
+                                &work,
+                                &incoming,
+                                &work.multi_transcripts,
+                                &mut actual,
+                                &mut actual_scales,
+                                completed,
+                                minimum,
+                                200 - completed,
+                            );
+                            assert!(taken > 0 && taken <= 64 && taken <= 200 - completed);
+                            let mut expected_changed = 0;
+                            for offset in 0..taken {
+                                expected_changed = step::<_, true>(
+                                    &pool,
+                                    &mut reference_groups,
+                                    &work,
+                                    &incoming,
+                                    &work.multi_transcripts,
+                                    &mut expected,
+                                    &mut reference_scales,
+                                    1,
+                                );
+                                if offset + 1 < taken && completed + offset > minimum {
+                                    assert_ne!(
+                                        expected_changed, 0,
+                                        "crossed first global stop, epoch{epoch}"
+                                    );
+                                }
+                            }
+                            assert_eq!(changed, expected_changed);
+                            assert_eq!(
+                                actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                                expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                            );
+                            completed += taken;
+                            if changed == 0 && completed - 1 > minimum {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn zero_incoming_certificate_preserves_signed_zero_exceptional_and_refresh() {
+    use super::super::{EcScales, EmIncoming, IncomingEcIds, prepare_em_work};
+    // Force both scheduling forms and both incoming ID widths. The independent
+    // original incoming equations explicitly retain every multiplication.
+    for threads in [1, 2, 3] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        for parallel in [false, true] {
+            for wide in [false, true] {
+                for length in [1.0, -2.0, 0.0, f64::INFINITY, f64::NAN] {
+                    let classes = vec![vec![0, 1], vec![0, 1], vec![2, 3], vec![3]];
+                    let mut work =
+                        prepare_em_work(&classes, &[5, 7, 11, 3], &[length, 2.0, 1.0, 3.0]);
+                    let mut groups = work.group_components();
+                    work.compact_transcript_ids();
+                    for group in &mut groups {
+                        group.parallel = parallel;
+                    }
+                    let mut incoming = EmIncoming::new(&work, true);
+                    if wide && let IncomingEcIds::Compact(ids) = &incoming.ec_indices {
+                        incoming.ec_indices =
+                            IncomingEcIds::Wide(ids.iter().map(|&id| id as usize).collect());
+                    }
+                    let mut alpha: Vec<f64> = work
+                        .active_transcripts
+                        .iter()
+                        .map(|&id| match id {
+                            0 => 0.0,
+                            1 => 1.0,
+                            2 => -0.0,
+                            _ => 0.5,
+                        })
+                        .collect();
+                    let mut scales = EcScales::new(work.multi_ecs.len());
+                    for iteration in 0..5 {
+                        if iteration == 2 {
+                            work.multi_weights.fill(1.0);
+                            incoming.refresh_weights(&work);
+                            reset_fixed(&mut groups);
+                            alpha.fill(0.0);
+                        }
+                        if iteration == 3 {
+                            work.multi_weights[0] = f64::INFINITY;
+                            incoming.refresh_weights(&work);
+                            reset_fixed(&mut groups);
+                        }
+                        let mut values = vec![0.0; work.multi_ecs.len()];
+                        let mut present = vec![false; values.len()];
+                        for (i, ec) in work.multi_ecs.iter().enumerate() {
+                            let mut denominator = 0.0;
+                            for edge in ec.transcript_range {
+                                denominator +=
+                                    alpha[work.multi_transcripts[edge]] * work.multi_weights[edge];
+                            }
+                            if denominator >= super::super::TOLERANCE || denominator.is_nan() {
+                                present[i] = true;
+                                values[i] = ec.count / denominator;
+                            }
+                        }
+                        let mut expected = work.singleton_alpha.clone();
+                        for tr in 0..alpha.len() {
+                            for (i, ec) in work.multi_ecs.iter().enumerate() {
+                                for edge in ec.transcript_range {
+                                    if work.multi_transcripts[edge] == tr && present[i] {
+                                        expected[tr] +=
+                                            work.multi_weights[edge] * alpha[tr] * values[i];
+                                    }
+                                }
+                            }
+                        }
+                        step::<_, true>(
+                            &pool,
+                            &mut groups,
+                            &work,
+                            &incoming,
+                            &work.multi_transcripts,
+                            &mut alpha,
+                            &mut scales,
+                            1,
+                        );
+                        assert_eq!(
+                            alpha.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                            expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
