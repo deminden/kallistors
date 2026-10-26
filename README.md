@@ -133,6 +133,7 @@ kallistors quant \
 kallistors quant \
     -i path/to/index.idx \
     -o out_dir \
+    -t 8 \
     -b 100 \
     --seed 42 \
     reads_1.fq reads_2.fq
@@ -253,6 +254,8 @@ Notes:
 - Bootstrap samples use `-b/--bootstrap-samples`; H5 stores bootstrap count vectors under
   `/bootstrap/bs*`, while `--plaintext` writes `bs_abundance_*.tsv`. Bootstrap H5 layout is
   compatible, but exact upstream bootstrap sample values are not currently claimed.
+  Bootstrap workers adapt between independent samples and large within-sample components
+  using `-t/--threads`; serial sampling uses a bounded exact lookup table when eligible.
 - `--bias` requires `--transcripts` to provide the transcript FASTA.
 - `kallistors index` defaults to `k = 31`, `threads = 1`, and kallisto-compatible minimizer length
   selection when `-m/--min-size` is omitted.

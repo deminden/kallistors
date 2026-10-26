@@ -5,7 +5,7 @@ mod input;
 mod models;
 mod work;
 
-pub use bootstrap::bootstrap_quantify;
+pub use bootstrap::{bootstrap_quantify, bootstrap_quantify_threaded};
 pub use input::{load_ec_counts, load_transcript_sequences};
 use models::{
     calc_eff_lens, empirical_frag_lens_by_transcript, mean_frag_lens_by_transcript,

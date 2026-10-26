@@ -6,7 +6,7 @@ mod parallel;
 mod scalar;
 
 pub(super) use parallel::{step, tile as parallel_tile};
-pub(super) use scalar::{scalar_step, scalar_tile};
+pub(super) use scalar::{bootstrap_tile, scalar_step, scalar_tile};
 
 #[cfg(test)]
 mod tests;
@@ -51,6 +51,8 @@ pub(super) struct EmComponent {
     fixed: bool,
     parallel: bool,
     last_changed: bool,
+    // Owned by the certified scalar scheduler; other engines ignore it.
+    scalar_finite: bool,
     // Each stable recursion interval stores its bit on its first component.
     // Ancestors share that component but use a different depth bit.
     fixed_subtrees: u64,
@@ -114,6 +116,7 @@ impl EmWork {
                 fixed: false,
                 parallel: false,
                 last_changed: true,
+                scalar_finite: false,
                 fixed_subtrees: 0,
                 transcripts: core::range::Range {
                     start: tr_start,
@@ -175,6 +178,7 @@ pub(super) fn reset_fixed(groups: &mut [EmComponent]) {
     for group in groups {
         group.fixed = false;
         group.last_changed = true;
+        group.scalar_finite = false;
         group.fixed_subtrees = 0;
     }
 }

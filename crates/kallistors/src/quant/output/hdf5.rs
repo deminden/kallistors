@@ -137,7 +137,7 @@ fn set_h5_chunking(dataset: &mut DatasetBuilder, len: usize) {
         // which hdf5-pure 0.47 encodes with four bytes and HDF5 2.0 rejects.
         dataset
             .with_chunks(&[len.min(16_384) as u64])
-            .with_deflate(6);
+            .with_deflate(1);
     }
 }
 

@@ -22,6 +22,13 @@
 
 ### Speed and memory
 
+- Share requested bootstrap workers between independent samples and large within-sample
+  components, including a single sample. Retain the original seed sequence, result order,
+  full-target prior and exact ordered equations. Reuse compact IDs in large scalar samples,
+  omit unobservable convergence counts and sequence TSV/bootstrap work within the worker budget.
+- Sample exact SplitMix chunks in the existing pool with a serial replay on any rejected
+  candidate. Serial callers can share a bounded exact inverse-CDF table and batched draws;
+  larger libraries retain the compact search directory. Preserve every draw and RNG state.
 - Accelerate large-reference loading with batched exact lookups, compact fingerprint and
   annotation storage, and bounded ordered parallel positional decoding. Reuse complete
   immutable EC-pair intersections within mapping invocations, retaining exact multiset
@@ -76,7 +83,9 @@
   scratch before later allocations. Preserve ordered claims and byte-identical indexes.
 - Use one requested worker pool throughout construction. Report exclusive build stages,
   separate MPHF construction from writing and include final cleanup in the internal total.
-- Format TSV in bounded ordered chunks and overlap TSV/HDF5 output when threaded.
+- Format TSV in bounded ordered chunks and overlap TSV/HDF5 output when threaded. Use
+  lower DEFLATE effort for HDF5 output, trading larger compressed files for less writing work
+  while preserving every native dataset, type, shape and numeric value.
 - Process ordinary single-cDNA BUS layouts with bounded packed input, concurrent decoding,
   ordered parallel counting and the shared compact mapping index. Borrow unchanged ECs and
   omit unused placement traces. Overlap mapping with ordered BUS output and reuse full-key

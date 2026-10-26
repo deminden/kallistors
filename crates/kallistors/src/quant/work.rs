@@ -290,13 +290,15 @@ impl EmWork {
         next_alpha: &mut [f64],
         scalar_products: &mut [f64],
     ) -> (usize, bool) {
-        self.scalar_targets::<MODE>(
+        let (changes, identical, _) = self.scalar_targets::<_, MODE, false, false>(
             ecs,
+            &self.multi_transcripts,
             active.iter().copied(),
             alpha,
             next_alpha,
             scalar_products,
-        )
+        );
+        (changes, identical)
     }
 
     pub(super) fn scalar_dense_step_mode<const MODE: u8>(
@@ -307,8 +309,33 @@ impl EmWork {
         next_alpha: &mut [f64],
         scalar_products: &mut [f64],
     ) -> (usize, bool) {
-        self.scalar_targets::<MODE>(
+        let (changes, identical, _) = self.scalar_targets::<_, MODE, false, false>(
             ecs,
+            &self.multi_transcripts,
+            active.start..active.end,
+            alpha,
+            next_alpha,
+            scalar_products,
+        );
+        (changes, identical)
+    }
+
+    pub(super) fn scalar_dense_step_certified<
+        I: IncomingEcId,
+        const MODE: u8,
+        const LITERAL: bool,
+    >(
+        &self,
+        ids: &[I],
+        ecs: Range<usize>,
+        active: Range<usize>,
+        alpha: &mut [f64],
+        next_alpha: &mut [f64],
+        scalar_products: &mut [f64],
+    ) -> (usize, bool, bool) {
+        self.scalar_targets::<_, MODE, true, LITERAL>(
+            ecs,
+            ids,
             active.start..active.end,
             alpha,
             next_alpha,
@@ -316,58 +343,82 @@ impl EmWork {
         )
     }
 
-    // Both monomorphizations visit exactly the same active target sequence.
+    // Both active-index forms visit exactly the same target sequence.
     // Dense component callers pass their proven compact coordinates directly,
     // avoiding loads through the identity-ID vector. Row arithmetic is shared.
-    fn scalar_targets<const MODE: u8>(
+    fn scalar_targets<
+        I: IncomingEcId,
+        const MODE: u8,
+        const CHECK_FINITE: bool,
+        const LITERAL: bool,
+    >(
         &self,
         ecs: Range<usize>,
+        ids: &[I],
         active: impl Iterator<Item = usize> + Clone,
         alpha: &mut [f64],
         next_alpha: &mut [f64],
         scalar_products: &mut [f64],
-    ) -> (usize, bool) {
+    ) -> (usize, bool, bool) {
         for tr in active.clone() {
             next_alpha[tr] = self.singleton_alpha[tr];
         }
-        let ids = &self.multi_transcripts;
 
-        let rows = &self.multi_ecs[ecs];
-        let (pairs, tail) = rows.as_chunks::<2>();
-        for [left, right] in pairs {
-            let left_ids = &ids[left.transcript_range];
-            let right_ids = &ids[right.transcript_range];
-            let (left_products, rest) = scalar_products.split_at_mut(left_ids.len());
-            let right_products = &mut rest[..right_ids.len()];
-            let (left_denom, right_denom) = scalar_pair_products(
-                left_ids,
-                &self.multi_weights[left.transcript_range],
-                left_products,
-                right_ids,
-                &self.multi_weights[right.transcript_range],
-                right_products,
-                alpha,
-            );
-            // Scatter order is exactly the original EC order, including when
-            // these two rows contribute to the same transcript.
-            scalar_scatter(left, left_ids, left_products, left_denom, next_alpha);
-            scalar_scatter(right, right_ids, right_products, right_denom, next_alpha);
-        }
-        for ec in tail {
-            let transcripts = &ids[ec.transcript_range];
-            let weights = &self.multi_weights[ec.transcript_range];
-            let products = &mut scalar_products[..transcripts.len()];
-            let mut denom = 0.0;
-            for ((&tr, &weight), product) in
-                transcripts.iter().zip(weights).zip(products.iter_mut())
-            {
-                *product = alpha[tr.as_usize()] * weight;
-                denom += *product;
+        if LITERAL {
+            for ec in &self.multi_ecs[ecs] {
+                let row_ids = &ids[ec.transcript_range];
+                let weights = &self.multi_weights[ec.transcript_range];
+                let mut denominator = 0.0;
+                for (&tr, &weight) in row_ids.iter().zip(weights) {
+                    denominator += alpha[tr.as_usize()] * weight;
+                }
+                if denominator < TOLERANCE {
+                    continue;
+                }
+                let scale = ec.count / denominator;
+                for (&tr, &weight) in row_ids.iter().zip(weights) {
+                    next_alpha[tr.as_usize()] += weight * alpha[tr.as_usize()] * scale;
+                }
             }
-            scalar_scatter(ec, transcripts, products, denom, next_alpha);
+        } else {
+            let rows = &self.multi_ecs[ecs];
+            let (pairs, tail) = rows.as_chunks::<2>();
+            for [left, right] in pairs {
+                let left_ids = &ids[left.transcript_range];
+                let right_ids = &ids[right.transcript_range];
+                let (left_products, rest) = scalar_products.split_at_mut(left_ids.len());
+                let right_products = &mut rest[..right_ids.len()];
+                let (left_denom, right_denom) = scalar_pair_products(
+                    left_ids,
+                    &self.multi_weights[left.transcript_range],
+                    left_products,
+                    right_ids,
+                    &self.multi_weights[right.transcript_range],
+                    right_products,
+                    alpha,
+                );
+                // Scatter order is exactly the original EC order, including when
+                // these two rows contribute to the same transcript.
+                scalar_scatter(left, left_ids, left_products, left_denom, next_alpha);
+                scalar_scatter(right, right_ids, right_products, right_denom, next_alpha);
+            }
+            for ec in tail {
+                let transcripts = &ids[ec.transcript_range];
+                let weights = &self.multi_weights[ec.transcript_range];
+                let products = &mut scalar_products[..transcripts.len()];
+                let mut denom = 0.0;
+                for ((&tr, &weight), product) in
+                    transcripts.iter().zip(weights).zip(products.iter_mut())
+                {
+                    *product = alpha[tr.as_usize()] * weight;
+                    denom += *product;
+                }
+                scalar_scatter(ec, transcripts, products, denom, next_alpha);
+            }
         }
         let mut changes = 0;
         let mut identical = true;
+        let mut finite = true;
         for tr in active {
             let next = next_alpha[tr];
             let old = alpha[tr];
@@ -377,9 +428,12 @@ impl EmWork {
                 );
             }
             identical &= next.to_bits() == old.to_bits();
+            if CHECK_FINITE {
+                finite &= next.is_finite();
+            }
             alpha[tr] = next;
         }
-        (changes, identical)
+        (changes, identical, finite)
     }
 }
 

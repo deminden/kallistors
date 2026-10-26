@@ -283,7 +283,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
             &target_names,
             &transcript_lengths,
             &result,
-            if args.plaintext {
+            if args.plaintext || args.bootstrap_samples > 0 {
                 args.threads
             } else {
                 args.threads.saturating_sub(1).max(1)
@@ -295,23 +295,25 @@ pub fn run(args: QuantArgs) -> Result<()> {
         let bootstrap_results = if args.bootstrap_samples == 0 {
             Vec::new()
         } else {
-            kallistors::quant::bootstrap_quantify(
+            kallistors::quant::bootstrap_quantify_threaded(
                 ec_input.as_ref().expect("bootstrap EC input retained"),
                 &result.eff_lengths,
                 args.bootstrap_samples,
                 args.seed,
                 quant_options,
+                args.threads,
             )?
         };
 
         if args.bootstrap_samples > 0 && args.plaintext {
             for (idx, bootstrap) in bootstrap_results.iter().enumerate() {
                 let path = args.out_dir.join(format!("bs_abundance_{idx}.tsv"));
-                kallistors::quant::write_abundance_tsv_from_parts(
+                kallistors::quant::write_abundance_tsv_from_parts_threaded(
                     &path,
                     &target_names,
                     &transcript_lengths,
                     bootstrap,
+                    args.threads,
                 )?;
             }
         }
@@ -342,7 +344,7 @@ pub fn run(args: QuantArgs) -> Result<()> {
 
         Ok(())
     };
-    if args.threads > 1 && !args.plaintext {
+    if args.threads > 1 && !args.plaintext && args.bootstrap_samples == 0 {
         std::thread::scope(|scope| -> Result<()> {
             let tsv = scope.spawn(write_tsv);
             let other = write_other_outputs();

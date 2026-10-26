@@ -60,6 +60,13 @@ processing. Genome BAM output requires matching GTF annotations and chromosome l
 ## Output
 
 Quantification writes `abundance.tsv` and `run_info.json`; HDF5 is enabled by default.
-`--plaintext` writes bootstrap TSVs instead of HDF5. HDF5 uses DEFLATE level 6 and chunks
+`--plaintext` writes bootstrap TSVs instead of HDF5. HDF5 uses DEFLATE level 1 and chunks
 bounded to 16,384 elements. Dataset schemas and values can be checked independently with
 `scripts/check_hdf5_output.py` using native HDF5 through h5py.
+
+Bootstrap scheduling shares the requested worker budget across samples and large within-sample
+components. Sampling retains the original rejection checks, draws and final RNG state.
+For the same supplied EC matrix, seed and effective lengths, serial and parallel bootstrap
+quantification retain the same samples and native numeric results. FASTQ runs can assign
+EC numbers in a different order across thread counts, so a fixed seed alone does not imply
+identical bootstrap values between such runs or between different quantifiers.

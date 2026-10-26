@@ -480,6 +480,71 @@ fn balanced_union_trees_preserve_every_transcripts_ec_order() {
 }
 
 #[test]
+fn certified_scalar_components_track_nonfinite_fixed_groups_and_resets() {
+    let classes = vec![vec![0], vec![1], vec![0, 1], vec![2, 3], vec![4]];
+    let mut work = super::super::prepare_em_work(
+        &classes,
+        &[5, 7, 11, 13, 3],
+        &[1.0, 2.0, f64::NAN, 1.0, 1.0],
+    );
+    let mut groups = work.group_components();
+    work.compact_transcript_ids();
+    let mut alpha = vec![0.2; work.singleton_alpha.len()];
+    let mut next = vec![0.0; alpha.len()];
+    let active: Vec<_> = (0..alpha.len()).collect();
+    let mut products = vec![0.0; 8];
+    for _ in 0..4 {
+        let _ = bootstrap_tile(
+            &mut groups,
+            &work,
+            &work.multi_transcripts,
+            &active,
+            &mut alpha,
+            &mut next,
+            &mut products,
+            0,
+            0,
+            1,
+            false,
+        );
+        assert_eq!(
+            groups.iter().all(|g| g.scalar_finite),
+            alpha.iter().all(|value| value.is_finite())
+        );
+    }
+    assert!(
+        groups
+            .iter()
+            .any(|group| group.fixed && group.scalar_finite)
+    );
+    assert!(
+        groups
+            .iter()
+            .any(|group| group.fixed && !group.scalar_finite)
+    );
+    alpha.fill(0.0);
+    reset_fixed(&mut groups);
+    let _ = bootstrap_tile(
+        &mut groups,
+        &work,
+        &work.multi_transcripts,
+        &active,
+        &mut alpha,
+        &mut next,
+        &mut products,
+        0,
+        0,
+        1,
+        false,
+    );
+    assert_eq!(
+        groups.iter().all(|g| g.scalar_finite),
+        alpha.iter().all(|value| value.is_finite())
+    );
+    assert!(alpha.iter().any(|value| value.is_nan()));
+}
+
+#[test]
 fn parallel_witness_preserves_first_stop_tree_ownership_and_reset() {
     use super::super::{EcScales, EmIncoming, IncomingEcIds, prepare_em_work};
     for threads in [1, 3] {

@@ -254,7 +254,7 @@ See the benchmark guide for runnable commands, manifests, trimming and reporting
 | Threaded input and EC aggregation | `pseudoalign/threaded.rs` |
 | EC dumps, minimizer lookup and read traces | `pseudoalign/diagnostics/{ec_dump,minimizer,tracing,paired}.rs` |
 | EM scheduling and arithmetic | `quant/mod.rs` coordinates `quant/work.rs`; `quant/components.rs` groups independent components and `components/{scalar,parallel}.rs` schedule their exact updates |
-| Fragment/bias models, input and bootstraps | `quant/{models,input,bootstrap}.rs` |
+| Fragment/bias models, input and bootstraps | `quant/{models,input,bootstrap}.rs`; `quant/bootstrap/sampling.rs` owns the shared exact sampling plan |
 | Abundance TSV/HDF5 and run metadata | `quant/output/{tsv,hdf5,metadata}.rs` |
 | BUS configuration, tags and general alignment | `commands/bus/{configuration,tags,alignment}.rs` |
 | BUS FASTQ/BAM input, records and technology definitions | `commands/bus/{input,bam_input,output,technology}.rs` |
@@ -407,8 +407,21 @@ and memory with alternating controls. Use the same executable for all validation
   slots. Preserve requested order, independent copies for duplicate requests, last-record wins
   for duplicate FASTA headers and UTF-8 validation of the complete source. Ordinary quantification
   keeps deferred-name loading; the eager-name view does not allocate a second name table.
+- **Bootstraps:** independent samples use bounded requested workers and a conservative
+  2 GiB budget for parallel worker scratch. Large single samples reuse the ordered incoming
+  component engine; when several samples leave spare workers, their components share the same
+  pool. Tiny or oversized models retain scalar scheduling. Precomputed root seeds and indexed
+  collection preserve sample order. Compact active coordinates retain the full-target uniform
+  prior and final scatter; eligible scalar samples narrow IDs in their existing allocation.
+  Shared kernels preserve contribution order, first convergence stop and final pruning.
+  Mandatory rounds and intermediate component updates omit only unobservable change counts.
+  Exact parallel sampling addresses independent SplitMix chunks and commits them only when
+  every original rejection check succeeds; otherwise it replays serially from the untouched
+  RNG. Serial callers can share an exact inverse-CDF table of at most 64 MiB; larger libraries
+  and multiworker sampling use the bounded search directory. Main TSV writing finishes before
+  bootstrap work starts, keeping worker pools within the request.
 - **Output:** bounded ordered TSV chunks preserve serial bytes. Threaded output overlaps TSV
-  and HDF5. DEFLATE level 6 and chunks of at most 16,384 elements preserve dataset names,
+  and HDF5. DEFLATE level 1 and chunks of at most 16,384 elements preserve dataset names,
   types and shapes; native HDF5 readback independently verifies interoperability.
 
 ## Index construction

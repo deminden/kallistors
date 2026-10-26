@@ -1,5 +1,6 @@
 //! Exact component-local scalar scheduling and convergence witnesses.
 
+use super::super::IncomingEcId;
 use super::{EmComponent, EmWork};
 
 /// Skip only components whose entire alpha vector is bitwise unchanged.
@@ -34,6 +35,74 @@ pub(in crate::quant) fn scalar_step(
     changes
 }
 
+// Static policies share the controller and update loop. Bootstrap must keep
+// literal operand order whenever the current component has exceptional values.
+#[allow(clippy::too_many_arguments)]
+fn component_step<I: IncomingEcId, const STRICT: bool, const MODE: u8>(
+    group: &mut EmComponent,
+    work: &EmWork,
+    ids: &[I],
+    alpha: &mut [f64],
+    next: &mut [f64],
+    products: &mut [f64],
+    finite_weights: bool,
+) -> (usize, bool) {
+    if STRICT {
+        let (changes, identical, finite) = if finite_weights && group.scalar_finite {
+            work.scalar_dense_step_certified::<_, MODE, false>(
+                ids,
+                group.ecs,
+                group.transcripts,
+                alpha,
+                next,
+                products,
+            )
+        } else {
+            work.scalar_dense_step_certified::<_, MODE, true>(
+                ids,
+                group.ecs,
+                group.transcripts,
+                alpha,
+                next,
+                products,
+            )
+        };
+        group.scalar_finite = finite;
+        (changes, identical)
+    } else {
+        work.scalar_dense_step_mode::<MODE>(group.ecs, group.transcripts, alpha, next, products)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::quant) fn bootstrap_tile<I: IncomingEcId>(
+    groups: &mut [EmComponent],
+    work: &EmWork,
+    ids: &[I],
+    active: &[usize],
+    alpha: &mut [f64],
+    next: &mut [f64],
+    products: &mut [f64],
+    first_iter: usize,
+    min_rounds: usize,
+    remaining: usize,
+    finite_weights: bool,
+) -> (usize, usize) {
+    scalar_tile_policy::<_, true>(
+        groups,
+        work,
+        ids,
+        active,
+        alpha,
+        next,
+        products,
+        first_iter,
+        min_rounds,
+        remaining,
+        finite_weights,
+    )
+}
+
 // A nonzero component count proves the global count is nonzero. Advance one
 // witness to its first eligible zero (or the bounded cap), then advance every
 // other independent component to that same boundary. No possible global stop
@@ -50,21 +119,59 @@ pub(in crate::quant) fn scalar_tile(
     min_rounds: usize,
     remaining: usize,
 ) -> (usize, usize) {
+    scalar_tile_policy::<_, false>(
+        groups,
+        work,
+        &work.multi_transcripts,
+        active,
+        alpha,
+        next_alpha,
+        products,
+        first_iter,
+        min_rounds,
+        remaining,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scalar_tile_policy<I: IncomingEcId, const STRICT: bool>(
+    groups: &mut [EmComponent],
+    work: &EmWork,
+    ids: &[I],
+    active: &[usize],
+    alpha: &mut [f64],
+    next_alpha: &mut [f64],
+    products: &mut [f64],
+    first_iter: usize,
+    min_rounds: usize,
+    remaining: usize,
+    finite_weights: bool,
+) -> (usize, usize) {
     debug_assert!(active.iter().copied().eq(0..alpha.len()));
     let cap = remaining.min(64);
     debug_assert!(cap > 0);
     if cap == 1 {
-        return (
-            1,
-            scalar_step(groups, work, active, alpha, next_alpha, products),
-        );
+        let mut changes = 0;
+        for group in groups {
+            if !group.fixed {
+                let (count, identical) = component_step::<_, STRICT, 2>(
+                    group,
+                    work,
+                    ids,
+                    alpha,
+                    next_alpha,
+                    products,
+                    finite_weights,
+                );
+                changes += count;
+                group.last_changed = count != 0;
+                group.fixed = identical;
+            }
+        }
+        return (1, changes);
     }
-    let witness = groups
-        .iter()
-        .enumerate()
-        .filter(|(_, group)| !group.fixed)
-        .max_by_key(|(_, group)| (group.last_changed, group.ecs.end - group.ecs.start))
-        .map(|(index, _)| index);
+    let witness = super::witness(groups);
     let Some(witness) = witness else {
         let taken = (0..cap)
             .position(|offset| first_iter + offset > min_rounds)
@@ -79,28 +186,34 @@ pub(in crate::quant) fn scalar_tile(
         let (count, identical) = if group.fixed {
             (0, true)
         } else if offset + 1 == cap {
-            work.scalar_dense_step_mode::<2>(
-                group.ecs,
-                group.transcripts,
+            component_step::<_, STRICT, 2>(
+                group,
+                work,
+                ids,
                 alpha,
                 next_alpha,
                 products,
+                finite_weights,
             )
         } else if eligible {
-            work.scalar_dense_step_mode::<1>(
-                group.ecs,
-                group.transcripts,
+            component_step::<_, STRICT, 1>(
+                group,
+                work,
+                ids,
                 alpha,
                 next_alpha,
                 products,
+                finite_weights,
             )
         } else {
-            work.scalar_dense_step_mode::<0>(
-                group.ecs,
-                group.transcripts,
+            component_step::<_, STRICT, 0>(
+                group,
+                work,
+                ids,
                 alpha,
                 next_alpha,
                 products,
+                finite_weights,
             )
         };
         group.fixed = identical;
@@ -120,20 +233,24 @@ pub(in crate::quant) fn scalar_tile(
         let mut last_count = 0;
         for offset in 0..taken {
             let (count, identical) = if offset + 1 == taken {
-                work.scalar_dense_step_mode::<2>(
-                    group.ecs,
-                    group.transcripts,
+                component_step::<_, STRICT, 2>(
+                    group,
+                    work,
+                    ids,
                     alpha,
                     next_alpha,
                     products,
+                    finite_weights,
                 )
             } else {
-                work.scalar_dense_step_mode::<0>(
-                    group.ecs,
-                    group.transcripts,
+                component_step::<_, STRICT, 0>(
+                    group,
+                    work,
+                    ids,
                     alpha,
                     next_alpha,
                     products,
+                    finite_weights,
                 )
             };
             last_count = count;

@@ -171,3 +171,67 @@ fn large_hdf5_vectors_keep_bounded_chunks_and_exact_tail_values() {
         vec![500; n]
     );
 }
+
+#[test]
+fn parallel_bootstraps_preserve_original_serial_seed_order_and_bits() {
+    use kallistors::ec::EcList;
+    use kallistors::quant::{
+        EcCountsInput, QuantOptions, bootstrap_quantify, bootstrap_quantify_threaded,
+    };
+    let input = EcCountsInput {
+        ec_list: EcList {
+            classes: vec![
+                vec![0],
+                vec![1],
+                vec![0, 1],
+                vec![1, 2, 3],
+                vec![0, 3],
+                vec![2, 3],
+            ],
+        },
+        counts: vec![2, 3, 11, 37, 41, 0],
+    };
+    let lengths = [1.0, 13.0, 180.0, 512.75];
+    let options = QuantOptions {
+        max_iter: 512,
+        min_rounds: 3,
+        ..Default::default()
+    };
+    for seed in [0, 42, u64::MAX] {
+        let expected = bootstrap_quantify(&input, &lengths, 7, seed, options).unwrap();
+        for workers in [1, 2, 3, 8] {
+            let actual =
+                bootstrap_quantify_threaded(&input, &lengths, 7, seed, options, workers).unwrap();
+            assert_eq!(actual.len(), expected.len());
+            for (actual, expected) in actual.iter().zip(&expected) {
+                for (a, b) in [
+                    (&actual.est_counts, &expected.est_counts),
+                    (&actual.eff_lengths, &expected.eff_lengths),
+                    (&actual.tpm, &expected.tpm),
+                ] {
+                    assert_eq!(
+                        a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        b.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        bootstrap_quantify_threaded(&input, &lengths, 0, 42, options, 8)
+            .unwrap()
+            .is_empty()
+    );
+    let expected = bootstrap_quantify(&input, &lengths, 1, 42, options).unwrap();
+    let actual = bootstrap_quantify_threaded(&input, &lengths, 1, 42, options, 8).unwrap();
+    assert_eq!(actual[0].est_counts, expected[0].est_counts);
+    let invalid = EcCountsInput {
+        ec_list: EcList {
+            classes: vec![vec![0]],
+        },
+        counts: vec![],
+    };
+    for samples in [0, 1, 7] {
+        assert!(bootstrap_quantify_threaded(&invalid, &lengths, samples, 42, options, 8).is_err());
+    }
+}
