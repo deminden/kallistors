@@ -3,8 +3,13 @@ mod candidate_cache;
 pub(crate) use candidate_cache::CachedBucket;
 mod decoding;
 mod ec_storage;
+mod positional_arena;
+mod positional_parallel;
+use positional_arena::{EcBlocksBuilder, OwnedEcBlocks};
 mod encoded;
+mod large_one_pass;
 mod loader;
+mod loader_probe;
 
 use buckets::{
     UnitigBlockState, advance_unitig_state, build_kmer_pos_index, populate_kmer_minimizer_counts,
@@ -135,7 +140,7 @@ impl BifrostIndex {
         crate::index::scratch_pages::retire(self.unitigs);
         crate::index::scratch_pages::retire(self.km_unitigs);
         crate::index::scratch_pages::retire(self.h_kmers);
-        crate::index::scratch_pages::retire(self.flat_ec.owned_ec_blocks);
+        self.flat_ec.owned_ec_blocks.retire();
     }
 
     /// Number of ordinary graph nodes, independent of decoded sequence storage.

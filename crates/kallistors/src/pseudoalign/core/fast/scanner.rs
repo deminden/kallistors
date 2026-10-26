@@ -65,6 +65,7 @@ fn ec_for_read_bifrost_fast_with_cache_cached<
     let online_intersection = &mut OnlineIntersection {
         initial: None,
         owned: &mut scratch.online_intersection,
+        pairs: scratch.pairs.as_deref_mut(),
     };
     let mut has_online_intersection = false;
     let mut last_online_block = None;

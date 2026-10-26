@@ -22,6 +22,10 @@
 
 ### Speed and memory
 
+- Accelerate large-reference loading with batched exact lookups, compact fingerprint and
+  annotation storage, and bounded ordered parallel positional decoding. Reuse complete
+  immutable EC-pair intersections within mapping invocations, retaining exact multiset
+  semantics, serial fallbacks, index compatibility and worker limits.
 - Accelerate single-cDNA BUS counting with incremental exact minimizer hashes,
   bounded conservative candidate directories, compact rank words and inline read-cache keys.
   Preserve ordered verification and rescue, complete cache-key checks and index serialization.

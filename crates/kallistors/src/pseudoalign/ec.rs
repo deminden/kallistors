@@ -135,7 +135,7 @@ pub(crate) fn intersect_sorted_in_place(a: &mut Vec<u32>, b: &[u32]) {
         return;
     }
     let mut written = 0;
-    if b.len() / a.len() >= 16 {
+    if a.len() <= b.len() / 16 {
         let mut cursor = 0;
         for i in 0..a.len() {
             let value = a[i];
@@ -146,7 +146,7 @@ pub(crate) fn intersect_sorted_in_place(a: &mut Vec<u32>, b: &[u32]) {
                 cursor += 1;
             }
         }
-    } else if a.len() / b.len() >= 16 {
+    } else if b.len() <= a.len() / 16 {
         let mut cursor = 0;
         for &value in b {
             cursor += a[cursor..].partition_point(|&candidate| candidate < value);
@@ -158,9 +158,29 @@ pub(crate) fn intersect_sorted_in_place(a: &mut Vec<u32>, b: &[u32]) {
         }
     } else {
         let (mut i, mut j) = (0, 0);
+        let common = a.len().min(b.len());
+        if common >= 32 {
+            // Four position-wise equal values are exactly the next four
+            // multiset matches. Their output already occupies this prefix;
+            // leave it untouched, then resume the original merge at the first
+            // unequal block. Complete equality was handled above as before.
+            while common - i >= 4 && a[i..i + 4] == b[i..i + 4] {
+                i += 4;
+            }
+            j = i;
+            written = i;
+        }
         while i < a.len() && j < b.len() {
             if a[i] == b[j] {
-                a[written] = a[i];
+                let value = a[i];
+                // SAFETY: written=i at loop entry (including a preserved prefix). An equal pair increments
+                // both; only advancing i can increase their gap. Therefore
+                // written<=i<a.len() throughout this branch. No allocation
+                // or truncation occurs in the loop, and value is read before
+                // the mutable slot borrow, including the written==i case.
+                unsafe {
+                    *a.get_unchecked_mut(written) = value;
+                }
                 written += 1;
                 i += 1;
                 j += 1;
@@ -359,39 +379,62 @@ mod rolling_read_tests {
 
     #[test]
     fn sorted_intersection_preserves_multisets_and_reused_output() {
+        fn check(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
+            // Independent multiplicity oracle; shares no cursor, write
+            // frontier, binary/galloping search or vector comparison code.
+            let mut remaining = std::collections::BTreeMap::<u32, usize>::new();
+            for &value in b {
+                *remaining.entry(value).or_default() += 1;
+            }
+            let mut expected = Vec::new();
+            for &value in a {
+                if let Some(count) = remaining.get_mut(&value)
+                    && *count > 0
+                {
+                    expected.push(value);
+                    *count -= 1;
+                }
+            }
+            intersect_sorted(a, b, out);
+            assert_eq!(*out, expected);
+            let mut inplace = a.to_vec();
+            intersect_sorted_in_place(&mut inplace, b);
+            assert_eq!(inplace, expected);
+            let mut same = a.to_vec();
+            intersect_sorted_in_place(&mut same, a);
+            assert_eq!(same, a);
+            intersect_sorted(a, a, out);
+            assert_eq!(*out, a);
+        }
         let mut out = vec![u32::MAX; 100];
-        for n in [0, 1, 2, 7, 31, 67, 257] {
-            for m in [0, 1, 2, 7, 31, 67, 257] {
+        // Preserve all existing varied-ratio/duplicate/reused-buffer cases.
+        for n in [0, 1, 2, 7, 15, 16, 17, 31, 67, 257] {
+            for m in [0, 1, 2, 7, 15, 16, 17, 31, 67, 257] {
                 for salt in [0, 1, 17] {
                     let mut a: Vec<_> = (0..n).map(|i| (i * 13 + salt) % 37).collect();
                     let mut b: Vec<_> = (0..m).map(|i| (i * 7 + salt) % 43).collect();
                     a.sort_unstable();
                     b.sort_unstable();
-                    let mut expected = Vec::new();
-                    let mut remaining = std::collections::BTreeMap::<u32, usize>::new();
-                    for &value in &b {
-                        *remaining.entry(value).or_default() += 1;
-                    }
-                    for &value in &a {
-                        if let Some(count) = remaining.get_mut(&value)
-                            && *count > 0
-                        {
-                            expected.push(value);
-                            *count -= 1;
-                        }
-                    }
-                    intersect_sorted(&a, &b, &mut out);
-                    assert_eq!(out, expected, "n={n} m={m} salt={salt}");
-                    let mut inplace = a.clone();
-                    intersect_sorted_in_place(&mut inplace, &b);
-                    assert_eq!(inplace, expected, "in-place n={n} m={m} salt={salt}");
-                    let mut same = a.clone();
-                    intersect_sorted_in_place(&mut same, &a);
-                    assert_eq!(same, a);
-
-                    intersect_sorted(&a, &a, &mut out);
-                    assert_eq!(out, a);
+                    check(&a, &b, &mut out);
                 }
+            }
+        }
+        // Exercise equal prefix/self writes, then compact by one or more
+        // positions across block/tail boundaries, with duplicates and high IDs.
+        for length in [3usize, 4, 5, 15, 16, 17, 31, 32, 33, 63, 64, 65, 257, 4097] {
+            for multiplicity in [1usize, 2, 3] {
+                let a: Vec<_> = (0..length).map(|i| (i / multiplicity) as u32).collect();
+                for removed in [0, 1, length / 2, length - 1] {
+                    let mut b = a.clone();
+                    b.remove(removed);
+                    b.push(u32::MAX);
+                    check(&a, &b, &mut out);
+                    check(&b, &a, &mut out);
+                }
+                let mut b = a.clone();
+                b.extend([u32::MAX - 1, u32::MAX, u32::MAX]);
+                check(&a, &b, &mut out);
+                check(&b, &a, &mut out);
             }
         }
     }

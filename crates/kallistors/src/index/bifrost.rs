@@ -36,6 +36,7 @@ pub struct BooPhf {
     levels: Vec<BooLevel>,
     final_hash: HashMap<[u8; 8], u64>,
     compact_levels: bool,
+    absolute_levels: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -114,9 +115,11 @@ struct BooLevel {
 
 impl BooLevel {
     #[inline(always)]
-    fn rank_for_hash<const COMPACT: bool>(&self, hash: u64) -> Option<u64> {
+    fn rank_for_hash<const COMPACT: bool, const ABSOLUTE: bool>(&self, hash: u64) -> Option<u64> {
         let bucket = self.bucket_for_hash(hash);
-        if COMPACT {
+        if ABSOLUTE {
+            self.bitset.get_rank_absolute(bucket)
+        } else if COMPACT {
             self.bitset.get_rank_compact(bucket)
         } else {
             self.bitset.get_rank(bucket)
@@ -139,6 +142,15 @@ struct RankedBitWord {
     rank: u16,
 }
 
+// Sixteen-byte, naturally aligned words avoid a second dependent base load.
+// Smaller references keep the ten-byte compact representation.
+#[derive(Clone)]
+#[repr(C, align(16))]
+struct AbsoluteRankedBitWord {
+    bits: u64,
+    rank: u64,
+}
+
 #[derive(Clone)]
 struct BitVector {
     _size: u64,
@@ -147,16 +159,24 @@ struct BitVector {
     ranks: Vec<u64>,
     ranked_words: Vec<RankedBitWord>,
     rank_bases: Vec<u32>,
+    absolute_words: Vec<AbsoluteRankedBitWord>,
 }
 
 impl BitVector {
+    #[cfg(test)]
     fn load<R: Read>(reader: &mut R) -> Result<Self> {
+        Self::load_with_layout(reader, false)
+    }
+
+    fn load_with_layout<R: Read>(reader: &mut R, absolute: bool) -> Result<Self> {
         let size = read_u64_le(reader)?;
         let nchar = read_u64_le(reader)?;
         let bit_array = read_u64_array(reader, nchar as usize)?;
         let ranks_len = read_u64_le(reader)? as usize;
         let ranks = read_u64_array(reader, ranks_len)?;
-        let mut ranked_words = Vec::with_capacity(bit_array.len());
+        let mut ranked_words = Vec::with_capacity(if absolute { 0 } else { bit_array.len() });
+        let mut absolute_words = Vec::with_capacity(if absolute { bit_array.len() } else { 0 });
+        let mut completed = 0usize;
         let mut rank_bases = Vec::new();
         'blocks: for (words, &base) in bit_array.chunks(8).zip(&ranks) {
             let mut rank = base;
@@ -165,10 +185,11 @@ impl BitVector {
                     // Very large rank domains retain the independent full-width
                     // bitmap/rank implementation, including its original order.
                     ranked_words = Vec::new();
+                    absolute_words = Vec::new();
                     rank_bases = Vec::new();
                     break 'blocks;
                 };
-                if ranked_words.len().is_multiple_of(1024) {
+                if completed.is_multiple_of(1024) {
                     rank_bases.push(compact_rank);
                 }
                 // A valid block spans at most1023 preceding64-bit words:
@@ -179,15 +200,27 @@ impl BitVector {
                     .and_then(|rank| u16::try_from(rank).ok())
                 else {
                     ranked_words = Vec::new();
+                    absolute_words = Vec::new();
                     rank_bases = Vec::new();
                     break 'blocks;
                 };
-                ranked_words.push(RankedBitWord {
-                    bits,
-                    rank: relative,
-                });
+                if absolute {
+                    absolute_words.push(AbsoluteRankedBitWord {
+                        bits,
+                        rank: u64::from(compact_rank),
+                    });
+                } else {
+                    ranked_words.push(RankedBitWord {
+                        bits,
+                        rank: relative,
+                    });
+                }
+                completed += 1;
                 rank += u64::from(bits.count_ones());
             }
+        }
+        if absolute {
+            rank_bases = Vec::new();
         }
         Ok(Self {
             _size: size,
@@ -196,7 +229,42 @@ impl BitVector {
             ranks,
             ranked_words,
             rank_bases,
+            absolute_words,
         })
+    }
+
+    fn promote_absolute_words(&mut self) {
+        if !self.absolute_words.is_empty() {
+            assert!(self.absolute_words.len() as u64 >= self._size.div_ceil(64));
+            return;
+        }
+        assert!(self.ranked_words.len() as u64 >= self._size.div_ceil(64));
+        self.absolute_words = self
+            .ranked_words
+            .iter()
+            .enumerate()
+            .map(|(index, word)| AbsoluteRankedBitWord {
+                bits: word.bits,
+                rank: u64::from(self.compact_word_rank(index, word)),
+            })
+            .collect();
+        self.ranked_words = Vec::new();
+        self.rank_bases = Vec::new();
+    }
+
+    #[inline(always)]
+    fn get_rank_absolute(&self, pos: u64) -> Option<u64> {
+        let word = &self.absolute_words[(pos >> 6) as usize];
+        let offset = (pos & 63) as u32;
+        if word.bits & (1u64 << offset) == 0 {
+            return None;
+        }
+        let before = if offset == 0 {
+            0
+        } else {
+            (word.bits << (64 - offset)).count_ones()
+        };
+        Some(word.rank + u64::from(before))
     }
 
     #[inline(always)]
@@ -225,6 +293,9 @@ impl BitVector {
 
     #[inline]
     fn get_rank(&self, pos: u64) -> Option<u64> {
+        if !self.absolute_words.is_empty() {
+            return self.get_rank_absolute(pos);
+        }
         if let Some(word) = self.ranked_words.get((pos >> 6) as usize) {
             self.rank_word_at(pos, word)
         } else {
@@ -241,6 +312,9 @@ impl BitVector {
     }
 
     fn get(&self, pos: u64) -> bool {
+        if !self.absolute_words.is_empty() {
+            return (self.absolute_words[(pos >> 6) as usize].bits >> (pos & 63)) & 1 != 0;
+        }
         if self.bit_array.is_empty() && !self.ranked_words.is_empty() {
             return (self.ranked_words[(pos >> 6) as usize].bits >> (pos & 63)) & 1 != 0;
         }
@@ -254,6 +328,16 @@ impl BitVector {
     }
 
     fn rank(&self, pos: u64) -> u64 {
+        if !self.absolute_words.is_empty() {
+            let word = &self.absolute_words[(pos >> 6) as usize];
+            let offset = (pos & 63) as u32;
+            return word.rank
+                + u64::from(if offset == 0 {
+                    0
+                } else {
+                    (word.bits << (64 - offset)).count_ones()
+                });
+        }
         if self.bit_array.is_empty() && !self.ranked_words.is_empty() {
             let word = &self.ranked_words[(pos >> 6) as usize];
             let offset = (pos & 63) as u32;
@@ -280,6 +364,112 @@ impl BitVector {
     }
 }
 
+// Absence is independent of every rank value, including the full-u64 fallback.
+// Avoid materializing a two-word Option for every intermediate loader lane.
+pub(crate) struct BatchLookupResult<const LANES: usize> {
+    ranks: [u64; LANES],
+    found: u64,
+}
+pub(crate) struct BatchLookupIter<const LANES: usize> {
+    ranks: std::array::IntoIter<u64, LANES>,
+    found: u64,
+}
+impl<const LANES: usize> Iterator for BatchLookupIter<LANES> {
+    type Item = Option<u64>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.ranks.next().map(|rank| {
+            let present = self.found & 1 != 0;
+            self.found >>= 1;
+            present.then_some(rank)
+        })
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.ranks.size_hint()
+    }
+}
+impl<const LANES: usize> ExactSizeIterator for BatchLookupIter<LANES> {}
+impl<const LANES: usize> IntoIterator for BatchLookupResult<LANES> {
+    type Item = Option<u64>;
+    type IntoIter = BatchLookupIter<LANES>;
+    fn into_iter(self) -> Self::IntoIter {
+        BatchLookupIter {
+            ranks: self.ranks.into_iter(),
+            found: self.found,
+        }
+    }
+}
+impl<const LANES: usize> BatchLookupResult<LANES> {
+    // Borrowed found lanes retain original order and every full-u64 rank.
+    // No sentinel rank value represents absence; only the found mask does.
+    #[inline]
+    pub(crate) fn found_ranks(&self) -> impl Iterator<Item = u64> + '_ {
+        let mut found = self.found;
+        std::iter::from_fn(move || {
+            if found == 0 {
+                return None;
+            }
+            let lane = found.trailing_zeros() as usize;
+            found &= found - 1;
+            Some(self.ranks[lane])
+        })
+    }
+}
+
+#[cfg(test)]
+impl<const LANES: usize> BatchLookupResult<LANES> {
+    fn into_options(self) -> [Option<u64>; LANES] {
+        std::array::from_fn(|lane| (self.found & (1u64 << lane) != 0).then_some(self.ranks[lane]))
+    }
+}
+
+// Keep absent lanes explicit: every possible eight-byte key remains valid.
+pub(crate) struct MphfBatchKeys<const LANES: usize> {
+    words: [u64; LANES],
+    present: u64,
+}
+impl<const LANES: usize> Default for MphfBatchKeys<LANES> {
+    fn default() -> Self {
+        assert!(LANES <= 64);
+        Self {
+            words: [0; LANES],
+            present: 0,
+        }
+    }
+}
+impl<const LANES: usize> MphfBatchKeys<LANES> {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+    pub(crate) fn set(&mut self, lane: usize, key: Option<[u8; 8]>) {
+        assert!(lane < LANES);
+        if let Some(key) = key {
+            self.words[lane] = u64::from_le_bytes(key);
+            self.present |= 1u64 << lane;
+        } else {
+            self.present &= !(1u64 << lane);
+        }
+    }
+    pub(crate) fn clear(&mut self) {
+        self.present = 0;
+    }
+    pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = Option<[u8; 8]>> + '_ {
+        self.words
+            .iter()
+            .enumerate()
+            .map(|(lane, word)| (self.present & (1u64 << lane) != 0).then_some(word.to_le_bytes()))
+    }
+}
+#[cfg(test)]
+impl<const LANES: usize> From<&[Option<[u8; 8]>; LANES]> for MphfBatchKeys<LANES> {
+    fn from(keys: &[Option<[u8; 8]>; LANES]) -> Self {
+        let mut batch = Self::new();
+        for (lane, key) in keys.iter().copied().enumerate() {
+            batch.set(lane, key);
+        }
+        batch
+    }
+}
+
 impl BooPhf {
     // Compact words and their small block bases retain the complete bitmap/rank.
     // Wider or incomplete tables retain their original full-width storage.
@@ -289,13 +479,17 @@ impl BooPhf {
             super::scratch_pages::retire(level.bitset.ranks);
             super::scratch_pages::retire(level.bitset.ranked_words);
             super::scratch_pages::retire(level.bitset.rank_bases);
+            super::scratch_pages::retire(level.bitset.absolute_words);
         }
     }
 
     pub(crate) fn release_redundant_rank_storage(&mut self) {
         for level in &mut self.levels {
             let bits = &mut level.bitset;
-            if bits.ranked_words.len() == bits._nchar as usize && !bits.ranked_words.is_empty() {
+            if (bits.ranked_words.len() == bits._nchar as usize && !bits.ranked_words.is_empty())
+                || (bits.absolute_words.len() as u64 >= bits._size.div_ceil(64)
+                    && !bits.absolute_words.is_empty())
+            {
                 bits.bit_array = Vec::new();
                 bits.ranks = Vec::new();
             }
@@ -307,8 +501,9 @@ impl BooPhf {
         let lastbitsetrank = read_u64_le(reader)?;
         let nelem = read_u64_le(reader)?;
         let mut levels = Vec::with_capacity(nb_levels as usize);
-        for _ in 0..nb_levels {
-            let bitset = BitVector::load(reader)?;
+        for level in 0..nb_levels {
+            let prefer_absolute = nelem >= (1 << 28) && level < nb_levels.saturating_sub(1);
+            let bitset = BitVector::load_with_layout(reader, prefer_absolute)?;
             let hash_domain = bitset.domain();
             levels.push(BooLevel {
                 bitset,
@@ -328,8 +523,19 @@ impl BooPhf {
             .take(nb_levels.saturating_sub(1).max(0) as usize)
             .all(|level| {
                 level.hash_domain != 0
-                    && level.bitset.ranked_words.len() as u64 >= level.hash_domain.div_ceil(64)
+                    && (level.bitset.ranked_words.len() as u64 >= level.hash_domain.div_ceil(64)
+                        || level.bitset.absolute_words.len() as u64
+                            >= level.hash_domain.div_ceil(64))
             });
+        let absolute_levels = nelem >= (1 << 28) && compact_levels;
+        if absolute_levels {
+            for level in levels
+                .iter_mut()
+                .take(nb_levels.saturating_sub(1).max(0) as usize)
+            {
+                level.bitset.promote_absolute_words();
+            }
+        }
         let phf = Self {
             _gamma: gamma,
             nb_levels,
@@ -338,20 +544,23 @@ impl BooPhf {
             levels,
             final_hash,
             compact_levels,
+            absolute_levels,
         };
         Ok(phf)
     }
 
     #[inline]
     pub fn lookup(&self, key: &[u8; 8]) -> Option<u64> {
-        if self.compact_levels {
-            self.lookup_impl::<true>(key)
+        if self.absolute_levels {
+            self.lookup_impl::<true, true>(key)
+        } else if self.compact_levels {
+            self.lookup_impl::<true, false>(key)
         } else {
-            self.lookup_impl::<false>(key)
+            self.lookup_impl::<false, false>(key)
         }
     }
     #[inline(never)]
-    fn lookup_impl<const COMPACT: bool>(&self, key: &[u8; 8]) -> Option<u64> {
+    fn lookup_impl<const COMPACT: bool, const ABSOLUTE: bool>(&self, key: &[u8; 8]) -> Option<u64> {
         let base_hash = minimizer_hash(key, 0);
         let mut s0 = base_hash ^ 0xAAAAAAAA55555555;
         let mut s1 = base_hash ^ 0x33333333CCCCCCCC;
@@ -359,17 +568,19 @@ impl BooPhf {
         let mut levels = self.levels.iter().take(max_level);
         // The first two seeds do not depend on the xorshift recurrence.
         if let Some(level) = levels.next()
-            && let Some(rank) = level.rank_for_hash::<COMPACT>(s0)
+            && let Some(rank) = level.rank_for_hash::<COMPACT, ABSOLUTE>(s0)
         {
             return Some(rank);
         }
         if let Some(level) = levels.next()
-            && let Some(rank) = level.rank_for_hash::<COMPACT>(s1)
+            && let Some(rank) = level.rank_for_hash::<COMPACT, ABSOLUTE>(s1)
         {
             return Some(rank);
         }
         for level in levels {
-            if let Some(rank) = level.rank_for_hash::<COMPACT>(xorshift_next(&mut s0, &mut s1)) {
+            if let Some(rank) =
+                level.rank_for_hash::<COMPACT, ABSOLUTE>(xorshift_next(&mut s0, &mut s1))
+            {
                 return Some(rank);
             }
         }
@@ -384,58 +595,126 @@ impl BooPhf {
     // Independent loader probes can advance through one MPHF level together,
     // exposing unrelated rank-table loads without changing any hash or rank.
     // Missing/tail lanes never inspect the MPHF, and output order is unchanged.
-    pub(crate) fn lookup_batch8(&self, keys: &[Option<[u8; 8]>; 8]) -> [Option<u64>; 8] {
-        let mut result = [None; 8];
-        let mut first = [0; 8];
-        let mut second = [0; 8];
-        let mut pending = 0u8;
-        for (lane, key) in keys.iter().enumerate() {
-            if let Some(key) = key {
-                let base = minimizer_hash(key, 0);
+    pub(crate) fn lookup_batch<const LANES: usize>(
+        &self,
+        keys: &MphfBatchKeys<LANES>,
+    ) -> BatchLookupResult<LANES> {
+        if self.absolute_levels {
+            self.lookup_batch_impl::<LANES, true>(keys)
+        } else {
+            self.lookup_batch_impl::<LANES, false>(keys)
+        }
+    }
+
+    fn lookup_batch_impl<const LANES: usize, const ABSOLUTE: bool>(
+        &self,
+        keys: &MphfBatchKeys<LANES>,
+    ) -> BatchLookupResult<LANES> {
+        assert!(LANES <= 64);
+        let mut result = [0u64; LANES];
+        let mut found = 0u64;
+        let mut first = [0; LANES];
+        let mut second = [0; LANES];
+        let mut pending = keys.present;
+        if ABSOLUTE && LANES == 64 && pending == u64::MAX {
+            // Complete large-reference batches have no holes. A contiguous
+            // traversal exposes independent exact hashes to the compiler;
+            // sparse, missing and tail lanes retain mask traversal below.
+            for (&word, (first, second)) in keys
+                .words
+                .iter()
+                .zip(first.iter_mut().zip(second.iter_mut()))
+            {
+                let base = minimizer_hash(&word.to_le_bytes(), 0);
+                *first = base ^ 0xAAAAAAAA55555555;
+                *second = base ^ 0x33333333CCCCCCCC;
+            }
+        } else {
+            let mut to_hash = pending;
+            while to_hash != 0 {
+                let lane = to_hash.trailing_zeros() as usize;
+                to_hash &= to_hash - 1;
+                let base = minimizer_hash(&keys.words[lane].to_le_bytes(), 0);
                 first[lane] = base ^ 0xAAAAAAAA55555555;
                 second[lane] = base ^ 0x33333333CCCCCCCC;
-                pending |= 1 << lane;
             }
         }
         let max_level = self.nb_levels.saturating_sub(1).max(0) as usize;
-        let mut buckets = [0; 8];
-        let mut words = [0u64; 8];
-        let mut ranks = [0u32; 8];
+        let mut buckets = [0; LANES];
+        let mut words = [0u64; LANES];
+        let mut ranks = [0u32; LANES];
         for (number, level) in self.levels.iter().take(max_level).enumerate() {
             if pending == 0 {
                 break;
             }
-            let mut loaded = 0u8;
-            // Gather every independent rank word before branching on hits.
-            // Testing each lane immediately would serialize the random loads.
-            for (lane, (bucket, (bits, rank))) in buckets
-                .iter_mut()
-                .zip(words.iter_mut().zip(ranks.iter_mut()))
-                .enumerate()
+            // Resolve arithmetic for every independent lane before the
+            // random rank-word loads. The subsequent gather keeps lane order.
+            if ABSOLUTE
+                && let Some(ReducedDomain {
+                    divisor,
+                    reciprocal,
+                    word_shift: Some(shift),
+                }) = level.reduced_domain
             {
-                if pending & (1 << lane) != 0 {
+                let mut address_lanes = pending;
+                while address_lanes != 0 {
+                    let lane = address_lanes.trailing_zeros() as usize;
+                    address_lanes &= address_lanes - 1;
                     let hash = match number {
                         0 => first[lane],
                         1 => second[lane],
                         _ => xorshift_next(&mut first[lane], &mut second[lane]),
                     };
-                    *bucket = level.bucket_for_hash(hash);
-                    if let Some(word) = level.bitset.ranked_words.get((*bucket >> 6) as usize) {
-                        *bits = word.bits;
-                        *rank = level
-                            .bitset
-                            .compact_word_rank((*bucket >> 6) as usize, word);
-                        loaded |= 1 << lane;
-                    }
+                    buckets[lane] = {
+                        let numerator = hash >> 6;
+                        let quotient = (((u128::from(numerator) * u128::from(reciprocal)) >> 64)
+                            as u64)
+                            >> shift;
+                        ((numerator - quotient * divisor) << 6) | (hash & 63)
+                    };
+                }
+            } else {
+                let mut address_lanes = pending;
+                while address_lanes != 0 {
+                    let lane = address_lanes.trailing_zeros() as usize;
+                    address_lanes &= address_lanes - 1;
+                    let hash = match number {
+                        0 => first[lane],
+                        1 => second[lane],
+                        _ => xorshift_next(&mut first[lane], &mut second[lane]),
+                    };
+                    buckets[lane] = level.bucket_for_hash(hash);
                 }
             }
-            for (lane, (&bucket, (&bits, &base))) in
-                buckets.iter().zip(words.iter().zip(&ranks)).enumerate()
-            {
-                if pending & (1 << lane) == 0 {
-                    continue;
+            let mut loaded = 0u64;
+            // Gather every independent rank word before branching on hits.
+            // Testing each lane immediately would serialize the random loads.
+            let mut to_load = pending;
+            while to_load != 0 {
+                let lane = to_load.trailing_zeros() as usize;
+                to_load &= to_load - 1;
+                let bucket = buckets[lane];
+                if ABSOLUTE {
+                    let word = &level.bitset.absolute_words[(bucket >> 6) as usize];
+                    words[lane] = word.bits;
+                    ranks[lane] = word.rank as u32;
+                } else if let Some(word) = level.bitset.ranked_words.get((bucket >> 6) as usize) {
+                    words[lane] = word.bits;
+                    ranks[lane] = level.bitset.compact_word_rank((bucket >> 6) as usize, word);
+                    loaded |= 1 << lane;
                 }
-                let rank = if loaded & (1 << lane) != 0 {
+            }
+            let mut to_resolve = pending;
+            while to_resolve != 0 {
+                let lane = to_resolve.trailing_zeros() as usize;
+                to_resolve &= to_resolve - 1;
+                let bucket = buckets[lane];
+                let bits = words[lane];
+                let base = ranks[lane];
+                // Absolute promotion proves full hash-domain coverage, so
+                // every active lane was loaded above. Only compact layouts
+                // need the explicit mask and legacy rank fallback.
+                let rank = if ABSOLUTE || loaded & (1 << lane) != 0 {
                     let offset = (bucket & 63) as u32;
                     if bits & (1u64 << offset) == 0 {
                         None
@@ -451,20 +730,26 @@ impl BooPhf {
                     level.bitset.get_rank_fallback(bucket)
                 };
                 if let Some(rank) = rank {
-                    result[lane] = Some(rank);
+                    result[lane] = rank;
+                    found |= 1u64 << lane;
                     pending &= !(1 << lane);
                 }
             }
         }
-        for (lane, (result, key)) in result.iter_mut().zip(keys).enumerate() {
-            if pending & (1 << lane) != 0 {
-                *result = self
-                    .final_hash
-                    .get(key.as_ref().expect("pending query has a key"))
-                    .map(|value| value + self.lastbitsetrank);
+        // Valid loader probes usually resolve before the final hash table.
+        // Absent lanes need neither key materialization nor a table probe.
+        while pending != 0 {
+            let lane = pending.trailing_zeros() as usize;
+            pending &= pending - 1;
+            if let Some(value) = self.final_hash.get(&keys.words[lane].to_le_bytes()) {
+                result[lane] = value + self.lastbitsetrank;
+                found |= 1u64 << lane;
             }
         }
-        result
+        BatchLookupResult {
+            ranks: result,
+            found,
+        }
     }
 
     pub fn debug_lookup(&self, key: &[u8; 8]) -> (Option<u64>, MphfDebugInfo) {

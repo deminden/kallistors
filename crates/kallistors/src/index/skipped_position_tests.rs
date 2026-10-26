@@ -54,6 +54,19 @@ fn direct_array_decode_equals_c_bitmap_set_semantics() {
                 .as_ref(),
             expected.as_slice()
         );
+        assert_eq!(
+            unsafe { deserialize_roaring_to_ecids(&bytes) }
+                .unwrap()
+                .as_ref(),
+            expected.as_slice()
+        );
+        let canonical_len = bytes.len() - 3;
+        assert_eq!(
+            unsafe { deserialize_roaring_to_ecids(&bytes[..canonical_len]) }
+                .unwrap()
+                .as_ref(),
+            expected.as_slice()
+        );
         let positions = deserialize_position_set(&bytes).unwrap();
         match positions {
             PositionSet::Single(value) => assert_eq!(expected, [value]),
@@ -69,6 +82,7 @@ fn direct_array_decode_equals_c_bitmap_set_semantics() {
         assert!(unsafe { deserialize_roaring_to_vec(&bytes) }.is_none());
         assert!(deserialize_position_set(&bytes).is_none());
         assert!(unsafe { deserialize_roaring_to_box(&bytes) }.is_none());
+        assert!(unsafe { deserialize_roaring_to_ecids(&bytes) }.is_none());
     }
 }
 

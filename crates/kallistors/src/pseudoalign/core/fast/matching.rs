@@ -609,9 +609,35 @@ pub(super) fn match_cached_candidates(
     relaxed: bool,
 ) -> std::result::Result<Option<FastKmerMatch>, ()> {
     if diff == 8 && min_forward <= diff && min_reverse <= diff {
+        if let Some(candidates) = bucket.matching_mask_candidates(
+            positions,
+            forward,
+            reverse,
+            allow_forward,
+            allow_reverse,
+        ) {
+            return match_candidate_iterator(
+                index,
+                candidates,
+                diff,
+                min_forward,
+                min_reverse,
+                forward,
+                reverse,
+                allow_forward,
+                allow_reverse,
+                relaxed,
+            );
+        }
         match_candidate_iterator(
             index,
-            bucket.matching_candidates(positions, forward, reverse, allow_forward, allow_reverse),
+            bucket.matching_candidates_lists(
+                positions,
+                forward,
+                reverse,
+                allow_forward,
+                allow_reverse,
+            ),
             diff,
             min_forward,
             min_reverse,

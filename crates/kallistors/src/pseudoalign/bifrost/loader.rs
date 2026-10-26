@@ -40,8 +40,8 @@ pub(super) fn build_bifrost_index_with_positions_threaded_impl(
     let mut unitigs = Vec::with_capacity(if packed_graph { 0 } else { v_unitigs_sz });
     let mut compressed_scratch = Vec::new();
     let mut packed_values = Vec::new();
-    let mut packed_offsets = Vec::new();
-    let mut packed_lengths = Vec::new();
+    let mut packed_offsets = Vec::with_capacity(if packed_graph { v_unitigs_sz } else { 0 });
+    let mut packed_lengths = Vec::with_capacity(if packed_graph { v_unitigs_sz } else { 0 });
     for _ in 0..v_unitigs_sz {
         let len = read_u64_le(&mut reader)? as usize;
         let data_sz = len.div_ceil(4);
@@ -189,13 +189,25 @@ pub(super) fn build_bifrost_index_with_positions_threaded_impl(
     }
     let dlist = if dlist.is_empty() { None } else { Some(dlist) };
 
-    let node_count = read_u64_le(&mut reader)? as usize;
-    let mut ec_blocks = if store_ec_blocks {
-        Vec::with_capacity(node_count)
+    let load_threads = _threads.max(1);
+    let rayon_pool = if load_threads > 1 {
+        Some(
+            ThreadPoolBuilder::new()
+                .num_threads(load_threads)
+                .build()
+                .map_err(|e| Error::InvalidFormat(format!("failed to build rayon pool: {e}")))?,
+        )
     } else {
-        Vec::new()
+        None
     };
+    let node_count = read_u64_le(&mut reader)? as usize;
+    let mut ec_blocks = EcBlocksBuilder::new(if store_ec_blocks { node_count } else { 0 });
     let mut flat_ec = FlatEcIndex::new(if store_ec_blocks { 0 } else { node_count });
+    // Only huge packed native references pay the bounded1MiB load-only hint.
+    // Existing full-format and smaller-reference construction remain unchanged.
+    if packed_graph && !store_ec_blocks && hmap_min_unitigs_sz >= (1 << 28) {
+        flat_ec.ec_intern_cache = vec![0..0; 1 << 16];
+    }
     let mut node_buf = Vec::new();
     let abundant_base = v_unitigs_sz + km_unitigs_sz;
     if node_count != abundant_base + h_kmers_ccov_sz {
@@ -204,7 +216,25 @@ pub(super) fn build_bifrost_index_with_positions_threaded_impl(
         ));
     }
     let mut node_kmer = vec![0; k];
-    for node_row in 0..node_count {
+    let prefix = if packed_graph
+        && store_ec_blocks
+        && load_positional_info
+        && node_count >= (1 << 20)
+        && abundant_base != 0
+        && let Some(pool) = rayon_pool.as_ref()
+    {
+        super::positional_parallel::read_prefix(
+            &mut reader,
+            abundant_base,
+            k,
+            pool,
+            &mut ec_blocks,
+        )?;
+        abundant_base
+    } else {
+        0
+    };
+    for node_row in prefix..node_count {
         if node_row < abundant_base {
             // Vector-backed graph entries retain their serialized order.
             reader.seek_relative(k as i64)?;
@@ -236,34 +266,19 @@ pub(super) fn build_bifrost_index_with_positions_threaded_impl(
             flat_ec.push_buffered_node(&mut reader, node_size, &mut node_buf)?;
             continue;
         }
-        node_buf.resize(node_size, 0);
-        reader.read_exact(&mut node_buf)?;
-        let mut cur = std::io::Cursor::new(node_buf.as_slice());
-        let _node_id = read_u32_le(&mut cur)?;
-        let blocks = if load_positional_info {
-            crate::index::read_block_array_blocks_with_positions(&mut cur)?
-        } else {
-            read_block_array_blocks(&mut cur)?
-        };
         if store_ec_blocks {
-            ec_blocks.push(blocks.into_boxed_slice());
+            with_buffered_node(&mut reader, node_size, &mut node_buf, |bytes| {
+                ec_blocks.append_payload(bytes, load_positional_info)
+            })?;
         } else {
+            let blocks =
+                read_buffered_blocks(&mut reader, node_size, &mut node_buf, load_positional_info)?;
             flat_ec.push_unitig_blocks(&blocks);
         }
     }
-    flat_ec.owned_ec_blocks = ec_blocks;
+    flat_ec.owned_ec_blocks = ec_blocks.finish();
+    crate::index::scratch_pages::retire(std::mem::take(&mut flat_ec.ec_intern_cache));
     crate::index::scratch_pages::retire(node_buf);
-    let load_threads = _threads.max(1);
-    let rayon_pool = if load_threads > 1 {
-        Some(
-            ThreadPoolBuilder::new()
-                .num_threads(load_threads)
-                .build()
-                .map_err(|e| Error::InvalidFormat(format!("failed to build rayon pool: {e}")))?,
-        )
-    } else {
-        None
-    };
     let encoded_unitigs = if let Some(unitig_bases) = packed_bases {
         EncodedUnitigs {
             unitig_bases,
@@ -285,6 +300,7 @@ pub(super) fn build_bifrost_index_with_positions_threaded_impl(
         SelectiveFallbackKmerIndex::build(v_unitigs_sz, &km_unitigs, &h_kmers)
     };
     crate::index::scratch_pages::retire(packed_h_words);
+    drop(_graph_timing);
     let use_one_pass = packed_graph
         && rayon_pool.as_ref().is_some_and(|pool| {
             one_pass::eligible(
@@ -300,8 +316,49 @@ pub(super) fn build_bifrost_index_with_positions_threaded_impl(
                 special_minz.len(),
             )
         });
-    let (minz_positions, minz_fingerprints) = if use_one_pass {
-        drop(_graph_timing);
+    // Keep the existing serial fallback and small-reference dispatch intact.
+    // Only the structurally eligible huge-reference attempt needs a one-worker
+    // executor; no additional workers are used for a one-thread request.
+    let serial_large_pool = if packed_graph && load_threads == 1 && hmap_min_unitigs_sz >= (1 << 28)
+    {
+        ThreadPoolBuilder::new().num_threads(1).build().ok()
+    } else {
+        None
+    };
+    let large = if packed_graph && !use_one_pass {
+        if let Some(pool) = rayon_pool.as_ref().or(serial_large_pool.as_ref()) {
+            let ctx = one_pass::Context {
+                encoded: &encoded_unitigs,
+                mphf: &mphf,
+                pool,
+                buckets: hmap_min_unitigs_sz,
+                k,
+            };
+            let eligible = {
+                let _selection = timing::scoped(Stage::MinimizerCountPass);
+                large_one_pass::eligible(&ctx, &bmp_unitigs, &bmp_km, special_minz.len())
+            };
+            if eligible {
+                large_one_pass::try_build(ctx, &bmp_unitigs[0])
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let (minz_positions, minz_fingerprints) = if let Some(result) = large {
+        for bitmap in bmp_unitigs {
+            bitmap.retire();
+        }
+        for bitmap in bmp_km {
+            bitmap.retire();
+        }
+        crate::index::scratch_pages::retire(special_minz);
+        result
+    } else if use_one_pass {
         one_pass::build(
             one_pass::Context {
                 encoded: &encoded_unitigs,
@@ -315,10 +372,9 @@ pub(super) fn build_bifrost_index_with_positions_threaded_impl(
             special_minz,
         )
     } else {
+        let _count_timing = timing::scoped(Stage::MinimizerCountPass);
         let mut minz_counts = Vec::with_capacity(hmap_min_unitigs_sz + 1);
         minz_counts.resize(hmap_min_unitigs_sz, 0);
-        drop(_graph_timing);
-        let _count_timing = timing::scoped(Stage::MinimizerCountPass);
         let mut unitig_bucket_cache = (bmp_unitigs.len() == 1
             && hmap_min_unitigs_sz < u32::MAX as usize
             && (packed_graph || (!store_ec_blocks && !load_positional_info)))
@@ -482,4 +538,119 @@ pub(super) fn build_bifrost_index_with_positions_threaded_impl(
         shade_sequences: onlist.shade_sequences,
         use_shade: onlist.use_shade,
     })
+}
+
+// Own only decoded blocks. Payloads that already fit in the input buffer need
+// no intermediate copy; boundary-spanning nodes retain the existing scratch.
+pub(super) fn with_buffered_node<R: BufRead, T>(
+    reader: &mut R,
+    size: usize,
+    scratch: &mut Vec<u8>,
+    parse: impl FnOnce(&[u8]) -> Result<T>,
+) -> Result<T> {
+    let available = reader.fill_buf()?;
+    if available.len() >= size {
+        let result = parse(&available[..size]);
+        reader.consume(size);
+        result
+    } else {
+        scratch.resize(size, 0);
+        reader.read_exact(scratch)?;
+        parse(scratch)
+    }
+}
+
+fn read_buffered_blocks<R: BufRead>(
+    reader: &mut R,
+    size: usize,
+    scratch: &mut Vec<u8>,
+    positional: bool,
+) -> Result<Vec<crate::index::EcBlock>> {
+    with_buffered_node(reader, size, scratch, |bytes| {
+        let mut cursor = std::io::Cursor::new(bytes);
+        let _node_id = read_u32_le(&mut cursor)?;
+        if positional {
+            crate::index::read_block_array_blocks_with_positions(&mut cursor)
+        } else {
+            read_block_array_blocks(&mut cursor)
+        }
+    })
+}
+
+#[cfg(test)]
+mod buffered_block_tests {
+    use super::*;
+
+    #[test]
+    fn buffered_positional_nodes_preserve_contents_boundaries_and_errors() {
+        let bitmap = |words: &[u32]| {
+            let mut bytes = vec![1];
+            bytes.extend_from_slice(&(words.len() as u32).to_le_bytes());
+            for word in words {
+                bytes.extend_from_slice(&word.to_le_bytes());
+            }
+            bytes
+        };
+        let ids = bitmap(&[1, 7]);
+        let mut node = 9u32.to_le_bytes().to_vec();
+        node.push(1);
+        node.extend_from_slice(&2u32.to_le_bytes());
+        node.extend_from_slice(&31u32.to_le_bytes());
+        node.extend_from_slice(&(ids.len() as u64).to_le_bytes());
+        node.extend_from_slice(&ids);
+        node.extend_from_slice(&2u64.to_le_bytes());
+        for values in [&[0x8000_0003][..], &[4, 9][..]] {
+            let positions = bitmap(values);
+            node.extend_from_slice(&(positions.len() as u64).to_le_bytes());
+            node.extend_from_slice(&positions);
+        }
+        for positional in [false, true] {
+            for capacity in [1, 7, 17, 1024] {
+                let mut payload = node.clone();
+                payload.push(0x5a);
+                let mut reader = BufReader::with_capacity(capacity, std::io::Cursor::new(payload));
+                let mut scratch = Vec::new();
+                let blocks =
+                    read_buffered_blocks(&mut reader, node.len(), &mut scratch, positional)
+                        .unwrap();
+                assert_eq!(blocks.len(), 1);
+                assert_eq!((blocks[0].lb, blocks[0].ub), (2, 31));
+                assert_eq!(&*blocks[0].ec, &[1, 7]);
+                assert_eq!(blocks[0].positions.is_some(), positional);
+                if let Some(positions) = &blocks[0].positions {
+                    let actual: Vec<Vec<u32>> = positions
+                        .iter()
+                        .map(|set| match set {
+                            crate::index::PositionSetRef::Single(word) => vec![word],
+                            crate::index::PositionSetRef::Many(words) => words.to_vec(),
+                        })
+                        .collect();
+                    assert_eq!(actual, vec![vec![0x8000_0003], vec![4, 9]]);
+                }
+                let mut next = [0];
+                reader.read_exact(&mut next).unwrap();
+                assert_eq!(next, [0x5a]);
+                assert_eq!(scratch.is_empty(), capacity >= node.len());
+            }
+            for cut in 0..node.len() {
+                for capacity in [7, 1024] {
+                    let mut reader =
+                        BufReader::with_capacity(capacity, std::io::Cursor::new(&node[..cut]));
+                    assert!(
+                        read_buffered_blocks(&mut reader, node.len(), &mut Vec::new(), positional)
+                            .is_err()
+                    );
+                }
+            }
+            for capacity in [1, 1024] {
+                let mut invalid = 9u32.to_le_bytes().to_vec();
+                invalid.extend_from_slice(&[3, 0x5a]);
+                let mut reader = BufReader::with_capacity(capacity, std::io::Cursor::new(invalid));
+                assert!(read_buffered_blocks(&mut reader, 5, &mut Vec::new(), positional).is_err());
+                let mut next = [0];
+                reader.read_exact(&mut next).unwrap();
+                assert_eq!(next, [0x5a]);
+            }
+        }
+    }
 }

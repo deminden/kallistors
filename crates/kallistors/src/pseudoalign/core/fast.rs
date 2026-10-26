@@ -1,4 +1,7 @@
 mod matching;
+mod pair_cache;
+use pair_cache::PairData;
+pub(crate) use pair_cache::ScopedEcPairs;
 mod rescue;
 mod scanner;
 
@@ -32,6 +35,7 @@ use super::runtime::{
 struct OnlineIntersection<'index, 'scratch> {
     initial: Option<&'index [u32]>,
     owned: &'scratch mut Vec<u32>,
+    pairs: Option<&'scratch mut PairData>,
 }
 impl std::ops::Deref for OnlineIntersection<'_, '_> {
     type Target = [u32];
@@ -45,8 +49,28 @@ impl<'index> OnlineIntersection<'index, '_> {
     }
     #[inline(always)]
     fn intersect(&mut self, ec: &'index [u32]) {
+        let initial = self.initial;
+        let key = self.pairs.as_ref().and_then(|_| {
+            self.owned
+                .is_empty()
+                .then_some(initial)
+                .flatten()
+                .and_then(|a| pair_cache::Key::eligible(a, ec))
+        });
+        if let (Some(key), Some(initial), Some(pairs)) = (key, initial, self.pairs.as_deref())
+            && pairs.apply(key, initial, ec, &mut self.initial, self.owned)
+        {
+            return;
+        }
+        self.intersect_original(ec);
+        if let (Some(key), Some(initial), Some(pairs)) = (key, initial, self.pairs.as_deref_mut()) {
+            pairs.remember(key, initial, ec, self.initial, self.owned);
+        }
+    }
+    #[inline(always)]
+    fn intersect_original(&mut self, ec: &'index [u32]) {
         if let Some(initial) = self.initial {
-            if initial == ec {
+            if std::ptr::eq(initial, ec) || initial == ec {
                 return;
             }
             // Nonoverlapping transcript ranges prove rejection before a copy.
@@ -89,8 +113,14 @@ fn sorted_subset(shorter: &[u32], longer: &[u32]) -> bool {
         return false;
     }
     let mut cursor = 0;
-    if longer.len() / shorter.len() >= 16 {
+    // Positive shorter length is established above. This is exactly
+    // floor(longer/shorter)>=16, using a constant shift instead of division.
+    if shorter.len() <= longer.len() / 16 {
         for &value in shorter {
+            if longer.get(cursor) == Some(&value) {
+                cursor += 1;
+                continue;
+            }
             let remaining = &longer[cursor..];
             let mut upper = 1usize;
             while upper < remaining.len() && remaining[upper] < value {
@@ -104,6 +134,36 @@ fn sorted_subset(shorter: &[u32], longer: &[u32]) -> bool {
                 return false;
             }
             cursor += 1;
+        }
+        return true;
+    }
+    // Near-sized ECs often retain long identical runs around an internal
+    // insertion. Consume both equal blocks once; a mismatch resumes the same
+    // ordered scalar membership traversal, including duplicate multiplicity.
+    // Sparse galloping above and the dense general fallback below are intact.
+    if shorter.len() >= 8
+        && shorter.len() <= longer.len()
+        && longer.len() - shorter.len() < shorter.len()
+    {
+        let (mut remaining, mut available) = (shorter, longer);
+        while !remaining.is_empty() {
+            if remaining.len() >= 4 && available.len() >= 4 && remaining[..4] == available[..4] {
+                remaining = &remaining[4..];
+                available = &available[4..];
+                continue;
+            }
+            let value = remaining[0];
+            while available
+                .first()
+                .is_some_and(|&candidate| candidate < value)
+            {
+                available = &available[1..];
+            }
+            if available.first() != Some(&value) {
+                return false;
+            }
+            remaining = &remaining[1..];
+            available = &available[1..];
         }
         return true;
     }
@@ -124,6 +184,7 @@ pub(super) struct FastScannerScratch {
     min_candidates: Vec<([u8; 8], usize)>,
     jump_candidates: Vec<([u8; 8], usize)>,
     online_intersection: Vec<u32>,
+    pairs: Option<Box<PairData>>,
 }
 
 impl FastScannerScratch {
@@ -205,6 +266,7 @@ pub(crate) fn try_single_counting_batch<'index>(
     batch: &crate::io::PackedSeqBatch,
     strand: Strand,
     options: PseudoalignOptions,
+    pairs: &mut ScopedEcPairs<'index>,
     mut count: impl FnMut(Option<BorrowedReadEc<'index>>),
 ) -> bool {
     if index.k == 0
@@ -217,6 +279,7 @@ pub(crate) fn try_single_counting_batch<'index>(
     super::runtime::ensure_cache_context(index);
     super::runtime::with_mphf_lookup_cache(|cache| {
         let mut scratch = cache.scan_scratch.take().unwrap_or_default();
+        let pair_scope_entered = pairs.enter(index, &mut scratch.pairs);
         for record in batch.records() {
             if record.seq.len() < index.k {
                 count(None);
@@ -233,6 +296,11 @@ pub(crate) fn try_single_counting_batch<'index>(
                 &mut scratch,
             ));
         }
+        if pair_scope_entered {
+            pairs.leave(&mut scratch.pairs);
+        } else {
+            scratch.pairs = None;
+        }
         cache.scan_scratch = Some(scratch);
     });
     true
@@ -241,6 +309,7 @@ pub(crate) fn try_single_counting_batch<'index>(
 // Use the established read scanner with one cache/scratch borrow per ordered
 // batch. Filtering mate one before scanning mate two preserves hard rejection
 // and the existing cache access order. The caller has exhausted sampling.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_paired_counting_batch<'index>(
     index: &'index BifrostIndex,
     left: &crate::io::PackedSeqBatch,
@@ -248,6 +317,7 @@ pub(crate) fn try_paired_counting_batch<'index>(
     range: std::ops::Range<usize>,
     strand: Strand,
     options: PseudoalignOptions,
+    pairs: &mut ScopedEcPairs<'index>,
     count: impl FnMut(Option<BorrowedReadEc<'index>>, Option<BorrowedReadEc<'index>>),
 ) -> bool {
     if index.k == 0
@@ -259,15 +329,18 @@ pub(crate) fn try_paired_counting_batch<'index>(
     }
     super::runtime::ensure_cache_context(index);
     if options.strand_specific.is_some() {
-        paired_counting_batch_with_cache::<true>(index, left, right, range, strand, options, count);
+        paired_counting_batch_with_cache::<true>(
+            index, left, right, range, strand, options, pairs, count,
+        );
     } else {
         paired_counting_batch_with_cache::<false>(
-            index, left, right, range, strand, options, count,
+            index, left, right, range, strand, options, pairs, count,
         );
     }
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paired_counting_batch_with_cache<'index, const PLACEMENT: bool>(
     index: &'index BifrostIndex,
     left: &crate::io::PackedSeqBatch,
@@ -275,10 +348,12 @@ fn paired_counting_batch_with_cache<'index, const PLACEMENT: bool>(
     range: std::ops::Range<usize>,
     strand: Strand,
     options: PseudoalignOptions,
+    pairs: &mut ScopedEcPairs<'index>,
     mut count: impl FnMut(Option<BorrowedReadEc<'index>>, Option<BorrowedReadEc<'index>>),
 ) {
     super::runtime::with_mphf_lookup_cache(|cache| {
         let mut scratch = cache.scan_scratch.take().unwrap_or_default();
+        let pair_scope_entered = pairs.enter(index, &mut scratch.pairs);
         let prefetch = index.k == 31
             && index.g == 23
             && cache.prefetch_match_capacity()
@@ -330,6 +405,11 @@ fn paired_counting_batch_with_cache<'index, const PLACEMENT: bool>(
             });
             count(a, b);
         }
+        if pair_scope_entered {
+            pairs.leave(&mut scratch.pairs);
+        } else {
+            scratch.pairs = None;
+        }
         cache.scan_scratch = Some(scratch);
     });
 }
@@ -370,6 +450,7 @@ mod borrowed_prefix_tests {
         let mut online = OnlineIntersection {
             initial: None,
             owned: &mut scratch,
+            pairs: None,
         };
         online.initialize(&original);
         online.intersect(&same);
@@ -395,6 +476,19 @@ mod borrowed_prefix_tests {
             })
             .collect();
         multisets.extend([(0..256).collect(), vec![15, 15], vec![255], vec![254, 256]]);
+        // Exercise equal blocks before/after internal gaps and scalar tails.
+        // The existing independent intersection oracle also checks ownership.
+        multisets.push((0..64).collect());
+        for removed in [0, 1, 3, 4, 7, 8, 15, 31, 63] {
+            multisets.push((0..64).filter(|&value| value != removed).collect());
+        }
+        let duplicates: Vec<_> = (0..32).flat_map(|value| [value, value]).collect();
+        multisets.push(duplicates.clone());
+        for removed in [1, 7, 31, 62] {
+            let mut values = duplicates.clone();
+            values.remove(removed);
+            multisets.push(values);
+        }
         for left in &multisets {
             for right in &multisets {
                 let mut expected = Vec::new();
@@ -403,12 +497,64 @@ mod borrowed_prefix_tests {
                 let mut intersection = OnlineIntersection {
                     initial: Some(left),
                     owned: &mut scratch,
+                    pairs: None,
                 };
                 intersection.intersect(right);
                 assert_eq!(&*intersection, &expected);
                 if expected == *left || expected == *right {
                     assert!(intersection.initial.is_some());
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod skewed_subset_tests {
+    use super::sorted_subset;
+
+    #[test]
+    fn skewed_subset_matches_independent_multiset_oracle() {
+        for length in [0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65, 255, 256, 257] {
+            let longer: Vec<u32> = (0..length).map(|i| ((i / 2) * 3) as u32).collect();
+            let mut cases = vec![vec![], vec![0], vec![1], vec![u32::MAX], vec![0, 0, 0]];
+            for count in 0..=8 {
+                let count = count.min(length);
+                cases.push(longer[..count].to_vec());
+                cases.push(longer[length - count..].to_vec());
+            }
+            for stride in [15, 16, 17, 32] {
+                cases.push(longer.iter().step_by(stride).copied().take(8).collect());
+            }
+            let missing: Vec<_> = cases
+                .iter()
+                .filter(|case| case.len() >= 3)
+                .map(|case| {
+                    let mut case = case.clone();
+                    let middle = case.len() / 2;
+                    case[middle] += 1;
+                    case.sort_unstable();
+                    case
+                })
+                .collect();
+            cases.extend(missing);
+            for shorter in cases {
+                // Independent multiplicity oracle, with no cursor/gallop or
+                // borrowed subset helper shared with the implementation.
+                let mut remaining = longer.clone();
+                let expected = shorter.iter().all(|value| {
+                    if let Some(at) = remaining.iter().position(|item| item == value) {
+                        remaining.remove(at);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                assert_eq!(
+                    sorted_subset(&shorter, &longer),
+                    expected,
+                    "shorter={shorter:?} longer={longer:?}"
+                );
             }
         }
     }

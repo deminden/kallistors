@@ -1,6 +1,8 @@
 //! Index loading and data structures.
 
 mod binary;
+mod ec_ids;
+use ec_ids::EcIds;
 mod bitmap;
 mod hashing;
 
@@ -473,7 +475,7 @@ pub(crate) fn parse_graph_section<R: Read + Seek>(
 pub(crate) struct EcBlock {
     pub lb: u32,
     pub ub: u32,
-    pub ec: Box<[u32]>,
+    pub ec: EcIds,
     pub positions: Option<PositionSets>,
 }
 
@@ -519,7 +521,7 @@ pub(crate) fn read_block_array_blocks<R: Read>(reader: &mut R) -> Result<Vec<EcB
             Ok(vec![EcBlock {
                 lb,
                 ub,
-                ec: ec.into_boxed_slice(),
+                ec: EcIds::heap(ec.into_boxed_slice()),
                 positions: None,
             }])
         }
@@ -533,7 +535,7 @@ pub(crate) fn read_block_array_blocks<R: Read>(reader: &mut R) -> Result<Vec<EcB
                 ecs.push(EcBlock {
                     lb,
                     ub,
-                    ec: ec.into_boxed_slice(),
+                    ec: EcIds::heap(ec.into_boxed_slice()),
                     positions: None,
                 });
             }
@@ -547,38 +549,38 @@ pub(crate) fn read_block_array_blocks<R: Read>(reader: &mut R) -> Result<Vec<EcB
 pub(crate) fn read_block_array_blocks_with_positions(
     reader: &mut Cursor<&[u8]>,
 ) -> Result<Vec<EcBlock>> {
-    let flag = read_u8(reader)?;
-    match flag {
-        0 => Ok(Vec::new()),
-        1 => {
-            let lb = read_u32_le(reader)?;
-            let ub = read_u32_le(reader)?;
-            let (ec, positions) = read_sparse_vector_with_positions(reader)?;
-            Ok(vec![EcBlock {
-                lb,
-                ub,
-                ec,
-                positions: Some(positions),
-            }])
-        }
-        2 => {
-            let count = read_u64_le(reader)?;
-            let mut ecs = Vec::with_capacity(count as usize);
-            for _ in 0..count {
-                let lb = read_u32_le(reader)?;
-                let ub = read_u32_le(reader)?;
-                let (ec, positions) = read_sparse_vector_with_positions(reader)?;
-                ecs.push(EcBlock {
-                    lb,
-                    ub,
-                    ec,
-                    positions: Some(positions),
-                });
-            }
-            Ok(ecs)
-        }
+    let count = read_positional_block_count(reader)?;
+    let mut blocks = Vec::with_capacity(count as usize);
+    read_positional_blocks_into(reader, count, |block| blocks.push(block))?;
+    Ok(blocks)
+}
+
+pub(crate) fn read_positional_block_count(reader: &mut Cursor<&[u8]>) -> Result<u64> {
+    match read_u8(reader)? {
+        0 => Ok(0),
+        1 => Ok(1),
+        2 => read_u64_le(reader),
         _ => Err(Error::InvalidFormat("invalid block array flag".into())),
     }
+}
+
+pub(crate) fn read_positional_blocks_into(
+    reader: &mut Cursor<&[u8]>,
+    count: u64,
+    mut push: impl FnMut(EcBlock),
+) -> Result<()> {
+    for _ in 0..count {
+        let lb = read_u32_le(reader)?;
+        let ub = read_u32_le(reader)?;
+        let (ec, positions) = read_sparse_vector_with_positions(reader)?;
+        push(EcBlock {
+            lb,
+            ub,
+            ec,
+            positions: Some(positions),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn read_sparse_vector_ec<R: Read>(reader: &mut R) -> Result<Vec<u32>> {
@@ -622,8 +624,8 @@ fn read_bitmap_slice<'a>(reader: &mut Cursor<&'a [u8]>) -> Result<&'a [u8]> {
 
 pub(crate) fn read_sparse_vector_with_positions(
     reader: &mut Cursor<&[u8]>,
-) -> Result<(Box<[u32]>, PositionSets)> {
-    let ids = unsafe { deserialize_roaring_to_box(read_bitmap_slice(reader)?) }
+) -> Result<(EcIds, PositionSets)> {
+    let ids = unsafe { deserialize_roaring_to_ecids(read_bitmap_slice(reader)?) }
         .ok_or_else(|| Error::InvalidFormat("failed to deserialize roaring bitmap".into()))?;
     let v_size = read_u64_le(reader)? as usize;
     if ids.len() == v_size
@@ -726,6 +728,30 @@ unsafe fn deserialize_roaring_to_box(buf: &[u8]) -> Option<Box<[u32]>> {
         _ => {}
     }
     unsafe { deserialize_roaring_to_vec(buf) }.map(Vec::into_boxed_slice)
+}
+
+// Keep native tiny ECs in the same-size inline representation instead of
+// allocating a separate box. Match the existing decoder's complete-prefix,
+// strict-order and trailing-byte policies; every other format retains it.
+unsafe fn deserialize_roaring_to_ecids(buf: &[u8]) -> Option<EcIds> {
+    #[cfg(target_pointer_width = "64")]
+    match buf {
+        [1, 1, 0, 0, 0, a, b, c, d, ..] => {
+            let value = u32::from_le_bytes([*a, *b, *c, *d]);
+            return Some(EcIds::Inline([value, value]));
+        }
+        [1, 2, 0, 0, 0, a, b, c, d, e, f, g, h, ..] => {
+            let first = u32::from_le_bytes([*a, *b, *c, *d]);
+            let second = u32::from_le_bytes([*e, *f, *g, *h]);
+            if first < second {
+                return Some(EcIds::Inline([first, second]));
+            }
+        }
+        _ => {}
+    }
+    // SAFETY: this is the existing bitmap decoder under its unchanged input
+    // contract. Enum conversion adds no unsafe storage or ownership handling.
+    unsafe { deserialize_roaring_to_box(buf) }.map(EcIds::from)
 }
 
 fn node_eof() -> Error {

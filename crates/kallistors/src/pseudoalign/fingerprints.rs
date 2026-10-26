@@ -55,6 +55,28 @@ impl QueryFingerprints {
         result
     }
     #[inline]
+    fn advance(&mut self, last: u16) {
+        #[cfg(target_arch = "aarch64")]
+        {
+            use std::arch::aarch64::*;
+            // SAFETY: both vector memory accesses cover exactly first[0..8].
+            // NEON is baseline on AArch64. The lane after old first[7] is
+            // supplied from a duplicated local scalar, never an overread.
+            unsafe {
+                let prior = vld1q_u16(self.first.as_ptr());
+                let shifted = vextq_u16::<1>(prior, vdupq_n_u16(self.last));
+                vst1q_u16(self.first.as_mut_ptr(), shifted);
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            self.first.copy_within(1..8, 0);
+            self.first[7] = self.last;
+        }
+        self.last = last;
+    }
+
+    #[inline]
     fn contains(&self, fingerprint: u16) -> bool {
         #[cfg(target_arch = "aarch64")]
         {
@@ -90,10 +112,9 @@ impl QueryFingerprintCache {
                 .is_some_and(|previous| previous & OVERLAP == forward >> 2)
             {
                 const MASK: u64 = (1u64 << 46) - 1;
-                self.fingerprints.first.copy_within(1..8, 0);
-                self.fingerprints.first[7] = self.fingerprints.last;
-                self.fingerprints.last =
-                    word_fingerprint((forward & MASK).min((reverse >> 16) & MASK) << 18);
+                self.fingerprints.advance(word_fingerprint(
+                    (forward & MASK).min((reverse >> 16) & MASK) << 18,
+                ));
             } else {
                 self.fingerprints = QueryFingerprints::new(forward, reverse);
             }
@@ -106,6 +127,34 @@ impl QueryFingerprintCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_fingerprint_advance_matches_independent_scalar_lanes() {
+        for base in [0u16, 1, 255, 4094, 4095, u16::MAX - 8] {
+            for prior_last in [0u16, 1, 4095, u16::MAX] {
+                let mut values = QueryFingerprints {
+                    first: std::array::from_fn(|i| base.wrapping_add(i as u16)),
+                    last: prior_last,
+                };
+                for new_last in [0u16, 1, 4095, u16::MAX, 7, 31, 0, 4095, 9, 10] {
+                    let old = values.first;
+                    let expected = [
+                        old[1],
+                        old[2],
+                        old[3],
+                        old[4],
+                        old[5],
+                        old[6],
+                        old[7],
+                        values.last,
+                    ];
+                    values.advance(new_last);
+                    assert_eq!(values.first, expected);
+                    assert_eq!(values.last, new_last);
+                }
+            }
+        }
+    }
 
     #[test]
     fn every_anchor_and_fingerprint_membership_match_independent_oracles() {
@@ -196,10 +245,7 @@ mod tests {
                     (0..<TaggedBucket as rdst::RadixKey>::LEVELS).fold(0u64, |v, level| {
                         v | (u64::from(rdst::RadixKey::get_level(&tagged, level)) << (8 * level))
                     });
-                assert_eq!(
-                    decoded,
-                    (u64::from(bucket) << 16) | u64::from(word_fingerprint(word))
-                );
+                assert_eq!(decoded, u64::from(bucket));
             }
         }
         let words: Vec<_> = (1..10000u64)
@@ -247,9 +293,11 @@ impl BucketCountKey for u32 {
 #[derive(Clone, Copy)]
 pub(crate) struct TaggedBucket(u64);
 impl rdst::RadixKey for TaggedBucket {
-    const LEVELS: usize = 6;
+    // Only bucket identity is required by count grouping. Fingerprint
+    // collisions are checked across the complete group by its owner.
+    const LEVELS: usize = 4;
     fn get_level(&self, level: usize) -> u8 {
-        (self.0 >> (level * 8)) as u8
+        (self.0 >> (16 + level * 8)) as u8
     }
 }
 impl BucketCountKey for TaggedBucket {
@@ -264,8 +312,8 @@ impl BucketCountKey for TaggedBucket {
         self.0 as u16
     }
 }
-// Called by the serial count merger after every parallel chunk has completed.
-// No concurrent fingerprint writes exist during this phase.
+// The caller gives every bucket exactly one updating owner. Other buckets
+// may be merged in parallel; simultaneous updates cannot target this slot.
 pub(crate) fn observe_serial(slot: &AtomicU16, fingerprint: u16) {
     let old = slot.load(Ordering::Relaxed);
     if fingerprint == 0 || fingerprint == DISABLED || (old != 0 && old != fingerprint) {

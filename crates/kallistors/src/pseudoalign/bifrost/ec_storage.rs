@@ -114,11 +114,12 @@ impl FlatEcBlocks {
 }
 
 pub(crate) struct FlatEcIndex {
-    pub(crate) owned_ec_blocks: Vec<Box<[crate::index::EcBlock]>>,
+    pub(crate) owned_ec_blocks: OwnedEcBlocks,
     pub(super) unitig_block_offsets: MinzOffsets,
     pub(super) blocks: FlatEcBlocks,
     pub(super) ec_values: Vec<u32>,
     pub(super) last_ec: std::ops::Range<usize>,
+    pub(super) ec_intern_cache: Vec<std::ops::Range<usize>>,
 }
 
 impl FlatEcIndex {
@@ -127,25 +128,47 @@ impl FlatEcIndex {
         offsets.push(0);
         Self {
             unitig_block_offsets: MinzOffsets::Compact(offsets),
-            owned_ec_blocks: Vec::new(),
+            owned_ec_blocks: OwnedEcBlocks::empty(),
             blocks: FlatEcBlocks::new(),
             ec_values: Vec::new(),
             last_ec: 0..0,
+            ec_intern_cache: Vec::new(),
         }
     }
 
     pub(super) fn finish_ec_block(&mut self, lb: u32, ub: u32, start: usize) {
         let end = self.ec_values.len();
         let previous = self.last_ec.clone();
-        if end - start == previous.len()
-            && self.ec_values[previous.clone()] == self.ec_values[start..end]
-        {
-            self.ec_values.truncate(start);
-            self.blocks.push(lb, ub, previous.start, previous.end);
-        } else {
-            self.last_ec = start..end;
-            self.blocks.push(lb, ub, start, end);
+        let mut same = (end - start == previous.len()
+            && self.ec_values[previous.clone()] == self.ec_values[start..end])
+            .then_some(previous);
+        if same.is_none() && end - start >= 16 && !self.ec_intern_cache.is_empty() {
+            let values = &self.ec_values[start..end];
+            // A bounded hint selects one candidate range. Full value equality,
+            // including duplicate multiplicity, is mandatory before sharing.
+            let signature = (values.len() as u64).wrapping_mul(0x9e3779b97f4a7c15)
+                ^ u64::from(values[0]).wrapping_mul(0xbf58476d1ce4e5b9)
+                ^ u64::from(values[values.len() / 2]).rotate_left(21)
+                ^ u64::from(values[values.len() - 1]).wrapping_mul(0x94d049bb133111eb);
+            let slot =
+                ((signature ^ (signature >> 32)) as usize) & (self.ec_intern_cache.len() - 1);
+            let candidate = self.ec_intern_cache[slot].clone();
+            if candidate.len() == values.len() && self.ec_values[candidate.clone()] == *values {
+                same = Some(candidate);
+            } else {
+                self.ec_intern_cache[slot] = start..end;
+            }
         }
+        let range = if let Some(range) = same {
+            // Only the newly appended tail is removed. Every retained directory
+            // range precedes it; Vec reallocations cannot invalidate offsets.
+            self.ec_values.truncate(start);
+            range
+        } else {
+            start..end
+        };
+        self.blocks.push(lb, ub, range.start, range.end);
+        self.last_ec = range;
     }
 
     pub(super) fn push_buffered_node<R: BufRead>(
@@ -744,6 +767,57 @@ mod large_bucket_tests {
             let mut actual = Vec::new();
             csr.for_each_large_bucket(minimum, |bucket, _| actual.push(bucket));
             assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod nonadjacent_intern_tests {
+    use super::FlatEcIndex;
+    #[test]
+    fn nonadjacent_ec_interning_compares_all_values_and_preserves_every_block() {
+        // One slot forces collisions; a/b also share every sampled hint value.
+        let a: Vec<u32> = (0..64).collect();
+        let mut b = a.clone();
+        b[1] = 0;
+        let inputs = [
+            a.clone(),
+            vec![9],
+            a,
+            b.clone(),
+            vec![9],
+            b,
+            vec![],
+            vec![u32::MAX; 32],
+            vec![0; 32],
+            vec![u32::MAX; 32],
+        ];
+        let mut cached = FlatEcIndex::new(inputs.len());
+        cached.ec_intern_cache = vec![0..0; 1];
+        let mut original = FlatEcIndex::new(inputs.len());
+        for (uid, ec) in inputs.iter().enumerate() {
+            let blocks = [crate::index::EcBlock {
+                lb: uid as u32,
+                ub: uid as u32 + 101,
+                ec: ec.clone().into_boxed_slice().into(),
+                positions: None,
+            }];
+            cached.push_unitig_blocks(&blocks);
+            original.push_unitig_blocks(&blocks);
+        }
+        for (uid, expected) in inputs.iter().enumerate() {
+            assert_eq!(cached.ec(uid, 0), expected);
+            assert_eq!(cached.ec(uid, 0), original.ec(uid, 0));
+            assert_eq!(cached.block_bounds(uid, 0), original.block_bounds(uid, 0));
+        }
+        assert_eq!(cached.ec(0, 0).as_ptr(), cached.ec(2, 0).as_ptr());
+        assert_eq!(cached.ec(3, 0).as_ptr(), cached.ec(5, 0).as_ptr());
+        assert_ne!(cached.ec(0, 0).as_ptr(), cached.ec(3, 0).as_ptr());
+        assert!(cached.ec_values.len() < original.ec_values.len());
+        // Retiring the load-only directory must not affect any runtime view.
+        cached.ec_intern_cache.clear();
+        for (uid, expected) in inputs.iter().enumerate() {
+            assert_eq!(cached.ec(uid, 0), expected);
         }
     }
 }

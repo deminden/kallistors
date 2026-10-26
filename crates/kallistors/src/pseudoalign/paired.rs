@@ -170,8 +170,8 @@ pub fn pseudoalign_paired_bifrost_debug_with_options<R1: ReadSource, R2: ReadSou
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn pseudoalign_paired_bifrost_batch_into(
-    index: &BifrostIndex,
+pub(crate) fn pseudoalign_paired_bifrost_batch_into<'index>(
+    index: &'index BifrostIndex,
     left_batch: &PackedSeqBatch,
     right_batch: &PackedSeqBatch,
     read_range: std::ops::Range<usize>,
@@ -180,6 +180,7 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
     counts: &mut EcCounts,
     ec_map: &mut EcCountMap,
     sampling: Option<&FragmentLengthSampler>,
+    pairs: &mut super::core::ScopedEcPairs<'index>,
 ) -> Result<()> {
     if left_batch.len() != right_batch.len() {
         return Err(Error::InvalidFormat("paired FASTQ length mismatch".into()));
@@ -211,6 +212,7 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
             options,
             counts,
             ec_map,
+            pairs,
         );
         if let Some(sampler) = sampling {
             sampler.submit(0);
@@ -402,8 +404,8 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into(
 // This caller has validated the paired range and exhausted the placement quota.
 // The index stays immutably borrowed while both mate EC views are consumed.
 #[allow(clippy::too_many_arguments)]
-fn count_paired_borrowed_batch(
-    index: &BifrostIndex,
+fn count_paired_borrowed_batch<'index>(
+    index: &'index BifrostIndex,
     left: &PackedSeqBatch,
     right: &PackedSeqBatch,
     range: std::ops::Range<usize>,
@@ -411,6 +413,7 @@ fn count_paired_borrowed_batch(
     options: PseudoalignOptions,
     counts: &mut EcCounts,
     ec_map: &mut EcCountMap,
+    pairs: &mut super::core::ScopedEcPairs<'index>,
 ) {
     let mut merged = Vec::new();
     let mut count = |a: Option<super::BorrowedReadEc<'_>>, b: Option<super::BorrowedReadEc<'_>>| {
@@ -444,6 +447,7 @@ fn count_paired_borrowed_batch(
         range.clone(),
         strand,
         options,
+        pairs,
         &mut count,
     ) {
         return;

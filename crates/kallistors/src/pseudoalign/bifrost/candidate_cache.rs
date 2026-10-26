@@ -63,7 +63,15 @@ impl BifrostIndex {
         if self.k == 31 && self.g == 23 {
             self.encoded_unitigs.unitig_bases.inline_short_words();
         }
-        self.prepare_candidate_cache_threaded(MINIMUM_BUCKET, MAX_BYTES, threads);
+        // Huge nascent references have many more repeated minimizer buckets.
+        // Keep the ordinary ceiling for smaller references; all entries remain
+        // conservative selectors followed by the same exact verifier.
+        let budget = if self.mphf.size() >= (1 << 28) {
+            256 * 1024 * 1024
+        } else {
+            MAX_BYTES
+        };
+        self.prepare_candidate_cache_threaded(MINIMUM_BUCKET, budget, threads);
     }
 
     #[cfg(test)]
@@ -103,6 +111,13 @@ impl BifrostIndex {
             let Some(available) = candidate_available(stored.len(), bytes, budget) else {
                 break;
             };
+            // All remaining candidates have at least `minimum` postings.
+            // This is the exact lower bound checked by the existing builder;
+            // available capacity cannot increase after this point. Finish the
+            // current result batch normally, but never build a futile next one.
+            if available < minimum_candidate_bytes(minimum) {
+                break;
+            }
             let mut end = begin + 1;
             if pool.is_some() {
                 let mut scratch = candidates[begin]
@@ -184,9 +199,7 @@ impl BifrostIndex {
         }
         // Every entry contributes at least one ordered word posting.
         // Avoid construction only when its provable lower bound cannot fit.
-        let minimum_size = positions.len() * std::mem::size_of::<u16>()
-            + std::mem::size_of::<u32>()
-            + std::mem::size_of::<CachedBucket>();
+        let minimum_size = minimum_candidate_bytes(positions.len());
         if minimum_size > available {
             return None;
         }
@@ -271,19 +284,32 @@ impl BifrostIndex {
         if dense && !WordDirectory::dense19_layout(&keys) {
             return None;
         }
+        let masked_tiny = tiny && WordDirectory::tiny_masks_supported(&keys, &ordinals);
         let narrow = !tiny && !dense && WordDirectory::narrow_layout(&keys, positions.len());
-        let directory_bytes = if tiny {
+        let directory_bytes = if masked_tiny {
+            WordDirectory::tiny_mask_payload_bytes(&keys)
+        } else if tiny {
             WordDirectory::tiny_payload_bytes(&keys)
         } else {
             WordDirectory::payload_bytes(&keys, narrow || dense, dense || !narrow)
         };
         let size = directory_bytes
-            + ordinals.len() * std::mem::size_of::<u16>()
+            + if masked_tiny {
+                0
+            } else {
+                ordinals.len() * std::mem::size_of::<u16>()
+            }
             + std::mem::size_of::<CachedBucket>();
         if size > available || ordinals.len() as u64 > OFFSET_MASK {
             return None;
         }
-        let directory = if tiny {
+        let directory = if masked_tiny {
+            let directory = WordDirectory::build_tiny_masks(&keys, &ordinals)
+                .expect("validated unique tiny ordinals");
+            crate::index::scratch_pages::retire(ordinals);
+            ordinals = Vec::new();
+            directory
+        } else if tiny {
             WordDirectory::build_tiny(&keys)
         } else if dense {
             WordDirectory::build_dense19(&keys)?
@@ -337,6 +363,15 @@ fn candidate_tag(word: u64) -> u32 {
     folded.wrapping_mul(0x9e37_79b9) >> 8
 }
 
+// Share the builder's own refusal bound with its outer admission loop.
+// Saturation also handles unsupported diagnostic thresholds without overflow.
+fn minimum_candidate_bytes(postings: usize) -> usize {
+    postings
+        .saturating_mul(std::mem::size_of::<u16>())
+        .saturating_add(std::mem::size_of::<u32>())
+        .saturating_add(std::mem::size_of::<CachedBucket>())
+}
+
 fn candidate_available(stored: usize, bytes: usize, budget: usize) -> Option<usize> {
     let slots = candidate_directory_slots(stored.checked_add(1)?)?;
     budget
@@ -372,7 +407,68 @@ impl CachedBucket {
         }
     }
 
+    // A full pair of masks is resolved before entering the verifier loop.
+    // Other layouts keep their existing concrete list iterator and do not
+    // dispatch an extra enum variant for every selected candidate.
+    #[inline]
+    pub(crate) fn matching_mask_candidates<'a>(
+        &'a self,
+        positions: &'a [u64],
+        forward: u64,
+        reverse: u64,
+        allow_forward: bool,
+        allow_reverse: bool,
+    ) -> Option<impl Iterator<Item = u64> + 'a> {
+        if !matches!(self.directory, WordDirectory::TinyMasks { .. }) {
+            return None;
+        }
+        let mask = self.directory.tiny_mask(
+            u64::from(candidate_tag(forward)),
+            u64::from(candidate_tag(reverse)),
+            allow_forward,
+            allow_reverse,
+        )?;
+        debug_assert_eq!(positions.len(), self.source_len);
+        debug_assert_eq!(positions.as_ptr() as usize, self.source_addr);
+        Some(MaskMatchingCandidates {
+            entries: positions,
+            mask,
+        })
+    }
+
+    // The existing independent ASCII/posting oracle still exercises every
+    // layout. Production dispatch above keeps both iterators monomorphic.
+    #[cfg(test)]
     pub(crate) fn matching_candidates<'a>(
+        &'a self,
+        positions: &'a [u64],
+        forward: u64,
+        reverse: u64,
+        allow_forward: bool,
+        allow_reverse: bool,
+    ) -> impl Iterator<Item = u64> + 'a {
+        if let Some(mask) = self.directory.tiny_mask(
+            u64::from(candidate_tag(forward)),
+            u64::from(candidate_tag(reverse)),
+            allow_forward,
+            allow_reverse,
+        ) {
+            TestCandidates::Mask(MaskMatchingCandidates {
+                entries: positions,
+                mask,
+            })
+        } else {
+            TestCandidates::Lists(self.matching_candidates_lists(
+                positions,
+                forward,
+                reverse,
+                allow_forward,
+                allow_reverse,
+            ))
+        }
+    }
+
+    pub(crate) fn matching_candidates_lists<'a>(
         &'a self,
         positions: &'a [u64],
         forward: u64,
@@ -394,6 +490,38 @@ impl CachedBucket {
                 CandidateOrdinals::empty()
             },
             entries: positions,
+        }
+    }
+}
+
+struct MaskMatchingCandidates<'a> {
+    entries: &'a [u64],
+    mask: u16,
+}
+impl Iterator for MaskMatchingCandidates<'_> {
+    type Item = u64;
+    #[inline]
+    fn next(&mut self) -> Option<u64> {
+        if self.mask == 0 {
+            return None;
+        }
+        let ordinal = self.mask.trailing_zeros() as usize;
+        self.mask &= self.mask - 1;
+        self.entries.get(ordinal).copied()
+    }
+}
+#[cfg(test)]
+enum TestCandidates<'a> {
+    Mask(MaskMatchingCandidates<'a>),
+    Lists(MatchingCandidates<'a>),
+}
+#[cfg(test)]
+impl Iterator for TestCandidates<'_> {
+    type Item = u64;
+    fn next(&mut self) -> Option<u64> {
+        match self {
+            Self::Mask(iter) => iter.next(),
+            Self::Lists(iter) => iter.next(),
         }
     }
 }
@@ -602,12 +730,10 @@ mod tests {
             b.directory,
             super::WordDirectory::Dense19 { .. } | super::WordDirectory::HashedDense19 { .. }
         )));
-        assert!(
-            index
-                .large_candidate_cache
-                .iter()
-                .any(|b| matches!(b.directory, super::WordDirectory::Tiny11 { .. }))
-        );
+        assert!(index.large_candidate_cache.iter().any(|b| matches!(
+            b.directory,
+            super::WordDirectory::Tiny11 { .. } | super::WordDirectory::TinyMasks { .. }
+        )));
         fn snapshot(index: &super::BifrostIndex) -> Vec<(usize, usize, Vec<u16>, String)> {
             index
                 .large_candidate_cache
@@ -627,6 +753,19 @@ mod tests {
             index.candidate_cache_slots.clear();
             index.prepare_candidate_cache_threaded(1, budget, 1);
             let serial = snapshot(&index);
+            // Check charged payload against actual boxed-array lengths,
+            // independently of the prospective constructor accounting.
+            let charged = index.candidate_cache_slots.len() * std::mem::size_of::<u32>()
+                + index
+                    .large_candidate_cache
+                    .iter()
+                    .map(|bucket| {
+                        std::mem::size_of::<super::CachedBucket>()
+                            + bucket.directory.retained_payload_bytes()
+                            + bucket.ordinals.len() * std::mem::size_of::<u16>()
+                    })
+                    .sum::<usize>();
+            assert!(charged <= budget, "charged payload {charged} > {budget}");
             let serial_slots = index.candidate_cache_slots.clone();
             index.large_candidate_cache.clear();
             index.candidate_cache_slots.clear();
@@ -712,7 +851,10 @@ mod tests {
             }
             let selector = |word| {
                 let tag = super::candidate_tag(word);
-                if matches!(bucket.directory, super::WordDirectory::Tiny11 { .. }) {
+                if matches!(
+                    bucket.directory,
+                    super::WordDirectory::Tiny11 { .. } | super::WordDirectory::TinyMasks { .. }
+                ) {
                     tag >> 13
                 } else if matches!(
                     bucket.directory,

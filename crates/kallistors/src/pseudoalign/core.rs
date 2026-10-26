@@ -5,6 +5,7 @@
 
 mod count;
 mod fast;
+pub(crate) use fast::ScopedEcPairs;
 mod filters;
 mod local;
 mod matcher;

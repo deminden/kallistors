@@ -138,6 +138,7 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
         let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
         // Ordinary synchronous counting consumes only sequences. Reuse the
         // threaded parser and mapper without spawning a producer or worker.
+        let mut pairs = super::core::ScopedEcPairs::new(index, threads.max(1));
         let mut counts = EcCounts::new(false);
         let mut map = EcCountMap::default();
         while let Some(batch) = reader.next_packed_seq_batch(4_096)? {
@@ -149,6 +150,7 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
                 options,
                 &mut counts,
                 &mut map,
+                &mut pairs,
             );
         }
         return Ok(counts);
@@ -177,6 +179,7 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
             handles.push(
                 scope.spawn(move || -> Result<(EcCounts, super::utils::SharedEcKeys)> {
                     let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
+                    let mut pairs = super::core::ScopedEcPairs::new(index, threads);
                     let mut acc = EcCounts::new(options.bias);
                     let mut acc_map = EcCountMap::shared(key_pool);
                     while let Ok(batch) = rx.recv() {
@@ -188,6 +191,7 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
                             options,
                             &mut acc,
                             &mut acc_map,
+                            &mut pairs,
                         );
                     }
                     Ok((acc, acc_map.into_shared_keys()))
@@ -279,6 +283,7 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
     if threads <= 1 {
         let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
         // Ordinary mapping parses sequence-only batches without workers.
+        let mut pairs = super::core::ScopedEcPairs::new(index, threads.max(1));
         let mut counts = EcCounts::new(options.bias);
         let mut ec_map = EcCountMap::default();
         let sampler = super::paired::FragmentLengthSampler::new(options.fragment_length_samples);
@@ -298,6 +303,7 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
                         &mut counts,
                         &mut ec_map,
                         (options.fragment_length_samples != 0).then_some(&sampler),
+                        &mut pairs,
                     )?;
                 }
                 _ => return Err(Error::InvalidFormat("paired FASTQ length mismatch".into())),
@@ -332,6 +338,7 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
             handles.push(
                 scope.spawn(move || -> Result<(EcCounts, super::utils::SharedEcKeys)> {
                     let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
+                    let mut pairs = super::core::ScopedEcPairs::new(index, threads);
                     let mut acc = EcCounts::new(options.bias);
                     let mut acc_map = EcCountMap::shared(key_pool);
                     while let Ok(chunks) = rx.recv() {
@@ -348,6 +355,7 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
                                 &mut acc,
                                 &mut acc_map,
                                 (options.fragment_length_samples != 0).then_some(&local_sampler),
+                                &mut pairs,
                             )?;
                         }
                         if options.fragment_length_samples != 0 {

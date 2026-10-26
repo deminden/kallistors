@@ -315,6 +315,11 @@ and memory with alternating controls. Use the same executable for all validation
   Other encodings retain the general decoder.
   Positional bitmap payloads are decoded directly from the buffered node bytes, without
   intermediate serialized buffers.
+  Large packed references batch graph lookups and use bounded, ordered parallel annotation
+  decoding when workers are available. Small references and single-worker loading retain
+  the serial decoder. Paged annotation ownership and narrow node directories avoid millions
+  of separate allocations; wide spans, exceptional encodings and ordered errors retain
+  their complete fallback behavior. One- and two-transcript ECs fit inline where lossless.
   Parallel unitig counting advances eight independent MPHF keys together and gathers compact
   rank words before testing their hit bits. Lane order, scalar hash/rank results and full-width
   or final-map fallbacks remain exact; scratch storage is bounded to one batch.
@@ -333,6 +338,9 @@ and memory with alternating controls. Use the same executable for all validation
   Ordinary primary/tail probes and Bifrost rescue retain their distinct candidate families.
   Encoded rescue preserves their ordering and delegates special/overcrowded markers to the
   full matcher when required.
+  Invocation-scoped worker caches reuse complete intersections of immutable annotation pairs.
+  Full identities and values prove reuse; bounded answer storage and index lifetimes prevent
+  stale references. Sorted multiset fallbacks preserve duplicate multiplicity and ordering.
 - **Paired counting:** once sampling finishes, unused placements are omitted. Unchanged ECs
   remain borrowed through mate counting; filtering or divergent intersections materialize owned
   vectors. Per-worker counts share collision-checked EC keys. Bounded queues and rendezvous

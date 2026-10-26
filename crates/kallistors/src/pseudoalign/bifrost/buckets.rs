@@ -1,6 +1,11 @@
 //! Minimizer bucket counts, fingerprints and position population.
 
+use super::loader_probe::CachedUnitigMinimizers;
 use super::*;
+mod count_merge;
+use count_merge::merge_count_chunks;
+mod cached_counts;
+use crate::index::bifrost::MphfBatchKeys;
 
 pub(super) fn precompute_encoded_unitigs(
     unitigs: &[Vec<u8>],
@@ -59,19 +64,6 @@ pub(super) fn precompute_unitig_block_states(
     out
 }
 
-#[inline]
-pub(super) fn fingerprinted_lookup(
-    mphf: &BooPhf,
-    key: &[u8; 8],
-    fingerprints: &[AtomicU16],
-) -> Option<u64> {
-    let bucket = mphf.lookup(key)?;
-    if let Some(slot) = fingerprints.get(bucket as usize) {
-        super::super::fingerprints::observe(slot, u64::from_le_bytes(*key));
-    }
-    Some(bucket)
-}
-
 pub(super) fn populate_unitig_minimizer_counts(
     minz_counts: &mut [usize],
     bmp_unitigs: &[BitmapPositions],
@@ -110,10 +102,62 @@ pub(super) fn populate_unitig_counts_typed<K: BucketCountKey>(
     encoded_unitigs: &EncodedUnitigs,
     mphf: &BooPhf,
     pool: Option<&ThreadPool>,
+    bucket_cache: Option<&mut Vec<u32>>,
+    fingerprints: &[AtomicU16],
+) {
+    // Larger reference tables benefit from more independent outstanding probes.
+    // Select once per load; ordinary references retain eight-key batches.
+    if mphf.size() >= (1 << 28) {
+        populate_unitig_counts_batched::<K, 64, true>(
+            minz_counts,
+            bmp_unitigs,
+            encoded_unitigs,
+            mphf,
+            pool,
+            bucket_cache,
+            fingerprints,
+        );
+    } else {
+        populate_unitig_counts_batched::<K, 8, false>(
+            minz_counts,
+            bmp_unitigs,
+            encoded_unitigs,
+            mphf,
+            pool,
+            bucket_cache,
+            fingerprints,
+        );
+    }
+}
+
+fn populate_unitig_counts_batched<K: BucketCountKey, const BATCH: usize, const VIEWS: bool>(
+    minz_counts: &mut [usize],
+    bmp_unitigs: &[BitmapPositions],
+    encoded_unitigs: &EncodedUnitigs,
+    mphf: &BooPhf,
+    pool: Option<&ThreadPool>,
     mut bucket_cache: Option<&mut Vec<u32>>,
     fingerprints: &[AtomicU16],
 ) {
     if bmp_unitigs.is_empty() || encoded_unitigs.unitig_bases.metadata.is_empty() {
+        return;
+    }
+
+    if mphf.size() >= (1 << 28)
+        && bmp_unitigs.len() == 1
+        && let Some(pool) = pool
+        && pool.current_num_threads() > 1
+        && let Some(cache) = bucket_cache.as_mut()
+    {
+        cached_counts::populate::<K, BATCH, VIEWS>(
+            minz_counts,
+            &bmp_unitigs[0],
+            encoded_unitigs,
+            mphf,
+            pool,
+            cache,
+            fingerprints,
+        );
         return;
     }
 
@@ -123,15 +167,19 @@ pub(super) fn populate_unitig_counts_typed<K: BucketCountKey>(
             total_unitig_len: 0,
             current_unitig_len: encoded_unitigs.unitig_minimizer_count(0) as u64,
         };
-        for (i, bitmap) in bmp_unitigs.iter().enumerate() {
-            let base = (i as u64) << 32;
-            for pos_bmp in bitmap.iter() {
-                let pos = base + pos_bmp as u64;
-                advance_unitig_state(&mut state, encoded_unitigs, pos);
-                let rel = (pos - state.total_unitig_len) as usize;
-                let bucket = encoded_unitigs
-                    .unitig_minimizer_at(state.unitig_id, rel)
-                    .and_then(|bytes| fingerprinted_lookup(mphf, &bytes, fingerprints));
+        let mut probe = CachedUnitigMinimizers::new(encoded_unitigs);
+        let mut keys = MphfBatchKeys::<BATCH>::new();
+        let mut used = 0;
+        let mut flush = |keys: &MphfBatchKeys<BATCH>, used: usize| {
+            let buckets = mphf.lookup_batch(keys);
+            // Lookup is independent, but cache entries, fingerprints and counts
+            // retain the exact serialized bitmap order, including absent keys.
+            for (bucket, key) in buckets.into_iter().zip(keys.iter()).take(used) {
+                if let (Some(bucket), Some(bytes)) = (bucket, key)
+                    && let Some(slot) = fingerprints.get(bucket as usize)
+                {
+                    super::super::fingerprints::observe(slot, u64::from_le_bytes(bytes));
+                }
                 if let Some(cache) = bucket_cache.as_mut() {
                     cache.push(bucket.map_or(u32::MAX, |bucket| bucket as u32));
                 }
@@ -139,6 +187,31 @@ pub(super) fn populate_unitig_counts_typed<K: BucketCountKey>(
                     minz_counts[bucket as usize] += 1;
                 }
             }
+        };
+        for (i, bitmap) in bmp_unitigs.iter().enumerate() {
+            let base = (i as u64) << 32;
+            for pos_bmp in bitmap.iter() {
+                let pos = base + pos_bmp as u64;
+                advance_unitig_state(&mut state, encoded_unitigs, pos);
+                let rel = (pos - state.total_unitig_len) as usize;
+                keys.set(
+                    used,
+                    if VIEWS {
+                        probe.at(state.unitig_id, rel)
+                    } else {
+                        encoded_unitigs.unitig_minimizer_at(state.unitig_id, rel)
+                    },
+                );
+                used += 1;
+                if used == BATCH {
+                    flush(&keys, used);
+                    keys.clear();
+                    used = 0;
+                }
+            }
+        }
+        if used != 0 {
+            flush(&keys, used);
         }
         return;
     };
@@ -160,20 +233,29 @@ pub(super) fn populate_unitig_counts_typed<K: BucketCountKey>(
                     .par_chunks_mut(chunk_len)
                     .zip(batch_pos_ids.par_chunks(chunk_len))
                     .map(|(destinations, positions)| {
+                        let mut probe = CachedUnitigMinimizers::new(encoded_unitigs);
                         let mut indices = Vec::with_capacity(positions.len());
                         for (destinations, positions) in
-                            destinations.chunks_mut(8).zip(positions.chunks(8))
+                            destinations.chunks_mut(BATCH).zip(positions.chunks(BATCH))
                         {
-                            let mut keys = [None; 8];
-                            for (key, &pos_id) in keys.iter_mut().zip(positions) {
-                                *key = encoded_unitigs.unitig_minimizer_at(
-                                    (pos_id >> 32) as usize,
-                                    pos_id as u32 as usize,
+                            let mut keys = MphfBatchKeys::<BATCH>::new();
+                            for (lane, &pos_id) in positions.iter().enumerate() {
+                                keys.set(
+                                    lane,
+                                    if VIEWS {
+                                        probe.at((pos_id >> 32) as usize, pos_id as u32 as usize)
+                                    } else {
+                                        encoded_unitigs.unitig_minimizer_at(
+                                            (pos_id >> 32) as usize,
+                                            pos_id as u32 as usize,
+                                        )
+                                    },
                                 );
                             }
-                            let buckets = mphf.lookup_batch8(&keys);
-                            for (destination, (bucket, key)) in
-                                destinations.iter_mut().zip(buckets.into_iter().zip(keys))
+                            let buckets = mphf.lookup_batch(&keys);
+                            for (destination, (bucket, key)) in destinations
+                                .iter_mut()
+                                .zip(buckets.into_iter().zip(keys.iter()))
                             {
                                 destination.write(bucket.map_or(u32::MAX, |bucket| bucket as u32));
                                 if let (Some(bucket), Some(key)) = (bucket, key) {
@@ -195,32 +277,7 @@ pub(super) fn populate_unitig_counts_typed<K: BucketCountKey>(
             unsafe {
                 cache.set_len(old_len + batch_pos_ids.len());
             }
-            for chunk in chunks {
-                let mut at = 0;
-                while at < chunk.len() {
-                    let bucket = chunk[at].bucket();
-                    let mut end = at + 1;
-                    while end < chunk.len() && chunk[end].bucket() == bucket {
-                        end += 1;
-                    }
-                    if K::FINGERPRINT {
-                        // Sorted records for one bucket also sort their fingerprints.
-                        let first = chunk[at].fingerprint();
-                        let last = chunk[end - 1].fingerprint();
-                        let value = if first == last {
-                            first
-                        } else {
-                            super::super::fingerprints::DISABLED
-                        };
-                        super::super::fingerprints::observe_serial(
-                            &fingerprints[bucket as usize],
-                            value,
-                        );
-                    }
-                    minz_counts[bucket as usize] += end - at;
-                    at = end;
-                }
-            }
+            merge_count_chunks(minz_counts, fingerprints, &chunks, pool);
         } else {
             let grouped = collect_unitig_batch_counts(batch_pos_ids, encoded_unitigs, mphf, pool);
             merge_count_batches(minz_counts, grouped);

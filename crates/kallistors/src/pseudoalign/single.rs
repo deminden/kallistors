@@ -265,18 +265,20 @@ fn filter_single_read(
     }
 }
 
-pub(crate) fn pseudoalign_single_end_bifrost_batch_into(
-    index: &BifrostIndex,
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pseudoalign_single_end_bifrost_batch_into<'index>(
+    index: &'index BifrostIndex,
     batch: PackedSeqBatch,
     strand: Strand,
     filter: Option<FragmentFilter>,
     options: PseudoalignOptions,
     counts: &mut EcCounts,
     ec_map: &mut EcCountMap,
+    pairs: &mut super::core::ScopedEcPairs<'index>,
 ) {
     if !super::bias_sampling_pending(counts.bias.as_ref(), options.max_bias)
         && super::counting_filters_supported(index, options)
-        && super::core::try_single_counting_batch(index, &batch, strand, options, |read| {
+        && super::core::try_single_counting_batch(index, &batch, strand, options, pairs, |read| {
             counts.reads_processed = counts.reads_processed.saturating_add(1);
             if let Some(read) = read {
                 let ec = single_counting_ec(index, read, filter, options);

@@ -14,6 +14,10 @@ pub(super) enum WordDirectory {
         entries: Box<[u32]>,
         spans: Box<[u64]>,
     },
+    TinyMasks {
+        entries: Box<[u16]>,
+        masks: Box<[u16]>,
+    },
     Tiny11 {
         entries: Box<[u16]>,
         spans: Box<[u64]>,
@@ -100,6 +104,118 @@ impl WordDirectory {
             }
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn retained_payload_bytes(&self) -> usize {
+        match self {
+            Self::Wide(entries) | Self::HashedWide(entries) => entries.len() * 8,
+            Self::Tiny11 { entries, spans } => entries.len() * 2 + spans.len() * 8,
+            Self::TinyMasks { entries, masks } => entries.len() * 2 + masks.len() * 2,
+            Self::Narrow { entries, spans }
+            | Self::Dense19 { entries, spans }
+            | Self::HashedDense19 { entries, spans } => entries.len() * 4 + spans.len() * 8,
+        }
+    }
+
+    pub(super) fn tiny_masks_supported(keys: &[WordSpan], ordinals: &[u16]) -> bool {
+        if !Self::tiny_layout(keys) {
+            return false;
+        }
+        let mut previous = None;
+        keys.iter().all(|key| {
+            if key.word > 0x7ff || previous.is_some_and(|value| value >= key.word) {
+                return false;
+            }
+            previous = Some(key.word);
+            if key.end == 0 {
+                return key.first < 16;
+            }
+            let first = key.first as usize;
+            let Some(last) = first.checked_add(key.end as usize) else {
+                return false;
+            };
+            let Some(list) = ordinals.get(first..last) else {
+                return false;
+            };
+            !list.is_empty()
+                && list.iter().all(|&value| value < 16)
+                && list.windows(2).all(|pair| pair[0] < pair[1])
+        })
+    }
+
+    pub(super) fn tiny_mask_payload_bytes(keys: &[WordSpan]) -> usize {
+        keys.len() * 2 + keys.iter().filter(|key| key.end != 0).count() * 2
+    }
+
+    pub(super) fn build_tiny_masks(keys: &[WordSpan], ordinals: &[u16]) -> Option<Self> {
+        if !Self::tiny_masks_supported(keys, ordinals) {
+            return None;
+        }
+        let mut entries = vec![0u16; keys.len()];
+        let mut masks = Vec::with_capacity(keys.iter().filter(|key| key.end != 0).count());
+        fn arrange(
+            keys: &[WordSpan],
+            ordinals: &[u16],
+            entries: &mut [u16],
+            masks: &mut Vec<u16>,
+            node: usize,
+            rank: &mut usize,
+        ) {
+            if node >= keys.len() {
+                return;
+            }
+            arrange(keys, ordinals, entries, masks, node * 2 + 1, rank);
+            let key = &keys[*rank];
+            let descriptor = if key.end == 0 {
+                key.first as u16
+            } else {
+                let slot = masks.len() as u16;
+                let first = key.first as usize;
+                let mask = ordinals[first..first + key.end as usize]
+                    .iter()
+                    .fold(0u16, |mask, &ordinal| mask | (1u16 << ordinal));
+                masks.push(mask);
+                16 | slot
+            };
+            entries[node] = key.word as u16 | (descriptor << 11);
+            *rank += 1;
+            arrange(keys, ordinals, entries, masks, node * 2 + 2, rank);
+        }
+        arrange(keys, ordinals, &mut entries, &mut masks, 0, &mut 0);
+        Some(Self::TinyMasks {
+            entries: entries.into_boxed_slice(),
+            masks: masks.into_boxed_slice(),
+        })
+    }
+
+    #[inline]
+    pub(super) fn tiny_mask(
+        &self,
+        forward: u64,
+        reverse: u64,
+        allow_forward: bool,
+        allow_reverse: bool,
+    ) -> Option<u16> {
+        let Self::TinyMasks { entries, masks } = self else {
+            return None;
+        };
+        let get = |tag: u64| -> u16 {
+            let Some(entry) = search::<_, 0x7ff>(entries, tag >> 13) else {
+                return 0;
+            };
+            let descriptor = (entry >> 11) as usize;
+            if descriptor < 16 {
+                1u16 << descriptor
+            } else {
+                masks[descriptor & 15]
+            }
+        };
+        Some(
+            if allow_forward { get(forward) } else { 0 }
+                | if allow_reverse { get(reverse) } else { 0 },
+        )
+    }
+
     pub(super) fn tiny_layout(keys: &[WordSpan]) -> bool {
         keys.iter().filter(|key| key.end != 0).count() <= 16
     }
@@ -143,6 +259,7 @@ impl WordDirectory {
     }
     fn expand(&self, entry: u64) -> u64 {
         match self {
+            Self::TinyMasks { .. } => unreachable!("mask directory has no ordinal spans"),
             Self::Wide(_) | Self::HashedWide(_) => entry,
             Self::Tiny11 { spans, .. } => {
                 let descriptor = (entry >> 11) as usize;
@@ -175,6 +292,7 @@ impl WordDirectory {
     }
     pub(super) fn entry(&self, tag: u64) -> Option<u64> {
         let result = match self {
+            Self::TinyMasks { .. } => unreachable!("mask directory requires mask traversal"),
             Self::Wide(entries) => search::<_, TAG_MASK>(entries, tag),
             Self::HashedWide(entries) => hash_search::<_, TAG_MASK>(entries, tag, u64::MAX),
             Self::HashedDense19 { entries, .. } => {
@@ -385,5 +503,130 @@ mod tiny_tests {
             end: 0,
         }]);
         assert_eq!(inline.entry(TAG_MASK), Some(0xffe000 | (15 << 24)));
+    }
+    #[test]
+    fn tiny_masks_preserve_order_full_unions_and_reject_multiset_or_wide_inputs() {
+        use super::super::{CachedBucket, candidate_tag};
+        // All original positions are distinct ordinals even if their encoded
+        // values repeat; merging orientations must emit each ordinal once.
+        let positions: Vec<u64> = (0..16).map(|id| (id / 2) as u64).collect();
+        let ordinals = vec![0, 3, 8, 15, 1, 3, 14];
+        let keys = [
+            super::WordSpan {
+                word: 0,
+                first: 0,
+                end: 4,
+            },
+            super::WordSpan {
+                word: 13,
+                first: 15,
+                end: 0,
+            },
+            super::WordSpan {
+                word: 2047,
+                first: 4,
+                end: 3,
+            },
+        ];
+        let directory = super::WordDirectory::build_tiny_masks(&keys, &ordinals).unwrap();
+        assert_eq!(super::WordDirectory::tiny_mask_payload_bytes(&keys), 10);
+        assert_eq!(directory.retained_payload_bytes(), 10);
+        let bucket = CachedBucket {
+            source_addr: positions.as_ptr() as usize,
+            source_len: positions.len(),
+            directory,
+            ordinals: Box::default(),
+        };
+        // Invert the existing odd tag mix, independently selecting every
+        // boundary tag; encoded values remain only conservative selectors.
+        let query = |tag: u32| u64::from((tag << 21).wrapping_mul(0x144c_bc89));
+        for a in [0u32, 1, 12, 13, 14, 2046, 2047] {
+            for b in [0u32, 1, 13, 14, 2047] {
+                let forward = query(a);
+                let reverse = query(b);
+                assert_eq!(candidate_tag(forward) >> 13, a);
+                assert_eq!(candidate_tag(reverse) >> 13, b);
+                for flags in 0..4 {
+                    let mut expected = Vec::new();
+                    for (ordinal, &position) in positions.iter().enumerate() {
+                        let member = |tag| match tag {
+                            0 => [0, 3, 8, 15].contains(&ordinal),
+                            13 => ordinal == 15,
+                            2047 => [1, 3, 14].contains(&ordinal),
+                            _ => false,
+                        };
+                        if flags & 1 != 0 && member(a) || flags & 2 != 0 && member(b) {
+                            expected.push(position);
+                        }
+                    }
+                    let actual: Vec<_> = bucket
+                        .matching_mask_candidates(
+                            &positions,
+                            forward,
+                            reverse,
+                            flags & 1 != 0,
+                            flags & 2 != 0,
+                        )
+                        .unwrap()
+                        .collect();
+                    assert_eq!(actual, expected);
+                }
+            }
+        }
+        for invalid in [
+            vec![0, 0, 8, 15, 1, 3, 14],
+            vec![0, 3, 16, 17, 1, 3, 14],
+            vec![0, 8, 3, 15, 1, 3, 14],
+            vec![0, 3],
+        ] {
+            assert!(super::WordDirectory::build_tiny_masks(&keys, &invalid).is_none());
+        }
+        let inline_wide = [super::WordSpan {
+            word: 0,
+            first: 16,
+            end: 0,
+        }];
+        assert!(super::WordDirectory::build_tiny_masks(&inline_wide, &[]).is_none());
+        let boundary_keys: Vec<_> = (0..16)
+            .map(|id| super::WordSpan {
+                word: if id == 15 { 2047 } else { id },
+                first: id,
+                end: 1,
+            })
+            .collect();
+        let boundary_ordinals: Vec<u16> = (0..16).collect();
+        let boundary =
+            super::WordDirectory::build_tiny_masks(&boundary_keys, &boundary_ordinals).unwrap();
+        // Descriptor31 plus tag2047 is a real all-ones u16 entry, not empty.
+        assert_eq!(
+            boundary.tiny_mask(2047 << 13, 0, true, false),
+            Some(1 << 15)
+        );
+        let mut too_many = boundary_keys;
+        too_many.insert(
+            15,
+            super::WordSpan {
+                word: 2046,
+                first: 0,
+                end: 1,
+            },
+        );
+        assert!(super::WordDirectory::build_tiny_masks(&too_many, &boundary_ordinals).is_none());
+        let empty = super::WordDirectory::build_tiny_masks(&[], &[]).unwrap();
+        assert_eq!(empty.tiny_mask(0, 0, true, true), Some(0));
+        // Every possible u16 mask emits exactly its increasing ordinal list.
+        for mask in 0..=u16::MAX {
+            let actual: Vec<_> = super::super::MaskMatchingCandidates {
+                entries: &positions,
+                mask,
+            }
+            .collect();
+            let expected: Vec<_> = positions
+                .iter()
+                .enumerate()
+                .filter_map(|(bit, &value)| (mask & (1 << bit) != 0).then_some(value))
+                .collect();
+            assert_eq!(actual, expected);
+        }
     }
 }

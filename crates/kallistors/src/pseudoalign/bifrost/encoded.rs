@@ -76,7 +76,26 @@ pub(crate) struct EncodedSequence<'a> {
     pub(crate) len: usize,
 }
 
+#[inline]
+fn canonical_minimizer_bytes(word: u64, g: usize) -> [u8; 8] {
+    let shift = (32 - g) * 2;
+    let forward = word << shift;
+    let reversed = word.reverse_bits();
+    let reverse = !(((reversed & 0x5555_5555_5555_5555) << 1)
+        | ((reversed & 0xaaaa_aaaa_aaaa_aaaa) >> 1))
+        & (u64::MAX << shift);
+    forward.min(reverse).to_le_bytes()
+}
+
 impl EncodedSequence<'_> {
+    #[inline]
+    pub(super) fn minimizer_at(&self, start: usize, g: usize) -> Option<[u8; 8]> {
+        if g == 0 || g > 32 {
+            return None;
+        }
+        Some(canonical_minimizer_bytes(self.kmer_at(start, g)?, g))
+    }
+
     #[inline]
     pub(crate) fn kmer_at(&self, start: usize, k: usize) -> Option<u64> {
         if k > 32 || start.checked_add(k)? > self.len {
@@ -391,13 +410,7 @@ impl EncodedBaseStore {
             return None;
         }
         let word = self.encode_kmer_at(seq_idx, start, g)?;
-        let shift = (32 - g) * 2;
-        let forward = word << shift;
-        let reversed = word.reverse_bits();
-        let reverse = !(((reversed & 0x5555_5555_5555_5555) << 1)
-            | ((reversed & 0xaaaa_aaaa_aaaa_aaaa) >> 1))
-            & (u64::MAX << shift);
-        Some(forward.min(reverse).to_le_bytes())
+        Some(canonical_minimizer_bytes(word, g))
     }
 
     #[inline]
