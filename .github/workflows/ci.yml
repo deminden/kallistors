@@ -4,11 +4,18 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   RUSTFLAGS: "-C target-cpu=generic"
 
 jobs:
-  build:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,5 +26,38 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+  test:
+    name: Test / ${{ matrix.os }} / Rust ${{ matrix.rust }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust: stable
+          - os: ubuntu-latest
+            rust: "1.97.0"
+          - os: macos-15
+            rust: stable
+          - os: windows-latest
+            rust: stable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
       - name: test
         run: cargo test --locked --workspace --all-features
+
+  repository:
+    name: Documentation and benchmark helpers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.7"
+      - name: Check documentation and Python syntax
+        run: python -B scripts/check_repository.py
+      - name: Test benchmark validation
+        run: python -B -m unittest discover -s scripts/tests -v

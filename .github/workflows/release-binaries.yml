@@ -108,6 +108,19 @@ jobs:
       - name: Build release binary
         run: cargo build --locked --release --package kallistors --bin kallistors --target ${{ matrix.target }}
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.7"
+
+      - name: Exercise release binary
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/kallistors"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          python -B scripts/smoke_cli.py "${binary}"
+
       - name: Package binary
         shell: bash
         run: |

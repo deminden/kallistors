@@ -10,7 +10,8 @@ static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[command(
     name = "kallistors",
     version,
-    about = "kallistors command line interface"
+    about = "Transcriptome indexing, RNA-seq quantification and single-cell BUS processing",
+    after_help = "Developer diagnostics remain available by name; see https://github.com/deminden/kallistors/blob/main/docs/development.md."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -19,6 +20,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(about = "Show the kallistors version")]
     Version,
     #[command(about = "Build a kallisto-compatible transcriptome index")]
     Index {
@@ -41,11 +43,12 @@ enum Commands {
         #[arg(required = true)]
         fasta: Vec<std::path::PathBuf>,
     },
+    #[command(about = "Inspect index metadata and transcript counts")]
     IndexInfo {
         #[arg(long)]
         index: std::path::PathBuf,
     },
-    #[command(about = "DEBUG: dump index EC blocks in a kallisto-like format")]
+    #[command(hide = true, about = "dump index EC blocks in a kallisto-like format")]
     IndexEcDump {
         #[arg(long)]
         index: std::path::PathBuf,
@@ -56,7 +59,10 @@ enum Commands {
         #[arg(long)]
         unitig_list: Option<std::path::PathBuf>,
     },
-    #[command(about = "DEBUG: dump unitig sequence windows for minimizer positions")]
+    #[command(
+        hide = true,
+        about = "dump unitig sequence windows for minimizer positions"
+    )]
     UnitigWindow {
         #[arg(long)]
         index: std::path::PathBuf,
@@ -67,32 +73,33 @@ enum Commands {
         #[arg(long)]
         out: std::path::PathBuf,
     },
-    #[command(about = "DEBUG: inspect a kallisto EC text file (to be removed)")]
+    #[command(hide = true, about = "inspect a kallisto EC text file")]
     EcStats {
         #[arg(long)]
         ec: std::path::PathBuf,
     },
-    #[command(about = "DEBUG: rewrite EC text file in canonical order (to be removed)")]
+    #[command(hide = true, about = "rewrite EC text file in canonical order")]
     EcExport {
         #[arg(long)]
         ec: std::path::PathBuf,
         #[arg(long)]
         out: std::path::PathBuf,
     },
-    #[command(about = "DEBUG: compare two EC text files (to be removed)")]
+    #[command(hide = true, about = "compare two EC text files")]
     EcCompare {
         #[arg(long)]
         a: std::path::PathBuf,
         #[arg(long)]
         b: std::path::PathBuf,
     },
-    #[command(about = "DEBUG: extract EC list from index (to be removed)")]
+    #[command(hide = true, about = "extract EC list from index")]
     EcFromIndex {
         #[arg(long)]
         index: std::path::PathBuf,
         #[arg(long)]
         out: std::path::PathBuf,
     },
+    #[command(about = "Map reads to counted transcript equivalence classes")]
     Pseudoalign {
         #[arg(long)]
         index: std::path::PathBuf,
@@ -154,9 +161,10 @@ enum Commands {
         kallisto_direct_kmer: bool,
         #[arg(long)]
         kallisto_bifrost_find: bool,
-        #[arg(long, help = "Legacy compatibility option; has no effect")]
+        #[arg(long, hide = true, help = "Legacy compatibility option; has no effect")]
         kallisto_sparse_hits: bool,
     },
+    #[command(about = "Quantify transcript abundance from paired-end or single-end reads")]
     Quant {
         #[arg(short = 'i', long)]
         index: std::path::PathBuf,
@@ -210,11 +218,19 @@ enum Commands {
         kallisto_direct_kmer: bool,
         #[arg(long)]
         kallisto_bifrost_find: bool,
-        #[arg(long, help = "Legacy compatibility option; has no effect")]
+        #[arg(long, hide = true, help = "Legacy compatibility option; has no effect")]
         kallisto_sparse_hits: bool,
-        #[arg(long)]
+        #[arg(
+            long,
+            hide = true,
+            help = "Unsupported by quant; use bus for BAM output"
+        )]
         pseudobam: bool,
-        #[arg(long)]
+        #[arg(
+            long,
+            hide = true,
+            help = "Unsupported by quant; use bus for BAM output"
+        )]
         genomebam: bool,
         #[arg(required = true, num_args = 1..=2)]
         reads: Vec<std::path::PathBuf>,
@@ -297,11 +313,11 @@ enum Commands {
         kallisto_direct_kmer: bool,
         #[arg(long)]
         kallisto_bifrost_find: bool,
-        #[arg(long, help = "Legacy compatibility option; has no effect")]
+        #[arg(long, hide = true, help = "Legacy compatibility option; has no effect")]
         kallisto_sparse_hits: bool,
         reads: Vec<std::path::PathBuf>,
     },
-    #[command(about = "DEBUG: map transcript ids to names from index")]
+    #[command(hide = true, about = "map transcript ids to names from index")]
     TranscriptLookup {
         #[arg(long)]
         index: std::path::PathBuf,
@@ -312,7 +328,7 @@ enum Commands {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
-    #[command(about = "DEBUG: trace per-read EC decisions (to be removed)")]
+    #[command(hide = true, about = "trace per-read EC decisions")]
     TraceReads {
         #[arg(long)]
         index: std::path::PathBuf,
@@ -358,7 +374,7 @@ enum Commands {
         kallisto_direct_kmer: bool,
         #[arg(long)]
         kallisto_bifrost_find: bool,
-        #[arg(long, help = "Legacy compatibility option; has no effect")]
+        #[arg(long, hide = true, help = "Legacy compatibility option; has no effect")]
         kallisto_sparse_hits: bool,
         #[arg(long, value_enum, default_value_t = Strand::Unstranded)]
         strand: Strand,
@@ -379,7 +395,10 @@ enum Commands {
         #[arg(long)]
         rf_stranded: bool,
     },
-    #[command(about = "DEBUG: compare baseline vs fast-path traces on selected reads")]
+    #[command(
+        hide = true,
+        about = "compare baseline vs fast-path traces on selected reads"
+    )]
     TraceCompare {
         #[arg(long)]
         index: std::path::PathBuf,
@@ -407,7 +426,7 @@ enum Commands {
         kallisto_direct_kmer: bool,
         #[arg(long)]
         kallisto_bifrost_find: bool,
-        #[arg(long, help = "Legacy compatibility option; has no effect")]
+        #[arg(long, hide = true, help = "Legacy compatibility option; has no effect")]
         kallisto_sparse_hits: bool,
         #[arg(long, value_enum, default_value_t = Strand::Unstranded)]
         strand: Strand,
@@ -428,14 +447,14 @@ enum Commands {
         #[arg(long)]
         rf_stranded: bool,
     },
-    #[command(about = "DEBUG: lookup minimizer in MPH index")]
+    #[command(hide = true, about = "lookup minimizer in MPH index")]
     MinimizerLookup {
         #[arg(long)]
         index: std::path::PathBuf,
         #[arg(long)]
         minimizer: String,
     },
-    #[command(about = "DEBUG: scan minimizer bitmaps for a specific sequence")]
+    #[command(hide = true, about = "scan minimizer bitmaps for a specific sequence")]
     MinimizerBitmapScan {
         #[arg(long)]
         index: std::path::PathBuf,
@@ -446,7 +465,10 @@ enum Commands {
         #[arg(long, default_value_t = 1000)]
         limit: usize,
     },
-    #[command(about = "DEBUG: check MPH hits for minimizers in selected unitigs")]
+    #[command(
+        hide = true,
+        about = "check MPH hits for minimizers in selected unitigs"
+    )]
     MinimizerUnitigMphfCheck {
         #[arg(long)]
         index: std::path::PathBuf,
@@ -455,7 +477,7 @@ enum Commands {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
-    #[command(about = "DEBUG: dump MPHF final-hash key list")]
+    #[command(hide = true, about = "dump MPHF final-hash key list")]
     MinimizerMphfKeys {
         #[arg(long)]
         index: std::path::PathBuf,

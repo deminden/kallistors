@@ -2,11 +2,14 @@
 name = "kallistors"
 version = "0.5.1"
 description = "A Rust reimplementation of kallisto-style pseudoalignment and RNA-seq quantification."
-readme = "../../README.md"
+readme = "README.md"
+authors.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords = ["rna-seq", "bioinformatics", "pseudoalignment", "transcriptomics"]
+categories = ["science", "command-line-utilities"]
 autobins = false
 
 [[bin]]
