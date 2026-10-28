@@ -121,8 +121,6 @@ def main():
             selected = ','.join(case['id'] for case in read_json(workspace / 'inputs.json')['cases'])
             modern(workspace, reference, 'run', '--only', selected)
             modern(workspace, reference, 'report')
-        invoke('publishing modern comparisons', [sys.executable, str(scripts / 'publish_modern_benchmarks.py'),
-            '--gencode', str(gencode), '--nascent', str(nascent)])
         invoke('original kallisto: full comparison', [sys.executable, str(scripts / 'run_kallisto_comparison.py'),
             '--workspace', str(original), '--gencode', str(gencode), '--nascent', str(nascent),
             '--data', str(data), '--kallisto', protocol['kallisto']['path'],

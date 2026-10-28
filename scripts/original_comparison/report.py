@@ -262,53 +262,17 @@ def report(workspace, spec):
         'accuracy': accuracy, 'single_cell_counts': cell_counts, 'single_cell_mapping': mapping, 'single_cell_parity': parity,
         'bulk_phase_estimates': phases}
     write_json(workspace / 'summary.json', result)
-    docs = Path(__file__).resolve().parents[2] / 'docs'
-    public = docs / 'kallisto-comparison-tables'
-    public.mkdir(exist_ok=True)
-    for source in out.iterdir():
-        if source.suffix in ('.tsv', '.tex'):
-            shutil.copy2(source, public / source.name)
-    write_json(docs / 'kallisto-comparison-results.json', result)
-    from publish_modern_benchmarks import markdown
-    rows = []
-    keys = sorted({(r['reference'], r['case'], r['layout'], r['threads']) for r in performance})
-    for reference, case, layout, threads in keys:
-        pair = {r['tool']: r for r in performance if (r['reference'], r['case'], r['layout'], r['threads']) == (reference, case, layout, threads)}
-        a, b = pair['kallisto'], pair['kallistors']
-        rows.append([reference, case, layout, threads, f"{a['wall_s']:.3f}", f"{b['wall_s']:.3f}",
-                     f"{a['wall_s'] / b['wall_s']:.3f}×", f"{a['rss_gib']:.3f}", f"{b['rss_gib']:.3f}"])
-    text = ['# Fresh comparison with original kallisto', '',
-        'Apple Silicon; original kallisto 0.52.0 and the same frozen kallistors executable used in the modern-tool panels. '
-        'All primary values are medians of three runs after one warmup. Builds use eight workers only; '
-        'paired-end, R1-only and single-cell processing use one and eight workers.', '',
-        markdown(['Reference', 'Dataset', 'Mode', 'Workers', 'Original, s', 'kallistors, s', 'Original/current time',
-                  'Original RSS, GiB', 'kallistors RSS, GiB'], rows), '',
-        'GENCODE v50 ALL is used for cDNA and PBMC; TT-seq uses only the official Pachter lab mature-plus-nascent '
-        'FASTA assets. Strand settings follow metadata, and both tools receive identical empirical single-end '
-        'fragment models and fastp-prepared inputs. The independent simulation is adapter-free and untrimmed.', '',
-        'Full EC maps are checked before bulk timing. The primary read comparison uses identical original-built '
-        'index bytes; both programs additionally quantify matched prefixes using the freshly kallistors-built '
-        'indexes to check index compatibility. Prefix compatibility timings are not primary performance observations.', '',
-        'The official release executable supplies original timing controls. The separate instrumented original is '
-        'used only for full EC correctness exports. Every full single-cell run has exact weighted BUS and canonical '
-        'gene/UMI matrix parity after the same bustools pipeline.', '',
-        'Native HDF5 abundance comparisons include maximum absolute differences, p99, p99.9 and p99.99 at transcript '
-        'and gene level for every measured replicate. Results include the complete feature universe and the '
-        'nonzero union, so zeros cannot conceal differences among expressed features. The largest transcript '
-        'differences are labelled in a separate table. Native fragment sampling and EM can produce abundance '
-        'differences even when EC counts are exactly equal; realized fragment histograms, within-tool replicate '
-        'variation and one-versus-eight-worker comparisons are retained separately. Real-data agreement does '
-        'not establish which estimator is more accurate; the independent simulation supplies stated-model truth.', '',
-        'Single-end inputs use the same supplied Gaussian mean and SD. Kallistors does not serialize that '
-        'model into `aux/fld`, while original kallisto stores an integerized Gaussian histogram. Its absence '
-        'is reported as unavailable; no zero histogram is substituted and no histogram equality or L1 '
-        'difference is asserted. Native count, effective-length and TPM comparisons remain complete. '
-        'Empirical paired-end histograms are compared on their common one-base bin coordinates.', '',
-        'See the [complete numeric tables](kallisto-comparison-tables/README.md), '
-        '[machine-readable results](kallisto-comparison-results.json), and [methods](modern-benchmarks.md).', '']
-    (docs / 'kallisto-comparison-results.md').write_text('\n'.join(text))
-    (public / 'README.md').write_text('# Original-kallisto comparison tables\n\n'
-        'Warmup plus three measured runs. Wall/CPU seconds, peak RSS and index size are in `performance`. '
-        'Agreement and accuracy use native HDF5 f64 values and include zeros. Single-cell mapping and complete '
-        'pipelines are separate. See [results](../kallisto-comparison-results.md) for scope.\n\n' +
-        '\n'.join(f'* [{p.name}]({p.name})' for p in sorted(public.iterdir()) if p.suffix in ('.tsv', '.tex')) + '\n')
+    write_report_index(workspace)
+
+
+def write_report_index(workspace):
+    """Keep generated output beside its observations, without modifying repository docs."""
+    tables = sorted(p for p in (workspace / 'tables').iterdir()
+                    if p.is_file() and p.suffix in ('.md', '.tsv', '.tex', '.json'))
+    lines = ['# Original-kallisto comparison', '',
+             '[Complete numeric results and provenance](summary.json)', '',
+             'The summary records the measured conditions, tool identities and analysis revision. '
+             'Tables include timings, memory use and numerical agreement. Agreement with another '
+             'tool does not establish biological accuracy.', '', '## Tables', '',
+             *[f'- [{p.name}](tables/{p.name})' for p in tables], '']
+    (workspace / 'README.md').write_text('\n'.join(lines))

@@ -10,7 +10,7 @@ import sys
 from benchmark_common import fingerprint, write_json
 from modern_benchmark.environment import check_analysis, content_id, load_environment, read_json
 from modern_benchmark.inputs import prefix_case
-from publish_modern_benchmarks import validated
+from modern_benchmark.validation import validate_completed_panel
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 
@@ -86,7 +86,7 @@ def execute(args, status):
     check_analysis()
     args.gencode, args.nascent, args.data = (p.resolve() for p in (args.gencode, args.nascent, args.data))
     for root in (args.gencode, args.nascent):
-        _, previous = validated(root)
+        _, previous = validate_completed_panel(root)
         if read_json(root / 'inputs.json') != previous['inputs']:
             raise ValueError('Inputs changed after the preceding comparison')
     tools, environment = freeze_tools(args)
@@ -167,7 +167,7 @@ def execute(args, status):
     run_single_cell(args.workspace, paths, sc, panels['gencode']['reference'],
                     args.workspace / 'gencode/index/measured-3-kallisto.idx', spec, status)
     from .report import report
-    status('analysing and publishing original comparison')
+    status('analysing original comparison')
     if {relative: hashlib.sha256((SCRIPTS / relative).read_bytes()).hexdigest() for relative in workflow} != workflow:
         raise ValueError('Comparison workflow changed during execution')
     for tool, item in tools.items():

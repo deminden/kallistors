@@ -21,7 +21,7 @@ def plan(inputs):
 
 def workflow_state():
     root = Path(__file__).resolve().parents[1]
-    paths = [*Path(__file__).parent.glob('*.py'), root / 'modern_benchmarks.py', root / 'benchmark_common.py', root / 'prepare_benchmark.py', root / 'prepare_reference.py', root / 'publish_modern_benchmarks.py']
+    paths = [*Path(__file__).parent.glob('*.py'), root / 'modern_benchmarks.py', root / 'benchmark_common.py', root / 'prepare_benchmark.py', root / 'prepare_reference.py']
     paths += list((root / 'benchmarks/modern').glob('*'))
     return {str(p.relative_to(root)): digest(p) for p in sorted(paths) if p.is_file()}
 

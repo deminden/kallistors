@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproduce the modern bulk and single-cell comparison; see docs/modern-benchmarks.md."""
+"""Reproduce the modern bulk and single-cell comparison; see docs/benchmarks.md."""
 
 from modern_benchmark.cli import main
 
