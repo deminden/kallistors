@@ -4,6 +4,9 @@
 
 ### Correctness and compatibility
 
+- Prevent Windows MSVC debug CLI startup from overflowing the default main-thread stack.
+  Reserve 8 MiB for the executable without changing worker stacks or library callers.
+
 - Load transcript orientation annotations for explicit BUS strand filtering, including
   single-cDNA FASTQ, paired technologies and BAM input. Preserve the compact unstranded path.
   Apply the same annotation requirement in read diagnostics, and correct reverse-complement

@@ -123,6 +123,11 @@ declared minimum Rust 1.97 on Linux. The lightweight repository job is separate 
 benchmarks. Release builds also run `python3 -B scripts/smoke_cli.py PATH_TO_BINARY`: a tiny
 index, mapping and quantification workflow with expected counts and default HDF5 output.
 
+The Windows MSVC CLI reserves an 8 MiB main-thread stack because the unoptimized generated
+argument parser exceeds the linker's 1 MiB default. The package build script applies this
+to the executable, including installed builds; worker stacks and library callers are unchanged.
+The initial committed stack size remains the linker default.
+
 ## Test strategy and prerequisites
 
 The default suite is deterministic and self-contained. Small mapping fixtures always use the
