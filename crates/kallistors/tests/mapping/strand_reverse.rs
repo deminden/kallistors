@@ -207,7 +207,8 @@ fn strand_diagnostics_load_annotations_without_a_fragment_filter() {
                 Some("--kallisto-direct-kmer"),
                 Some("--kallisto-fallback"),
             ] {
-                let case = format!("{command}-{flag}-{loader:?}");
+                let loader_name = loader.unwrap_or("default");
+                let case = format!("{command}-{flag}-{loader_name}");
                 let out = dir.path().join(&case);
                 let mut cmd = Command::new(env!("CARGO_BIN_EXE_kallistors"));
                 cmd.arg(command)

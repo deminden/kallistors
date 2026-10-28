@@ -458,7 +458,8 @@ fn bus_strand_flags_filter_fastq_paired_and_bam_transcripts() {
                 ("--rf-stranded", [vec![1], vec![0]]),
             ] {
                 for layout in ["fastq", "paired", "bam"] {
-                    let case = format!("{layout}-{strand}-{loader:?}-{threads}");
+                    let loader_name = loader.unwrap_or("default");
+                    let case = format!("{layout}-{strand}-{loader_name}-{threads}");
                     let out = dir.path().join(&case);
                     let mut command = bus_command(&index, &out);
                     command.args(["-t", &threads.to_string(), strand]);
