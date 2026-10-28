@@ -169,6 +169,8 @@ pub(crate) struct PackedKmerRange {
 
 impl PackedKmerRange {
     #[inline]
+    // Only the NEON scan advances this range before handing off to the scalar tail.
+    #[cfg_attr(not(target_arch = "aarch64"), allow(unused_mut))]
     pub(crate) fn first_match(
         mut self,
         forward: u64,

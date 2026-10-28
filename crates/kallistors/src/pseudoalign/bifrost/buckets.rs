@@ -322,6 +322,8 @@ pub(super) fn populate_unitig_minimizer_storage(
             total_unitig_len: 0,
             current_unitig_len: encoded_unitigs.unitig_minimizer_count(0) as u64,
         };
+        // The offset drives AArch64 prefetching; other targets use the same ordered loop.
+        #[cfg_attr(not(target_arch = "aarch64"), allow(clippy::unused_enumerate_index))]
         for (_at, (pos, &bucket)) in bmp_unitigs[0].iter().zip(cache).enumerate() {
             #[cfg(target_arch = "aarch64")]
             {
