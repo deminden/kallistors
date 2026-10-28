@@ -83,7 +83,7 @@ datasets, simulation accuracy, bootstrap modes, individual timings, CPU/RSS and 
 agreement. Completed [sequence-bias results](docs/kallisto-comparison-results.md#completed-sequence-bias-observations)
 have their own section because the abundance estimates differ materially; their timing ratios
 are excluded from the table above. See the [benchmark guide](docs/benchmarks.md) for preparation
-and methodology, and the [0.5.1 notes](docs/releases/0.5.1.md) for release changes.
+and methodology, and the [0.6.0 notes](docs/releases/0.6.0.md) for release changes.
 
 ## Index construction
 
@@ -190,7 +190,7 @@ construction, paired-end quantification, threading and fragment sampling.
   [Salmon/piscem](docs/salmon-piscem-results.md), [original kallisto](docs/kallisto-comparison-results.md)
   and [mapping-only tools](docs/mapping-comparison-results.md).
 - [Development guide](docs/development.md): Rust API examples, testing, debugging and source layout.
-- [Release notes](docs/releases/0.5.1.md).
+- [Release notes](docs/releases/0.6.0.md).
 
 ## Contributing
 

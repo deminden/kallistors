@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "kallistors"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "boomphf",

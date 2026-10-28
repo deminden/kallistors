@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.1
+## 0.6.0
 
 ### Correctness and compatibility
 
@@ -113,7 +113,14 @@
   `--kallisto-sparse-hits` option as an explicit compatibility no-op. Strict workspace Clippy
   checks remain part of the development workflow.
 - Rust callers with exhaustive `PseudoalignOptions` literals must include
-  `fragment_length_samples`; `..PseudoalignOptions::default()` selects the sampling goal.
+  `fragment_length_samples` and `match_cache_size`; `..PseudoalignOptions::default()` selects
+  the sampling goal and automatic cache budget.
+- Keep ordinary CLI help focused while retaining developer diagnostics by name. Add a compact
+  package README, inherited author metadata, portable mapping commands and automated
+  documentation/script checks. Expand CI to supported operating systems and the minimum Rust
+  version, and exercise release binaries before upload.
+- Retire stale benchmark publishers and reject duplicate, missing or undeclared trial records
+  before a dependent comparison starts. Preserve completed benchmark evidence separately.
 
-See the [release notes](docs/releases/0.5.1.md), [current benchmarks](docs/benchmarks.md),
+See the [release notes](docs/releases/0.6.0.md), [current benchmarks](docs/benchmarks.md),
 [sampling behavior](docs/fragment_length_sampling.md) and [compatibility limits](docs/compatibility.md).

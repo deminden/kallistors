@@ -14,7 +14,7 @@ For Rust applications:
 
 ```toml
 [dependencies]
-kallistors = "0.5.1"
+kallistors = "0.6.0"
 ```
 
 - [Quick start and performance comparisons](https://github.com/deminden/kallistors/blob/main/README.md)

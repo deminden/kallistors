@@ -126,8 +126,13 @@ def bootstrap(workspace, overrides):
         'fastp': ROOT / 'target/tools/fastp/bin/fastp',
         'bustools': ROOT / 'target/tools/bustools-build/src/bustools',
     }
+    # Competitor versions stay pinned; the candidate follows the package being benchmarked.
+    manifest = (ROOT / 'crates/kallistors/Cargo.toml').read_text()
+    version = re.search(r'(?m)^version\s*=\s*"([^"]+)"', manifest)
+    if version is None:
+        raise ValueError('Missing kallistors package version')
     for name in ['kallistors', 'salmon', 'piscem', 'piscem-infer', 'alevin-fry', 'bustools', 'fastp']:
-        entry = lock['tools'].get(name, {'version': '0.5.1', 'version_args': ['version']})
+        entry = lock['tools'].get(name, {'version': version[1], 'version_args': ['version']})
         supplied = overrides.get(name)
         if supplied:
             executable = Path(supplied).absolute()
