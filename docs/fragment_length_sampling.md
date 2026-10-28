@@ -44,8 +44,9 @@ count may exceed the requested goal with multiple threads.
 
 Regression tests cover byte-boundary splits, cross-chunk quotas, variable mate lengths,
 oversized pairs, remaining batch quotas, concurrent overshoot, short inputs, exact EC
-invariance between sampled and all-observation runs, and serial/multithreaded execution using a
-real kallisto-built synthetic index. The complete EC map remains the correctness gate for speed
+invariance between sampled and all-observation runs, and serial/multithreaded execution using
+self-contained Rust-built synthetic indexes. Opt-in upstream comparisons use a separately
+built original-kallisto index. The complete EC map remains the correctness gate for speed
 experiments. To isolate EM arithmetic, replay the same ECs and histogram with both implementations.
 Within kallistors, `--fragment-length-samples 0` provides a deterministic all-observation
 fragment model for a fixed input; original kallisto requires diagnostic controls for a matched
@@ -56,34 +57,18 @@ quantification runs.
 
 ## Interpreting transcript-level differences
 
-A controlled audit of four complete fastp-trimmed libraries compared three eight-thread paired
-runs per program, including the official Pachter Lab mature-plus-nascent reference. For every
-library, the largest cross-program count and TPM differences also occurred between original
-kallisto's own runs. Replaying all ten distinct saved histograms with the current quantifier
-reproduced all 24 outputs: effective lengths and iteration counts matched, with maximum
-estimated-count residual below `2e-9` and TPM residual below `5e-10`.
+Identical counted ECs can yield different abundance estimates when fragment histograms differ.
+Sampled effective lengths affect transcript counts and TPM normalization, especially for short
+transcripts. Ambiguous isoforms can also respond to model changes and EM convergence; inspect
+gene totals alongside transcript-level differences.
 
-Two effects explain the outliers:
-
-- **Short transcripts:** sampled effective lengths and TPM normalization can change TPM even
-  when counts agree. For airway MT-TN, both outputs assign 1,554 estimated counts; TPM changes
-  from 8,754.584 to 8,645.776. Almost the entire difference is reproduced by changing effective
-  lengths while holding counts fixed.
-- **Ambiguous isoforms:** CALR-201 and CALR-233 have identical observed EC incidence in the
-  airway and fibroblast libraries. Small model changes can alter global EM stopping and their
-  split. In fibroblast, the compared runs stop at 2,170 and 2,176 updates, while the CALR gene
-  estimated-count total changes by less than `1e-5` counts. At fixed updates, the model changes
-  CALR-201 by 0.324 counts; six extra updates add another 22.430 counts. Matching a single upstream
-  split does not establish its biological accuracy.
-
-Across these saved outputs, the largest relative count difference among transcripts reaching
-10 estimated counts in either output is 1.64%. Large relative TPM changes can still occur for
-targets with very little count evidence. Inspect counts, effective lengths, expressed-target
-percentiles and within-program variation together. Three runs characterize these observations;
-they do not bound every possible sample or dataset.
+The [latest numerical comparison](kallisto-comparison-results.md#native-abundance-agreement)
+reports complete transcript/gene distributions and links every measured replicate, realized
+fragment model, within-program variation and one-versus-eight-thread comparison. Inspect counts,
+effective lengths, expressed-target percentiles and within-program variation together.
+Agreement with one upstream estimate does not establish biological accuracy.
 
 For reproducible fragment estimation within kallistors, `--fragment-length-samples 0` uses
 all qualifying observations. It can add processing work and produces a different model from
-the default sampled run. Matching a saved histogram provides the controlled implementation
-comparison. The [benchmark guide](benchmarks.md#quantification-model-audit) records the audit
-scope and portable evidence.
+the default sampled run. Replaying an identical saved histogram and EC map with matched EM
+settings isolates implementation differences from sampling differences.

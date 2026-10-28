@@ -1,386 +1,196 @@
 # kallistors
 
-A Rust implementation of kallisto-style pseudoalignment and RNA-seq quantification.
+A high-performance Rust implementation of kallisto-style pseudoalignment and RNA-seq transcript quantification.
 
 ## At a glance
 
-- Builds and loads kallisto v13-compatible transcriptome indexes.
-- Quantifies paired-end and single-end reads, with kallisto-style `abundance.tsv`, `run_info.json`,
-  and default `abundance.h5` output.
+- **Fastest measured full quantification**, compared with Salmon,
+  piscem + piscem-infer and original kallisto. Nascent single-end at eight threads is
+  effectively tied with Salmon sketch.
+- Builds kallisto v13-compatible transcriptome indexes **9.2–10.9× faster** than original
+  kallisto at eight threads in the benchmarks below. Also loads existing compatible indexes.
+- Quantifies paired-end and single-end reads **6.1–15.4× faster** on the real GENCODE datasets
+  and **2.8–3.5× faster** on mature-plus-nascent than original kallisto at eight threads.
+  Writes kallisto-style `abundance.tsv`, `run_info.json`, and default `abundance.h5` output.
 - Supports single-cell BUS workflows, including supported BAM input and output modes.
-- Uses compact index/EM storage, cached exact matching and parallel quantification.
-- Keeps ordinary single-end and stranded counting graphs packed, with lossless compact positions
-  and shared worker EC keys. Small position groups fit inline when their complete values fit.
-  Borrows unchanged read ECs through exact positional fragment
-  and strand filtering while retaining the best placement and supplied fragment model.
-- Paired fragment estimation follows kallisto's sequence-buffer sampling rules; all reads
-  contribute to EC counts. See [sampling behavior](docs/fragment_length_sampling.md).
+- Uses memory-efficient storage, exact-match caching and efficient parallel processing.
 
-## Performance and benchmarking
+## Full quantification compared with other tools
 
-Complete paired quantification on Apple Silicon, eight threads, one warmup and three measured
-runs per tool/library, versus original kallisto v0.52.0 (fasterp-trimmed reads):
+Latest available measurements on the same Apple Silicon machine, using matched prepared
+reads and reference target sets. Read results use one warmup and
+the median of three runs. Ratios are **comparator time / kallistors time**; above 1 means
+kallistors finished sooner. Peak RSS is shown as **kallistors / comparator** in GiB.
 
-| Library | Pairs | Current / original time | Speedup | Current / original peak RSS |
-| --- | ---: | ---: | ---: | ---: |
-| SRR13638690 · muscle | 4,410,990 | 8.12 / 45.16 s | 5.56× | 1.23 / 2.85 GiB |
-| SRR1039508 · airway | 22,297,617 | 27.18 / 178.94 s | 6.58× | 1.34 / 3.13 GiB |
-| SRR307903 · fibroblast | 32,878,740 | 44.25 / 212.45 s | 4.80× | 1.32 / 3.09 GiB |
-| SRR10919051 · TT-seq | 10,261,737 | 44.31 / 98.34 s | 2.22× | 9.17 / 14.97 GiB |
+GENCODE quantification ranges cover the muscle and fibroblast libraries; mature-plus-nascent
+quantification uses TT-seq. PE means paired-end; SE uses R1 only. Each row includes the complete
+quantification or FASTQ-to-matrix workflow.
 
-The first three libraries use GENCODE v50 ALL; TT-seq uses the official Pachter Lab
-mature-plus-nascent reference. Complete counted EC maps match original exactly for every case.
-Totals include loading, every pair, fragment estimation, EM and default TSV/HDF5 output.
+| Workload | Reference | Comparator | Time ratio · 1 thread | Time ratio · 8 threads | 8-thread peak RSS, GiB · current/comparator |
+| --- | --- | --- | --- | --- | --- |
+| PE quantification | GENCODE v50 | Salmon 2.8.0 sketch | 2.66–2.72× | 2.42× | 2.43–2.60 / 1.03–1.39 |
+| PE quantification | GENCODE v50 | Salmon 2.8.0 selective alignment | 6.03–7.49× | 5.16–5.90× | 2.43–2.60 / 2.49–2.59 |
+| PE quantification | GENCODE v50 | piscem 0.23.0 + piscem-infer 0.7.0 | 1.83–1.90× | 2.95–3.15× | 2.43–2.60 / 0.76–0.79 |
+| SE quantification | GENCODE v50 | Salmon 2.8.0 sketch | 2.31–2.58× | 2.07–2.09× | 2.33–2.50 / 1.00–1.09 |
+| SE quantification | GENCODE v50 | Salmon 2.8.0 selective alignment | 6.55–7.61× | 5.40–5.42× | 2.33–2.50 / 2.43–2.51 |
+| SE quantification | GENCODE v50 | piscem 0.23.0 + piscem-infer 0.7.0 | 1.55–1.79× | 3.06–4.03× | 2.33–2.50 / 0.75–0.77 |
+| PE quantification | Mature + nascent | Salmon 2.8.0 sketch | 1.86× | 1.37× | 9.21 / 3.30 |
+| PE quantification | Mature + nascent | Salmon 2.8.0 selective alignment | 5.40× | 3.77× | 9.21 / 5.61 |
+| PE quantification | Mature + nascent | piscem 0.23.0 + piscem-infer 0.7.0 | 1.37× | 1.31× | 9.21 / 3.22 |
+| SE quantification | Mature + nascent | Salmon 2.8.0 sketch | 1.49× | 1.00× | 10.26 / 3.26 |
+| SE quantification | Mature + nascent | Salmon 2.8.0 selective alignment | 6.41× | 4.32× | 10.26 / 5.57 |
+| SE quantification | Mature + nascent | piscem 0.23.0 + piscem-infer 0.7.0 | 1.11× | 1.23× | 10.26 / 3.19 |
+| PBMC FASTQ to matrix | GENCODE v50 | piscem 0.23.0 + alevin-fry 0.18.3 | — | 1.33× | 2.03 / 0.76 |
 
-On the small library, current also takes **38.86 vs 93.97 s** at one thread
-(**2.42× faster**). At eight threads, full GENCODE v50 ALL builds in **11.45 s**
-with **5.32 GiB** peak RSS. The official Pachter Lab mature-plus-nascent reference
-builds in **96.40 s**, with **18.40 GiB** peak RSS.
-Current construction numbers average two complete builds, with no warmup.
+Full quantification includes mapping and native abundance inference/output. Salmon selective
+alignment uses the transcript-only reference without genomic decoys; piscem bulk quantification
+includes piscem-infer. PBMC matrix processing includes bustools for kallistors and alevin-fry
+for piscem; the complete alevin-fry pipeline was measured at eight threads only.
+Mapping policies, inference models and native outputs differ across tools.
 
-The retained original controls take **123.81 s** for GENCODE and **903.51 s** for
-mature-plus-nascent: contextual speed ratios of **10.81×** and **9.37×**.
-The latter uses one original observation from an earlier session and is preliminary.
-All current index bytes match the fully cross-loaded indexes and preserve exact EC counts.
-See [construction measurements](docs/benchmarks.md#eight-thread-index-build-measurement)
-for individual times, memory, phases and comparison limits.
+See the [full Salmon/piscem comparison](docs/salmon-piscem-results.md#full-quantification) for
+individual datasets, CPU/memory measurements, settings and reproducibility records.
+Mapping-only results have separate tables in the
+[Fulgor/Themisto report](docs/mapping-comparison-results.md#mapping-command-medians) and the
+[Salmon/piscem report](docs/salmon-piscem-results.md#native-mapping).
 
-Packed index storage, direct Rust `zlib-rs` decoding, cached exact matching, bounded input
-queues, adaptive parallel EM and buffered output improve quantification. Construction uses byte-proven
-repeat exclusions, compact graph scratch, batched exact lookups and one requested worker pool.
-See [implementation details](docs/development.md#quantification).
+## Comparison with original kallisto
 
-These are source-build measurements (`target-cpu=native`); release CI uses a generic CPU target.
-The evidence identifies the quantification build and latest adaptive index builder separately.
-Performance depends on the dataset, reference, build and hardware. The
-[benchmark guide](docs/benchmarks.md#eight-thread-quantification-measurement) reports memory,
-phase timings, the published v0.5.0 comparison, sampling/output caveats, individual observations
-and reproducible retrieval/trimming commands. Current release details are in the
-[0.5.1 notes](docs/releases/0.5.1.md) and [changelog](CHANGELOG.md).
+Compared with original **kallisto 0.52.0**, using the same prepared reads and original-built
+indexes. Times below are **kallistors / original** in seconds; RSS is peak memory usage.
+Bulk timings cover the full quantification command, including loading and output.
+PBMC includes the same downstream bustools matrix pipeline.
+
+| Workload | 1 thread, s · current / original | 8 threads, s · current / original | 8-thread time ratio · original/current | 8-thread peak RSS, GiB · current / original |
+| --- | --- | --- | --- | --- |
+| Muscle · PE | 28.45 / 101.37 | 6.33 / 46.11 | 7.29× | 2.43 / 2.61 |
+| Muscle · SE | 19.29 / 164.56 | 4.86 / 57.61 | 11.84× | 2.33 / 2.62 |
+| Airway · PE | 102.20 / 315.29 | 22.15 / 180.99 | 8.17× | 2.42 / 2.89 |
+| Airway · SE | 73.79 / 1011.02 | 17.11 / 263.42 | 15.40× | 2.50 / 2.87 |
+| Fibroblast · PE | 166.32 / 536.59 | 34.20 / 207.47 | 6.07× | 2.60 / 2.84 |
+| Fibroblast · SE | 99.79 / 1267.38 | 21.74 / 301.25 | 13.86× | 2.50 / 2.79 |
+| TT-seq · mature + nascent · PE | 147.23 / 343.07 | 34.88 / 97.17 | 2.79× | 9.21 / 16.08 |
+| TT-seq · mature + nascent · SE | 100.71 / 344.16 | 27.13 / 96.04 | 3.54× | 10.26 / 16.00 |
+| PBMC · FASTQ to matrix | 407.15 / 940.30 | 80.81 / 182.37 | 2.26× | 2.03 / 2.59 |
+
+Counts for each transcript group (EC) match in every ordinary bulk condition. Full PBMC BUS
+counts and corrected gene/UMI matrices also match exactly. Abundance estimates can still
+differ because of fragment sampling and statistical models. Matching output does not establish
+biological accuracy. Timings depend on the workload, hardware and build settings.
+
+The [full original-kallisto comparison](docs/kallisto-comparison-results.md) includes all
+datasets, simulation accuracy, bootstrap modes, individual timings, CPU/RSS and numerical
+agreement. Completed [sequence-bias results](docs/kallisto-comparison-results.md#completed-sequence-bias-observations)
+have their own section because the abundance estimates differ materially; their timing ratios
+are excluded from the table above. See the [benchmark guide](docs/benchmarks.md) for preparation
+and methodology, and the [0.5.1 notes](docs/releases/0.5.1.md) for release changes.
+
+## Index construction
+
+Direct comparison of completed index construction on the same Apple Silicon machine,
+using the same transcript target sets and eight requested threads. **Build-time ratio = tool
+time / kallistors time**; for example, 4.58× means kallistors built the index 4.58× faster.
+kallistors, original kallisto, Salmon and piscem use one warmup followed by three builds;
+Fulgor and Themisto have one successful setup observation per available reference.
+
+| Reference | Tool | Build time, s | Build-time ratio | Peak RSS, GiB | Index size, GiB | Measurement |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| GENCODE v50 | kallistors | 11.12 | 1.00× | 4.87 | 1.23 | Median of 3 |
+| GENCODE v50 | kallisto 0.52.0 | 121.49 | 10.92× | 7.69 | 1.19 | Median of 3 |
+| GENCODE v50 | Salmon 2.8.0 | 52.18 | 4.69× | 10.11 | 1.96 | Median of 3 |
+| GENCODE v50 | piscem 0.23.0 | 47.12 | 4.24× | 5.14 | 0.57 | Median of 3 |
+| GENCODE v50 | Fulgor 4.2.0 | 50.93 | 4.58× | 14.17 | 0.35 | Single setup run |
+| GENCODE v50 | Themisto 3.2.2 | 202.12 | 18.17× | 8.94 | 0.48 | Single setup run |
+| Mature + nascent | kallistors | 98.69 | 1.00× | 18.80 | 5.94 | Median of 3 |
+| Mature + nascent | kallisto 0.52.0 | 907.84 | 9.20× | 20.15 | 6.13 | Median of 3 |
+| Mature + nascent | Salmon 2.8.0 | 255.78 | 2.59× | 15.42 | 5.31 | Median of 3 |
+| Mature + nascent | piscem 0.23.0 | 240.47 | 2.44× | 11.94 | 3.08 | Median of 3 |
+| Mature + nascent | Fulgor 4.2.0 | Unavailable | — | — | — | Build failed |
+| Mature + nascent | Themisto 3.2.2 | 1492.04 | 15.12× | 12.48 | 3.23 | Single setup run |
+
+Times exclude downloads, reference preparation and tool compilation; index sizes cover the
+saved indexes. Themisto's nascent setup had background activity; Fulgor's nascent build failed.
+See the [original build details](docs/kallisto-comparison-results.md#index-construction),
+[Salmon/piscem build details](docs/salmon-piscem-results.md#index-construction), and
+[Fulgor/Themisto setup details](docs/mapping-comparison-results.md#setup-at-eight-requested-threads).
 
 ## Compatibility notes
 
-The notes below describe the supported interface. See [compatibility limits](docs/compatibility.md)
-for differences from original kallisto.
+- **Indexes:** build and load kallisto v13-compatible transcriptome indexes; amino-acid
+  BUS indexes are also supported.
+- **Quantification:** paired-end estimates fragment lengths from reads; single-end requires
+  a mean and standard deviation. Optional sequence-bias correction requires the transcript FASTA.
+- **Outputs:** kallisto-style abundance files, bootstrap samples and supported BUS/BAM workflows.
+  Abundance estimates and bootstrap values can differ from original kallisto.
+- **Limits:** general long-read quantification and fusion detection are not implemented.
+  Long-read filtering is available for BUS workflows.
 
-| Area | Status |
-| --- | --- |
-| Existing `kallisto` index loading | Supported |
-| Rust index building | Supported for normal nucleotide transcript FASTA, v13-compatible output; amino-acid BUS indexes are supported with `index --aa` |
-| Paired-end quant | Uses an empirical fragment histogram for effective lengths |
-| Single-end quant | Uses the supplied Gaussian fragment model |
-| Single-cell BUS output | Fixed presets and custom `-x` triples; batch/interleaved FASTQ, BAM input tags, SmartSeq3 tags, supported amino-acid and long-read BUS modes, pseudobam, and projected/sorted genome BAM with BAI or CSI index |
-| Sequence-specific bias correction | Optional with `--bias` and `--transcripts` |
-| Bootstrap / H5 output | Supported for quant; `abundance.h5` is written by default, plaintext bootstrap TSVs with `--plaintext` |
-| Long-read and fusion detection | Long-read BUS filtering/output is implemented; general long-read quant and fusion detection are not implemented |
-| CLI option coverage | Partial |
-
-Current validation and output compatibility:
-
-- Complete EC comparisons use counted transcript sets, independent of EC numbering.
-- Regression coverage includes paired/single-end matching, TTN/AGAP12P fallback probes,
-  abundant-node associations, ambiguous jump probes, empirical fragment models, and serial/threaded EM.
-  Full-index regression tests are explicitly enabled when the downloaded reference is present.
-- Paired fragment-length estimation follows original's 10,000-observation goal and 8 MiB
-  sequence-buffer quotas, including possible concurrent overshoot. Every read contributes
-  to EC counting. See [fragment sampling](docs/fragment_length_sampling.md).
-- Rust-built indexes are checked against standard `MAX_KMER_SIZE=32` upstream builds.
-  Format compatibility does not require byte-identical index files.
-- Native HDF5 readback checks target IDs, estimated counts, effective lengths, target lengths
-  and run metadata against TSV. Bootstrap output is supported, but its RNG/sample values
-  are not expected to match upstream exactly.
-- Exact abundance equality and real-data sequence-bias parity are not general claims.
-  A [controlled fragment-model audit](docs/benchmarks.md#quantification-model-audit) reproduces
-  all 24 saved unbiased paired outputs from four libraries to numerical precision.
-
-Sequence-specific bias correction is optional and enabled only with `--bias`.
-The index builder targets nucleotide transcript FASTA by default. Use `index --aa` for BUS indexes
-built from protein FASTA; unsupported builder features still include distinguish mode and
-d-list-specific behavior.
+See [compatibility details](docs/compatibility.md) for supported options and output differences,
+and the [numerical comparisons](docs/kallisto-comparison-results.md#native-abundance-agreement)
+for measured agreement with original kallisto.
 
 ## Usage
 
 ### As a Binary
 
-Building or installing from source requires Rust 1.97 or newer. The project uses Rust edition 2024.
+Download [prebuilt binaries](https://github.com/deminden/kallistors/releases) for Linux x86_64,
+macOS x86_64/arm64 or Windows x86_64. Releases include SHA-256 checksums. To install from source,
+use Rust 1.97 or newer:
 
 ```bash
-# Download prebuilt binaries from GitHub Releases, or install the CLI from source.
-#
-# Install the CLI from git
 cargo install --locked --git https://github.com/deminden/kallistors kallistors
-
-# Build a kallisto-compatible transcriptome index
-kallistors index \
-    -i transcripts.idx \
-    -t 8 \
-    --timings \
-    transcripts.fa.gz
-
-# Build an amino-acid BUS index from protein FASTA
-kallistors index \
-    -i proteins.idx \
-    --aa \
-    proteins.fa.gz
-
-# Quantify (paired-end)
-kallistors quant \
-    -i path/to/index.idx \
-    -o out_dir \
-    reads_1.fq reads_2.fq
-
-# Quantify with bootstrap samples written to abundance.h5, the default binary output
-kallistors quant \
-    -i path/to/index.idx \
-    -o out_dir \
-    -t 8 \
-    -b 100 \
-    --seed 42 \
-    reads_1.fq reads_2.fq
-
-# Generate BUS output for a 10x Genomics v3-style single-cell run
-kallistors bus \
-    -i path/to/index.idx \
-    -o bus_out \
-    -x 10XV3 \
-    reads_1.fq reads_2.fq
-
-# Restrict 10x v3 cDNA reads to transcript orientation when required by the protocol
-kallistors bus -i path/to/index.idx -o bus_fw -x 10XV3 --fr-stranded reads_1.fq reads_2.fq
-
-# Generate BUS output by translating cDNA reads against an amino-acid index
-kallistors bus \
-    -i proteins.idx \
-    -o bus_out \
-    -x 10XV3 \
-    --aa \
-    reads_1.fq reads_2.fq
-
-# Write transcriptome pseudobam output for supported single-cDNA or paired BUS technologies
-kallistors bus \
-    -i path/to/index.idx \
-    -o bus_out \
-    -x 10XV3 \
-    --pseudobam \
-    reads_1.fq reads_2.fq
-
-# Project pseudobam placements to genome coordinates and write a BAI or CSI index
-kallistors bus \
-    -i path/to/index.idx \
-    -o genome_bus_out \
-    -x 10XV3 \
-    --genomebam \
-    --gtf annotations.gtf \
-    --chromosomes chromosomes.txt \
-    reads_1.fq reads_2.fq
-
-# Custom BUS technology triples support RX UMI extraction from FASTQ comments
-kallistors bus \
-    -i path/to/index.idx \
-    -o bus_out \
-    -x 0,0,16:RX:1,0,0 \
-    reads_1.fq reads_2.fq
-
-# Generate BUS output from a batch file: sample_id followed by the FASTQ files for that sample
-kallistors bus \
-    -i path/to/index.idx \
-    -o bus_out \
-    -x 10XV3 \
-    -B samples.tsv \
-    --batch-barcodes
-
-# Interleaved FASTQ input is accepted with kallisto's --inleaved spelling
-kallistors bus \
-    -i path/to/index.idx \
-    -o bus_out \
-    -x 10XV3 \
-    --inleaved \
-    interleaved.fq
-
-# SmartSeq3 uses kallisto's default UMI tag sequence; override it with -T if needed
-kallistors bus \
-    -i path/to/index.idx \
-    -o bus_out \
-    -x SMARTSEQ3 \
-    -T ATTGCGCAATG \
-    sample_bc1.fq sample_bc2.fq reads_1.fq reads_2.fq
-
-# Read a BAM file with CR/CB barcode tags and UR/RX UMI tags
-kallistors bus \
-    -i path/to/index.idx \
-    -o bus_out \
-    -x 10XV2 \
-    --bam \
-    alignments.bam
-
-# Write per-read unmapped k-mer ratios alongside BUS output
-kallistors bus \
-    -i path/to/index.idx \
-    -o bus_out \
-    -x 10XV3 \
-    --unmapped \
-    reads_1.fq reads_2.fq
-
-# Long-read BUS mode filters reads above the unmapped k-mer threshold
-kallistors bus \
-    -i path/to/index.idx \
-    -o bus_out \
-    -x 10XV3 \
-    --long \
-    --platform ONT \
-    --error-rate 0.01 \
-    --threshold 0.8 \
-    --unmapped \
-    reads_1.fq reads_2.fq
-
-# Quantify (single-end)
-kallistors quant \
-    -i path/to/index.idx \
-    -o out_dir \
-    --single \
-    -l 200 \
-    -s 20 \
-    reads.fq.gz
 ```
 
-Notes:
+Common commands:
 
-- Versioned [GitHub Releases](https://github.com/deminden/kallistors/releases) attach native release archives for Linux x86_64, macOS x86_64,
-  macOS arm64, and Windows x86_64, plus SHA-256 checksum files.
-- Paired-end quant uses the observed fragment histogram for transcript-specific conditional means
-  and effective lengths. Single-end uses `-l` and `-s` for its Gaussian fragment model.
-- Quant writes `abundance.tsv`, `run_info.json`, and, unless `--plaintext` is set, `abundance.h5`
-  in `out_dir` (matching kallisto field names and upstream-readable HDF5 structure).
-- Bootstrap samples use `-b/--bootstrap-samples`; H5 stores bootstrap count vectors under
-  `/bootstrap/bs*`, while `--plaintext` writes `bs_abundance_*.tsv`. Bootstrap H5 layout is
-  compatible, but exact upstream bootstrap sample values are not currently claimed.
-  Bootstrap workers adapt between independent samples and large within-sample components
-  using `-t/--threads`; serial sampling uses a bounded exact lookup table when eligible.
-- `--bias` requires `--transcripts` to provide the transcript FASTA.
-- `kallistors index` defaults to `k = 31`, `threads = 1`, and kallisto-compatible minimizer length
-  selection when `-m/--min-size` is omitted.
-- `bus --aa` currently supports single-cDNA BUS technologies and reports `n_frame_clashes` in
-  `run_info.json`; paired BUS technologies are rejected in amino-acid mode.
-- BUS pseudobam/genomebam output is supported for single-cDNA and paired BUS technologies. Unpaired
-  multi-sequence custom technologies are rejected for BAM output and strand-specific processing
-  until their placement semantics are made explicit.
+```bash
+# Build a transcriptome index
+kallistors index -i transcripts.idx -t 8 transcripts.fa.gz
 
-For bulk mapping, `quant` and `pseudoalign` accept `--match-cache-size auto`
-(the default) or an aggregate budget such as `256MiB` or `4GiB`. Automatic budgets
-scale with the number of mapping workers. See [match-cache sizing](docs/match-cache.md)
-for the defaults, rounding and memory accounting.
+# Quantify paired-end reads
+kallistors quant -i transcripts.idx -o paired_out -t 8 reads_1.fq.gz reads_2.fq.gz
 
-### Performance and validation
+# Quantify single-end reads: supply fragment mean and standard deviation in bases
+kallistors quant -i transcripts.idx -o single_out -t 8 \
+    --single -l 200 -s 20 reads.fq.gz
 
-- Data preparation, benchmark commands and measurement methodology are in
-  [docs/benchmarks.md](docs/benchmarks.md).
-- The [modern quantifier comparison](docs/modern-benchmarks.md) provides pinned
-  Salmon 2, piscem/piscem-infer and piscem/alevin-fry workflows, repeated resource
-  measurements, and separate accuracy and agreement tables. Cell Ranger execution
-  is deferred; alevin-fry end-to-end runs use 8 threads only.
-- Developer-facing trace workflows, abundance diffs, and parity-debug commands are in
-  [docs/development.md](docs/development.md).
-- Instrumented upstream kallisto build notes are in
-  [docs/kallisto_debug_build.md](docs/kallisto_debug_build.md).
-- Reproducible downloads, MD5/gzip checks, fastp trimming, and repeated comparisons are documented
-  in [the benchmark guide](docs/benchmarks.md), including the pinned fastp version.
-  Quantification benchmarks require complete EC parity before timing and export JSON/TSV reports.
-- The [single-cell workflow](docs/benchmarks.md#single-cell-complete-10x-pbmc-1k-v3) preserves
-  barcode/UMI reads during fastp transcript trimming and checks exact BUS counts and corrected
-  gene/UMI matrices against original kallisto.
-  Ordinary single-cDNA layouts use packed batches, concurrent input decoding, the compact
-  counting index and ordered parallel mapping. Mapping overlaps ordered BUS writing, and a
-  bounded cache reuses exact cDNA answers across cells and lanes. Extended tagged, paired, BAM and diagnostic
-  modes retain their dedicated processing paths.
+# Generate BUS output for 10x Genomics v3
+kallistors bus -i transcripts.idx -o bus_out -t 8 -x 10XV3 reads_1.fq.gz reads_2.fq.gz
+```
+
+- Quantification writes `abundance.tsv`, `run_info.json` and `abundance.h5` by default.
+  Use `--plaintext` to omit HDF5 output.
+- Add `-b 100 --seed 42` to generate 100 bootstrap samples.
+- Enable sequence-bias correction with `--bias --transcripts transcripts.fa.gz`.
+- Bulk mapping chooses its cache size automatically. Override it with, for example,
+  `--match-cache-size 4GiB`; see [memory settings](docs/match-cache.md).
+- BUS output needs downstream processing to produce a gene-count matrix; see the
+  [complete single-cell workflow](docs/benchmarks.md#single-cell-complete-10x-pbmc-1k-v3).
+
+The [command-line guide](docs/usage.md) covers additional BUS technologies, BAM input/output,
+batch input, amino-acid indexes, long-read BUS filtering and output options.
 
 ### As a Crate
 
-The serial quantification APIs use one thread. Use `em_quantify_with_fragment_histogram_threaded`
-with an explicit thread count for parallel EM. The CLI `quant -t N` uses N threads for mapping
-and EM in successive phases. HDF5 output uses bounded chunks. Set the
-`PseudoalignOptions::fragment_length_samples` field when using exhaustive struct literals, or use
-`..PseudoalignOptions::default()` for the 10,000-observation goal. Use zero to collect all
-qualifying fragment observations.
-
+Use kallistors from Rust to build indexes, map reads and estimate transcript abundance.
 Add to `Cargo.toml`:
+
 ```toml
 [dependencies]
 kallistors = { git = "https://github.com/deminden/kallistors" }
 ```
 
-Build an index from Rust:
-```rust
-use std::error::Error;
-use std::path::{Path, PathBuf};
+See [Rust examples and configuration](docs/development.md#using-the-rust-library) for index
+construction, paired-end quantification, threading and fragment sampling.
 
-use kallistors::index::{build_index, IndexBuildOptions};
+## Documentation
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let fasta = vec![PathBuf::from("transcripts.fa.gz")];
-    build_index(
-        Path::new("transcripts.idx"),
-        &fasta,
-        IndexBuildOptions::default(),
-    )?;
-    Ok(())
-}
-```
-
-Minimal library usage sketch:
-```rust
-use std::error::Error;
-use std::path::Path;
-
-use kallistors::index::Index;
-use kallistors::io::open_fastq_reader;
-use kallistors::pseudoalign::{
-    build_bifrost_index, pseudoalign_paired_bifrost_with_options, PseudoalignOptions, Strand,
-};
-use kallistors::quant::{em_quantify_with_fragment_histogram, EcCountsInput, QuantOptions};
-
-fn main() -> Result<(), Box<dyn Error>> {
-    let index_path = Path::new("path/to/index.idx");
-    let mut reads_1 = open_fastq_reader(Path::new("reads_1.fq.gz"))?;
-    let mut reads_2 = open_fastq_reader(Path::new("reads_2.fq.gz"))?;
-    let index = build_bifrost_index(index_path)?;
-    let ec = pseudoalign_paired_bifrost_with_options(
-        &index,
-        &mut reads_1,
-        &mut reads_2,
-        Strand::Unstranded,
-        PseudoalignOptions::default(),
-    )?;
-
-    let meta = Index::load(index_path)?;
-    let input = EcCountsInput {
-        ec_list: kallistors::ec::EcList {
-            classes: ec.ec_list,
-        },
-        counts: ec.counts,
-    };
-    let lengths: Vec<u32> = meta.transcripts.iter().map(|t| t.length).collect();
-    let quant = em_quantify_with_fragment_histogram(
-        &input,
-        &lengths,
-        None,
-        None,
-        ec.fragment_length_hist.as_deref(),
-        QuantOptions::default(),
-    )?;
-
-    println!("reads processed: {}", ec.reads_processed);
-    println!("reads aligned: {}", ec.reads_aligned);
-    println!("targets: {}", quant.est_counts.len());
-    Ok(())
-}
-```
-
-### Development docs
-
-Developer-facing checks, trace workflows, abundance-diff commands, and real-data
-parity workflows are in [docs/development.md](docs/development.md). The
-[source layout](docs/development.md#source-layout) describes the focused graph-building, index-loading, mapping, EM/model,
-diagnostic and BUS modules. Public entry points and index/output formats remain compatible.
+- [Command-line guide](docs/usage.md) and [compatibility details](docs/compatibility.md).
+- [Benchmark methodology](docs/benchmarks.md) and full results for
+  [Salmon/piscem](docs/salmon-piscem-results.md), [original kallisto](docs/kallisto-comparison-results.md)
+  and [mapping-only tools](docs/mapping-comparison-results.md).
+- [Development guide](docs/development.md): Rust API examples, testing, debugging and source layout.
+- [Release notes](docs/releases/0.5.1.md).
 
 ## Contributing
 

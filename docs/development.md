@@ -11,6 +11,92 @@ minimum supported Rust version in the root `Cargo.toml`. Source builds use
 `target-cpu=native` from `.cargo/config.toml`; CI overrides `RUSTFLAGS` with
 `-C target-cpu=generic` for portable release artifacts and validation.
 
+## Using the Rust library
+
+Add the dependency shown in the [README](../README.md#as-a-crate), then use the examples
+below to build an index or quantify paired-end reads.
+
+Serial quantification APIs use one thread. For parallel EM, call
+`em_quantify_with_fragment_histogram_threaded` with an explicit thread count. The CLI
+`quant -t N` uses N threads for mapping and EM in successive phases. HDF5 output uses
+bounded chunks.
+
+Exhaustive `PseudoalignOptions` literals must include `fragment_length_samples` and
+`match_cache_size`. Use `..PseudoalignOptions::default()` for the 10,000-observation goal
+and automatic [match-cache budget](match-cache.md). Set `fragment_length_samples` to zero
+to collect all qualifying fragment observations. This option controls fragment estimation;
+every read pair still contributes to EC counting. See the
+[fragment-sampling policy](fragment_length_sampling.md) for quotas and threaded behavior.
+
+### Build an index
+
+```rust
+use std::error::Error;
+use std::path::{Path, PathBuf};
+
+use kallistors::index::{build_index, IndexBuildOptions};
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let fasta = vec![PathBuf::from("transcripts.fa.gz")];
+    build_index(
+        Path::new("transcripts.idx"),
+        &fasta,
+        IndexBuildOptions::default(),
+    )?;
+    Ok(())
+}
+```
+
+### Quantify paired-end reads
+
+```rust
+use std::error::Error;
+use std::path::Path;
+
+use kallistors::index::Index;
+use kallistors::io::open_fastq_reader;
+use kallistors::pseudoalign::{
+    build_bifrost_index, pseudoalign_paired_bifrost_with_options, PseudoalignOptions, Strand,
+};
+use kallistors::quant::{em_quantify_with_fragment_histogram, EcCountsInput, QuantOptions};
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let index_path = Path::new("path/to/index.idx");
+    let mut reads_1 = open_fastq_reader(Path::new("reads_1.fq.gz"))?;
+    let mut reads_2 = open_fastq_reader(Path::new("reads_2.fq.gz"))?;
+    let index = build_bifrost_index(index_path)?;
+    let ec = pseudoalign_paired_bifrost_with_options(
+        &index,
+        &mut reads_1,
+        &mut reads_2,
+        Strand::Unstranded,
+        PseudoalignOptions::default(),
+    )?;
+
+    let meta = Index::load(index_path)?;
+    let input = EcCountsInput {
+        ec_list: kallistors::ec::EcList {
+            classes: ec.ec_list,
+        },
+        counts: ec.counts,
+    };
+    let lengths: Vec<u32> = meta.transcripts.iter().map(|t| t.length).collect();
+    let quant = em_quantify_with_fragment_histogram(
+        &input,
+        &lengths,
+        None,
+        None,
+        ec.fragment_length_hist.as_deref(),
+        QuantOptions::default(),
+    )?;
+
+    println!("reads processed: {}", ec.reads_processed);
+    println!("reads aligned: {}", ec.reads_aligned);
+    println!("targets: {}", quant.est_counts.len());
+    Ok(())
+}
+```
+
 ## Required checks
 
 Before committing changes, run:
@@ -20,6 +106,22 @@ cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
+
+Repository checks use Python and Bash without downloading data or running benchmarks:
+
+```bash
+python3 -B scripts/check_repository.py
+python3 -B -m unittest discover -s scripts/tests -v
+```
+
+These check Markdown links/anchors, shell examples, Python syntax and corrupt benchmark-record
+fixtures. The benchmark handoff gate requires each declared condition's warmup and all three
+distinct measurements, unchanged executables and uninterrupted native/probe timings.
+
+CI runs formatting and Clippy on Linux, tests stable Rust on Linux/macOS/Windows, and tests the
+declared minimum Rust 1.97 on Linux. The lightweight repository job is separate from native
+benchmarks. Release builds also run `python3 -B scripts/smoke_cli.py PATH_TO_BINARY`: a tiny
+index, mapping and quantification workflow with expected counts and default HDF5 output.
 
 ## Test strategy and prerequisites
 
@@ -122,13 +224,15 @@ The Rust `quantification` integration tests include a 70,003-target case with a 
 
 ## Release workflow
 
-The crate version lives in `crates/kallistors/Cargo.toml`. Version-specific release notes
+The crate version lives in `crates/kallistors/Cargo.toml`. Its compact package README lives in
+`crates/kallistors/README.md` and uses repository URLs so documentation links also work outside
+a checkout. Version-specific release notes
 live in `docs/releases/`; the binary publication workflow reads the file matching its tag.
 
 For a release:
 
 1. Bump the crate version and refresh its package entry in `Cargo.lock`. Update `CHANGELOG.md`,
-   the README, and `docs/releases/<version>.md`. Document supported behavior and compatibility
+   both READMEs, and `docs/releases/<version>.md`. Document supported behavior and compatibility
    requirements. Keep the maintained benchmark evidence compact and portable; retain raw execution outputs separately.
 2. Run the required fmt/clippy/test checks above with the locked dependencies. Run any explicitly
    enabled external-data regressions needed for the changed behavior.
@@ -155,13 +259,22 @@ Two GitHub workflows handle release publication:
 - `Release binaries` runs on version-tag pushes, when a GitHub Release is published, and can also
   be dispatched manually for an existing tag. It checks out the tag, verifies the
   tag/version match, builds `kallistors` with `cargo build --locked --release`
-  for Linux x86_64, macOS x86_64, macOS arm64, and Windows x86_64, then uploads
+  for Linux x86_64, macOS x86_64, macOS arm64, and Windows x86_64, exercises each binary on a
+  tiny index-to-quantification workflow, then uploads
   archives plus `.sha256` checksum files to the release. On a tag push or manual dispatch, it
   creates a missing GitHub Release using `docs/releases/<version>.md` when available, otherwise
   generated GitHub notes. Archives include README, license, changelog, documentation, and benchmark scripts/manifests.
 
 ## Kallistors CLI debugging tools
 
+Developer commands are hidden from the ordinary command list and remain callable by name.
+Run `kallistors COMMAND --help` for their options. Existing diagnostic names and accepted
+compatibility switches remain available; the legacy no-op and unsupported quant BAM flags
+are hidden from normal help as well.
+
+- `index-ec-dump` and `ec-from-index` export index EC data; `ec-stats`, `ec-export` and
+  `ec-compare` inspect and canonicalize EC text. `transcript-lookup` resolves target names.
+- `unitig-window` inspects graph sequence windows and minimizers.
 - `trace-reads` supports EC traces, per-hit dumps, intersection dumps, and
   positions visited.
 - Minimizer debug includes MPH lookup info, unitig match decisions, and
@@ -232,8 +345,8 @@ For a mismatch, create a seeded paired subset with `subsample_benchmark_pairs.py
 Use `benchmark_reads.py --stages` for complete paired/single runs, phase timing and peak RSS.
 It checks every counted EC before timing. `benchmark_index.py --threads 8 --keep-last-index`
 measures construction and retains the final indexes for cross-loading checks. Both tools use
-one warmup and three measured runs by default. For current construction measurements, select
-`--runs 2 --warmups 0` and report their arithmetic mean. Keep input, executable and output hashes;
+one warmup and three measured runs by default; use that protocol and report medians for the
+bulk and original-kallisto construction panels. Keep input, executable and output hashes;
 compare identical reads and references, retain CPU-activity flags and use a new result directory
 after changing an executable. Native HDF5 checks and abundance comparisons follow timing.
 See the benchmark guide for runnable commands, manifests, trimming and reporting.

@@ -1,7 +1,8 @@
 # Compatibility
 
 kallistors supports kallisto v13 indexes, paired/single-end quantification and the BUS modes
-listed in the [README](../README.md#compatibility-notes). Unlisted kallisto options require
+described below. See the [README](../README.md#usage) for common commands and the
+[command-line guide](usage.md) for additional examples. Unlisted kallisto options require
 separate compatibility checks.
 
 ## Quantification
@@ -20,11 +21,14 @@ separate compatibility checks.
 - Sequence-specific bias correction is supported with `--bias --transcripts FASTA`.
   General real-data abundance parity with upstream bias correction is not established.
 - Bootstrap HDF5 layout is compatible. Bootstrap RNG and sample values can differ from upstream.
+- BAM output is supported by `bus`. The `quant --pseudobam` and `quant --genomebam` flags
+  are recognized but return an unsupported-feature error.
 - General long-read quantification and fusion detection are not implemented.
 
 ## Indexes
 
 The Rust builder supports nucleotide transcript FASTA and amino-acid BUS indexes (`index --aa`).
+It is checked against standard upstream builds using `MAX_KMER_SIZE=32`.
 Distinguish mode, genomic D-list construction and nonstandard upstream compile-time k-mer widths
 are outside its supported surface. See [index format](index_format_notes.md) for layout and
 platform assumptions. Format-compatible indexes need not be byte-identical.

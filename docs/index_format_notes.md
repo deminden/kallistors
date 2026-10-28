@@ -62,8 +62,9 @@ supported.
   - little-endian host
   - `MAX_KMER_SIZE` = 32 (8-byte `Kmer`)
 - The supported builder path writes v13-compatible nucleotide transcript indexes with `k <= 31`.
-- `kallistors index-info` reads the graph/minimizer metadata, transcript metadata, and EC/node
-  payloads needed by the quant path.
+- `kallistors index-info` uses `Index::load` to read graph and transcript metadata. It skips
+  MPHF and node payloads; successful inspection alone does not validate mapping compatibility.
+  Mapping loads graph lookups and EC/position data through the separate Bifrost index loaders.
 - The pure Rust builder emits `dlist_size = 0` for the currently supported index surface.
 - Generated indexes are intended to be format-compatible and quant-equivalent, not byte-identical
   to upstream `kallisto index` output.

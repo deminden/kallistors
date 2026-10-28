@@ -1,13 +1,31 @@
 # Benchmarks
 
-Compare current kallistors with official kallisto v0.52.0 using the same index and trimmed
-FASTQs. The quantification runner requires complete EC parity before timing, saves executable
-and input hashes, and validates retained abundance/HDF5 outputs after timing. Results depend on
-the input, reference, hardware, power mode and compiler settings.
+Compare kallistors with original kallisto, Salmon, piscem, Fulgor and Themisto on prepared
+reads and matched reference target sets. The original-kallisto quantification runner uses
+identical index bytes and requires complete EC parity before timing. Comparisons with other
+tools report their native mapping and inference differences. Runners save executable/input
+hashes and validate retained outputs; results depend on workload, hardware and build settings.
+
+## Latest completed results
+
+Current benchmark evidence is organized by workload, with frozen tool versions and input
+provenance identified in each report:
+
+1. [Salmon and piscem comparison](salmon-piscem-results.md): full PE/SE quantification,
+   native mapping, single-cell processing and index construction.
+2. [Original kallisto comparison](kallisto-comparison-results.md): default bulk quantification,
+   bootstrap modes, full PBMC BUS/matrices, index construction and separate sequence-bias results.
+3. [Fulgor and Themisto mapping comparison](mapping-comparison-results.md): independent
+   single-read mapping, native output differences, actual worker/parser counts and setup costs.
+
+The reports link complete numeric exports and [frozen protocols](benchmark-provenance.json).
+The recipes below explain preparation and individual runner panels; the frozen protocols and
+[mapping command record](mapping-comparison-commands.json) specify the measured configurations.
 
 ## Tools
 
-Python 3.9 or newer runs the benchmark tools. Native HDF5 validation also needs h5py and NumPy:
+The individual preparation and timing scripts use Python 3.9 or newer. Native HDF5 validation
+also needs h5py and NumPy; choose versions compatible with the interpreter:
 
 ```bash
 python3 -m venv target/hdf5-native-check
@@ -18,6 +36,24 @@ Put the official timing executable at `target/tools/kallisto-0.52.0`, or pass `-
 Build a separate instrumented original as described in the [debugging guide](kallisto_debug_build.md).
 Pass it with `--diagnostic-kallisto`; it supplies EC evidence and is never the timing control.
 
+The full comparison suite has stricter requirements. `modern_benchmarks.py`,
+`run_kallisto_comparison.py` and `run_full_comparison.py` enforce the
+[analysis environment lock](../scripts/benchmarks/modern/analysis.lock.json): Python **3.14.7**,
+NumPy 2.5.4, SciPy 1.18.1, h5py 3.16.0 and psutil 7.2.2. Use that Python patch version
+to create a separate environment, then install the checksum-pinned dependencies:
+
+```bash
+python3.14 -m venv target/benchmark-analysis
+target/benchmark-analysis/bin/python -m pip install --require-hashes \
+  -r scripts/benchmarks/modern/analysis-requirements.lock
+```
+
+The suite verifies the interpreter and package versions before executing a panel. Tool versions
+and supported platform downloads are pinned in the
+[tool lock](../scripts/benchmarks/modern/tools.lock.json). Bootstrap reuses explicitly supplied
+executables or retrieves pinned distributions; building fastp or bustools from source needs
+their build dependencies, including a C/C++ toolchain and make/CMake.
+
 | Command | Purpose |
 | --- | --- |
 | `prepare_benchmark.py` | Verified ENA/10x retrieval and fastp trimming |
@@ -27,6 +63,9 @@ Pass it with `--diagnostic-kallisto`; it supplies EC evidence and is never the t
 | `benchmark_bus.py` | Complete single-cell BUS timing, counted-record parity and corrected gene/UMI matrices |
 | `benchmark_index.py` | Index build time, size and peak RSS |
 | `report_benchmarks.py` | Portable JSON/TSV export from completed runs |
+| `modern_benchmarks.py` | Prepare, run and report the pinned Salmon/piscem comparison |
+| `run_kallisto_comparison.py` | Compare original kallisto using the prepared reference panels |
+| `run_full_comparison.py` | Run the alternatives and original-kallisto panels sequentially |
 | `compare_ec_counts.py` | Independent comparison of complete counted EC maps |
 | `compare_abundance.py` | Transcript abundance and effective-length comparisons |
 | `check_hdf5_output.py` | Independent native HDF5 validation and fragment-model statistics |
@@ -36,6 +75,57 @@ Pass it with `--diagnostic-kallisto`; it supplies EC evidence and is never the t
 result writing. The [ENA manifest](../scripts/benchmarks/human_datasets.json) defines four
 public datasets and their directories. The [suite manifest](../scripts/benchmarks/quantification.json)
 defines larger-library/reference combinations; the runner contains no accession-specific plans.
+
+`modern_benchmark/` contains shared tool adapters, measurement, validation and analysis code.
+`original_comparison/` reuses those helpers for original-kallisto controls. The diagnostic
+patches and replay helper support the independent correctness checks described in the
+[debugging guide](kallisto_debug_build.md).
+
+### Full comparison suite
+
+From the repository root, build the native candidate and prepare the additional airway library
+used by the original-kallisto panel. Supply fastp 1.4.0 and the two original-kallisto executables
+described above:
+
+```bash
+cargo build --locked --release --package kallistors --bin kallistors
+target/benchmark-analysis/bin/python scripts/prepare_benchmark.py \
+  --samples SRR1039508 --fastp /path/to/fastp
+target/benchmark-analysis/bin/python scripts/run_full_comparison.py \
+  --workspace target/benchmarks/comparison \
+  --data data \
+  --kallistors target/release/kallistors \
+  --kallisto target/tools/kallisto-0.52.0 \
+  --diagnostic-kallisto target/tools/kallisto-src/build/src/kallisto
+```
+
+The coordinator retrieves and prepares the other libraries and both references, runs the
+Salmon/piscem panels sequentially, then runs the original-kallisto comparison. It includes
+index construction, bulk quantification, single-cell processing and numerical checks;
+the original panel also includes bootstraps and sequence-bias correction. Use a new workspace
+for a new comparison and leave frozen inputs, code and executables unchanged during execution.
+`status.json` records the current phase or a failure; final summaries record completeness.
+Run one native measurement campaign at a time, without competing builds or profiling.
+
+For a single reference, use `modern_benchmarks.py --workspace PATH --reference gencode50 all`
+with the same analysis interpreter; `--reference official-nac` selects mature-plus-nascent.
+Its individual actions are `bootstrap`, `retrieve`, `prepare`, `plan`, `pilot`, `run` and `report`;
+`--tool NAME=PATH` supplies an executable to bootstrap. The Fulgor/Themisto extension is
+documented separately in its [mapping report](mapping-comparison-results.md) and
+[command record](mapping-comparison-commands.json). Use the
+[portable templates](mapping-reproduction.md) to configure local tools, indexes and reads.
+
+### Generated reports
+
+Results stay in the selected benchmark workspace. `modern_benchmarks.py report` writes its
+numeric summary and detailed tables under `tables/`; the original-kallisto runner writes
+`summary.json`, `README.md` and `tables/` in its workspace. The full coordinator keeps these
+under its `gencode/`, `nascent/` and `original/` subdirectories.
+
+Repository documentation is updated separately from reviewed evidence. Running a benchmark
+or generating its report does not copy results into `docs/`. Completed runs retain their
+frozen workflow snapshots; use those snapshots to reproduce an existing campaign, and a
+new workspace for changed scripts or executables.
 
 ## Retrieve and trim reads
 
@@ -63,8 +153,7 @@ Preparation enables fastp paired-end adapter detection, front/tail trimming with
 minimum length 50, qualified-base Q15, at most 40% unqualified bases and five Ns. Defaults are
 four threads and gzip level 4. `trimmed-fastp/preparation.json` records settings, trimmer
 version/hash, input checksums, output hashes and actual before/after pair counts. Cached outputs
-must match those records. Earlier measured bulk-RNA results retain their recorded fasterp
-0.2.1 provenance; they are not relabelled as fastp measurements. The benchmark verifies prepared-read hashes before measuring.
+must match those records. The benchmark verifies prepared-read hashes before measuring.
 
 A pair is two FASTQ records. Retrieval and trimming are outside quantification timing.
 
@@ -111,18 +200,14 @@ The runner first checks 100,000 retained pairs, then measures the complete libra
 one warmup and three timed runs per program, alternating program order between repetitions.
 Report medians of whole-process time and peak RSS. Both programs use `bus -x 10xv3` and the
 same full GENCODE v50 index. Retrieval, trimming and bustools are outside these timings.
-Ordinary single-cDNA layouts with one barcode, UMI and transcript slice use compact counting
-indexes, packed sequence batches and ordered parallel mapping. At multiple requested threads,
-each input has a bounded prefetch queue and its own decoder; one-thread runs decode synchronously.
-Mapping overlaps ordered BUS writing through a bounded queue. A bounded shared cDNA cache
-uses two-way replacement, compares complete query bytes and reuses exact mapped or unmapped
-answers across workers and lanes.
-Counting borrows unchanged graph ECs, materializes only changed intersections and omits unused
-placement metadata. Count-only scanning stops after irreversible EC rejection. Transcript names stream from the same index file; long-read statistics are
-allocated only for long-read runs. Read limits also bound decoding, including interleaved records.
-Tagged, paired,
-BAM, explicit-strand, long-read and diagnostic modes retain their full processing paths.
-Measure this workflow separately from `quant`.
+Ordinary BUS counting uses compact indexes and ordered parallel mapping for single-cDNA,
+compound, tagged and paired FASTQ layouts, including explicit strand selection. Packed
+single-cDNA input overlaps decoding, mapping and ordered output; other layouts and ordinary
+BAM input normalize their required fields into bounded batches for the shared counting workers.
+Single-cDNA reads can reuse exact full-query answers across workers and lanes. Long-read,
+amino-acid, unmapped-read and BAM-output modes retain the metadata their features require.
+See [mapping routes](development.md#mapping-routes) for implementation details.
+Measure BUS separately from `quant`.
 
 Every warmup and measured BUS output is compared as a complete weighted multiset of
 `(barcode, UMI, exact transcript set, flags)` records. Canonical EC IDs use full transcript
@@ -249,8 +334,8 @@ reference provenance to a direct run.
 
 Defaults are eight threads, one full warmup and three measured runs per tool/configuration.
 Measured order alternates. Every execution includes index loading, all reads, model fitting,
-EM, normal TSV/HDF5 output and shutdown. Last measured outputs are retained for validation;
-other outputs are removed after their records are saved. Counter differences and disagreement
+EM, normal TSV/HDF5 output and shutdown. Every measured output is retained and validated;
+warmup outputs are removed after their records are saved. Counter differences and disagreement
 with preflight EC totals fail the run. Equal counters alone never establish EC parity.
 
 Peak RSS is enabled by default on macOS/Linux; `--no-memory` disables it. macOS uses
@@ -288,7 +373,7 @@ python3 scripts/benchmark_reads.py \
   --suite scripts/benchmarks/quantification.json --group gencode50 \
   --diagnostic-kallisto target/tools/kallisto-src/build/src/kallisto \
   --hdf-python target/hdf5-native-check/bin/python \
-  --thread-counts 8 --runs 3 --warmups 1 --stages \
+  --thread-counts 1,8 --runs 3 --warmups 1 --stages \
   --out target/benchmarks/gencode50-suite
 python3 scripts/report_benchmarks.py \
   --benchmark target/benchmarks/gencode50-suite \
@@ -310,12 +395,12 @@ For index build comparisons:
 ```bash
 python3 scripts/benchmark_index.py \
   --fasta data/srr-small/gencode.v50.transcripts.fa.gz --threads 8 \
-  --runs 2 --warmups 0 --stages --keep-last-index \
+  --runs 3 --warmups 1 --stages --keep-last-index \
   --out target/benchmarks/index-build
 ```
 
-Use two measured builds per tool and no warmup for the current index protocol; report their
-arithmetic mean. With two observations, the shared summary statistic equals this mean.
+Use one warmup and three measured builds per tool at eight threads; report the median.
+Keep each observation and record background activity without selecting only the fastest run.
 Index benchmarking shares execution, provenance, memory and summary code with quantification.
 Its outputs can be exported with `report_benchmarks.py` using the same command structure.
 `--keep-last-index` retains the last measured index from each builder for compatibility checks;
@@ -338,282 +423,6 @@ progress log is retained, without claiming equivalent internal stage measurement
 Index time/size comparisons do not by themselves establish index compatibility. Load both
 builders' indexes in both quantifiers and compare complete counted EC maps on identical reads,
 including paired/single and relevant strand options. Index bytes may differ between builders.
-
-### Eight-thread quantification measurement
-
-Current release measurements cover four complete human libraries, including two larger bulk
-libraries and a genuine nascent-enriched TT-seq library. All use fasterp 0.2.1, identical trimmed
-mates/index bytes per comparison, eight requested threads, one warmup and three measured
-complete runs.
-
-All current quantification runs use the normal CLI build: one warmup and three complete
-measurements per configuration. The unchanged pre-adaptive 0.5.1 baseline observations are
-retained, with fresh complete baseline checks interleaved after the first current measurement
-in each configuration. Original kallisto and published v0.5.0 controls retain earlier verified
-observations and original control rechecks. Their ratios are contextual comparisons across
-sessions. All reported measurements and control checks are retained.
-
-The first three libraries use GENCODE v50 ALL (670,670 targets). TT-seq uses
-only the official Pachter Lab mature-plus-nascent reference (267,211 targets; 6.58 GB index).
-All indexes use k=31/g=23. Retrieval/trimming are outside timing.
-
-| Library | Trimmed pairs | Current s | v0.5.0 s | Original s | Current vs original |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| SRR13638690 · muscle | 4,410,990 | 8.119 | 17.341 | 45.158 | 5.56× |
-| SRR1039508 · airway | 22,297,617 | 27.183 | 44.770 | 178.942 | 6.58× |
-| SRR307903 · fibroblast | 32,878,740 | 44.249 | 85.372 | 212.451 | 4.80× |
-| SRR10919051 · TT-seq | 10,261,737 | 44.307 | 91.817 | 98.344 | 2.22× |
-
-Peak RSS is the whole-process high-water mark; GiB means 2^30 bytes. macOS peak footprint is
-recorded separately in the [current measurement evidence](benchmark-results.json).
-
-| Library | Current GiB | v0.5.0 GiB | Original GiB | RSS reduction vs original |
-| --- | ---: | ---: | ---: | ---: |
-| SRR13638690 · muscle | 1.229 | 3.064 | 2.847 | 56.8% |
-| SRR1039508 · airway | 1.336 | 3.801 | 3.129 | 57.3% |
-| SRR307903 · fibroblast | 1.321 | 3.702 | 3.091 | 57.3% |
-| SRR10919051 · TT-seq | 9.174 | 14.960 | 14.973 | 38.7% |
-
-#### Where time is spent
-
-| Library / tool | Startup/setup s | Read processing s | Model + EM s | Output/shutdown s |
-| --- | ---: | ---: | ---: | ---: |
-| SRR13638690 · muscle / original | 5.074 | 9.561 | 29.436 | 1.041 |
-| SRR13638690 · muscle / current | 1.265 | 4.531 | 1.793 | 0.534 |
-| SRR1039508 · airway / original | 5.172 | 31.025 | 141.934 | 1.107 |
-| SRR1039508 · airway / current | 1.271 | 16.523 | 8.828 | 0.548 |
-| SRR307903 · fibroblast / original | 5.201 | 60.765 | 145.147 | 1.106 |
-| SRR307903 · fibroblast / current | 1.262 | 33.640 | 8.741 | 0.554 |
-| SRR10919051 · TT-seq / original | 45.676 | 36.970 | 13.561 | 2.403 |
-| SRR10919051 · TT-seq / current | 15.713 | 27.260 | 1.181 | 0.112 |
-
-On the larger cDNA libraries, original model/EM dominates total time; index setup remains
-about five seconds. Read processing also improves, so the observed gains extend beyond loading.
-For TT-seq against the larger NAC reference, loading/setup is
-45.68 → 15.71 s,
-read processing 36.97 → 27.26 s, and model/EM
-13.56 → 1.18 s (original → current). Loading contributes
-substantially to this case's gain; the read and model phases also improve. These are phase
-observations, not isolated measurements of individual optimizations.
-
-The read phase includes gzip input, parsing, matching and EC counting. Startup includes index
-loading and input setup; output includes deferred names, complete default TSV/HDF5 and shutdown.
-Model/EM timings use each program's default fragment sample. Progress-marker arrival is an
-external approximation; independent phase medians need not sum to the median total. The
-released v0.5.0 binary lacks phase boundaries, so its stages are not inferred. The recorded
-matched-native v0.5.0 control on the small library also supports a source-code comparison.
-These phase tables distinguish read work from index-loading and EM overhead; no universal
-speed factor or precise attribution to an individual optimization is claimed.
-
-#### Adaptive EM scheduling
-
-Scheduling uses the counted EC graph and requested thread count. Components exceeding both
-262,144 edges and one worker's fair share of all multi-EC edges share their ordered denominator
-and transcript work across the same pool. Smaller components retain local rounds and cache
-reuse. Each scalar sum stays in its original order; only integer changes and fixed-point flags
-are reduced. Eligible single-thread and bias-corrected runs share the compact component engine;
-bias weight refreshes retain their original boundaries and reset fixed-work certificates.
-Zero-iteration and exceptional model cases keep their general fallbacks. Graph topology and
-requested workers select component scheduling, independently of tissue or accession.
-
-The largest component accounts for 6.0% of multi-EC edges in the small library, 84.8% in airway,
-85.4% in fibroblast and 91.6% in TT-seq. This topology explains why scheduling across components
-alone cannot use eight workers effectively on all these inputs.
-
-| Library | Component-local s | Adaptive s | Total speedup | Component-local / adaptive RSS GiB |
-| --- | ---: | ---: | ---: | ---: |
-| SRR13638690 · muscle | 8.079 | 8.119 | 1.00× | 1.223 / 1.229 |
-| SRR1039508 · airway | 53.160 | 27.183 | 1.96× | 1.337 / 1.336 |
-| SRR307903 · fibroblast | 71.464 | 44.249 | 1.62× | 1.320 / 1.321 |
-| SRR10919051 · TT-seq | 48.079 | 44.307 | 1.09× | 9.175 / 9.174 |
-
-These complete-process medians use the verified standard CLI builds and control protocol above. The small
-case is interpreted as unchanged within timing noise. Fixed-EC/fixed-histogram full-convergence
-replays additionally produce byte-identical output for all four libraries, independent of fragment
-sampling variation. Default-run fragment histograms differ on SRR13638690 · muscle, SRR307903 ·
-fibroblast, SRR10919051 · TT-seq, as concurrent sampling permits; complete abundance audits are
-retained. Replay times are diagnostic single executions, not repeated speed estimates.
-Executable/input hashes, all observations and output audits are in the measurement evidence.
-Fresh baseline checks against the retained three-run medians:
-
-| Configuration | Fresh baseline s | Retained median s | Difference |
-| --- | ---: | ---: | ---: |
-| SRR13638690 | 8.118 | 8.079 | +0.48% |
-| SRR10919051-official-nac-full--paired--t8 | 48.007 | 48.079 | -0.15% |
-| SRR1039508-cdna-full--paired--t8 | 53.095 | 53.160 | -0.12% |
-| SRR307903-cdna-full--paired--t8 | 71.954 | 71.464 | +0.69% |
-| SRR13638690--t1 | 39.042 | 38.872 | +0.44% |
-
-
-#### Complete EC and output validation
-
-All current/original full-library EC maps are exact, independent of EC numbering:
-
-| Library | Nonzero ECs | Aligned pairs | Differing ECs | Count L1 |
-| --- | ---: | ---: | ---: | ---: |
-| SRR13638690 | 190,693 | 4,246,399 | 0 | 0 |
-| SRR1039508 | 742,488 | 21,137,312 | 0 | 0 |
-| SRR307903 | 744,744 | 29,637,796 | 0 | 0 |
-| SRR10919051 | 212,719 | 8,890,219 | 0 | 0 |
-
-The published v0.5.0 binary does **not** preserve the same complete EC map on every larger case
-(SRR1039508: 10 differing ECs, count L1 21; SRR307903: 18 differing ECs, count L1 31; SRR10919051: 5
-differing ECs, count L1 5). Its rows are delivered-binary time/RSS observations, not equivalent-work
-speedup claims. Current/original parity is mandatory and passes. Fixes in 0.5.1 include explicit
-abundant-node associations and paired fallback/strand behavior.
-
-Adaptive EM shares the dominant airway component across threads, removing the observed
-regression against published v0.5.0. Complete fixed-EC/fixed-histogram replays preserve every
-output byte, including full convergence and the final threshold update.
-
-For TT-seq, the shared counted map partitions by Pachter's mature-target boundary as follows:
-mature only: **251,972 pairs (2.83%)**; nascent only: **6,676,534 pairs (75.10%)**; mixed:
-**1,961,713 pairs (22.07%)**. These are target-compatibility partitions, not a measurement of
-biological splicing accuracy. A mixed EC contains both target types. The assay enriches newly synthesized
-RNA and is not exclusively unspliced.
-
-Exact EC parity does not imply equal abundances. Concurrent scheduling can change the
-near-10,000-observation fragment sample, effective lengths and EM stopping. v0.5.0 instead
-collects all qualifying observations. The retained eight-thread current/original outputs show:
-
-| Library | Fragment observations, current / original | Estimated-count L1 / original estimate mass | Maximum count difference |
-| --- | ---: | ---: | ---: |
-| SRR13638690 | 11,828 / 11,828 | 0.000000% | 8.73115e-10 |
-| SRR1039508 | 17,383 / 17,383 | 0.000000% | 1.74623e-10 |
-| SRR307903 | 16,205 / 16,111 | 0.000731% | 4.27427 |
-| SRR10919051 | 59,355 / 59,241 | 0.000160% | 2.03495 |
-
-Every current/original retained output passes native HDF5 readback across all transcript rows. The
-v0.5.0 download fails native large-vector readback on SRR1039508, SRR307903, SRR10919051
-(chunk-dimension encoding); its valid 17-digit TSV supplies abundance comparisons. The small
-full-reference comparison independently found the same v0.5.0 HDF5 encoding limitation; current
-bounded chunks pass.
-
-#### Single-thread control and build scope
-
-On the 4,410,990-pair library, the current median is **38.855 s**, versus
-**93.967 s** for original controls (**2.42× faster**).
-The retained pre-adaptive baseline is 38.872 s.
-Observed ranges are 38.736–39.393 s baseline and
-38.652–38.964 s current; interpret differences within these ranges as timing variation.
-Read processing is 25.292 versus 49.658 s;
-model/EM is 8.963 versus 28.598 s.
-Fragment histograms are identical and effective lengths are
-identical; maximum estimated-count difference
-is 2.62e-09. One-thread runs cover only this library. Index construction is measured
-at eight threads only.
-
-Current source and the small matched-native v0.5.0 control use Rust 1.99.0 with
-`target-cpu=native`. The control differs from its release tag only by phase messages. The
-checksum-verified [published v0.5.0 download](https://github.com/deminden/kallistors/releases/tag/v0.5.0)
-was built with native settings on its CI runner; its effective CPU/compiler settings are not
-assumed identical to this host. Original timing uses the unmodified official kallisto v0.52.0
-binary; the separately instrumented original supplies EC evidence only. Current release CI
-uses `target-cpu=generic`, so source-build factors are not promises for prebuilt binaries.
-
-All hardware descriptions are Apple Silicon. Power, interruption and sampled background CPU
-flags are recorded per execution; all observations remain in the evidence. Three-run medians
-across these libraries characterize these inputs/builds, not every tissue, assay or machine.
-Original control checks (small-library quantification checks also form the first refreshed original observations):
-
-| Fresh original control | Seconds | Earlier median s | Difference |
-| --- | ---: | ---: | ---: |
-| SRR1039508-cdna-full--paired--t8 / 8 threads | 177.604 | 178.942 | -0.75% |
-| SRR307903-cdna-full--paired--t8 / 8 threads | 210.692 | 212.451 | -0.83% |
-| quantification / 8 threads | 45.158 | 45.632 | -1.04% |
-| quantification / 1 thread | 93.967 | 99.090 | -5.17% |
-| index / 8 threads | 121.392 | 123.813 | -1.96% |
-
-See [fragment sampling](fragment_length_sampling.md) and [compatibility](compatibility.md).
-
-### Eight-thread index build measurement
-
-Full uncompressed GENCODE v50 ALL: **670,670 transcripts and 207,228,052 distinct k-mers**,
-k=31/g=23, eight requested threads. The verified FASTA is 1,575,713,375 bytes.
-Current construction uses **two complete measured builds, arithmetic mean, no warmup**.
-Fresh preceding-builder controls bracket the candidates in control/current/current/control order.
-Original and published v0.5.0 retain their verified three-run medians; ratios to them compare
-sessions and are contextual. Retrieval and decompression are excluded; writing, cleanup and
-shutdown are included.
-
-| Builder | Seconds | Peak RSS GiB | Peak footprint GiB |
-| --- | ---: | ---: | ---: |
-| Current kallistors, two-run mean | 11.449 | 5.323 | 4.558 |
-| Published v0.5.0 download | 111.160 | 12.921 | 14.207 |
-| v0.5.0, matched native build | 110.400 | 13.156 | 14.207 |
-| Original kallisto v0.52.0 | 123.813 | 7.845 | 7.152 |
-
-Current observations are **11.563 / 11.336 s**.
-The fresh preceding-builder mean is **11.280 s**;
-the current mean is 1.5% higher, within the 2% guard, with all four indexes byte-identical. Large-reference scratch
-layouts are not selected for this smaller graph.
-
-| Current internal stage | Mean seconds |
-| --- | ---: |
-| FASTA parsing | 0.428 |
-| Graph construction | 8.621 |
-| EC construction | 0.894 |
-| Minimizers and MPHF | 0.919 |
-| Serialization and writing | 0.507 |
-
-Current stages are exclusive. Whole-process timing also includes startup and shutdown;
-v0.5.0's write timer overlaps MPHF and must not be added to its MPHF timer.
-Peak RSS and macOS footprint are separate whole-process high-water measurements, averaged
-across the same two runs.
-
-All current GENCODE outputs have the previously cross-loaded index SHA-256
-`ca6427c35fe6ea971122caf69cd7e364b6a9fc90fb7a81af6429d47e4c5e5738`.
-The complete EC proof therefore applies to these same bytes: **4,410,990 pairs,
-190,693 nonzero ECs and 4,246,399 aligned pairs**, with zero differences from original.
-
-### Mature-plus-nascent index construction
-
-Apple Silicon with 32 GiB RAM, eight requested threads, k=31/g=23. The uncompressed official
-Pachter Lab mature-plus-nascent FASTA (Ensembl 108) contains **267,211 targets and
-2,394,099,698 bases**. Its graph has **1,563,276,809 k-mers and 21,707,203 unitigs**.
-Use the two official FASTA files unchanged; nascent sequences are not reconstructed.
-
-Current uses **two complete measured builds, arithmetic mean, no warmup**:
-**96.955 / 95.850 s**.
-Fresh preceding-builder controls bracket both candidates. A qualifying change requires at least
-2% faster mean total construction, no mean peak RSS increase, exact complete index hashes,
-and the full GENCODE eight-thread guard. Individual observations and contention are retained.
-
-| Builder | Total seconds | Peak RSS GiB | Peak footprint GiB | Index GB |
-| --- | ---: | ---: | ---: | ---: |
-| Current kallistors, two-run mean | 96.403 | 18.397 | 18.087 | 6.382 |
-| Original kallisto v0.52.0, retained single control | 903.511 | 19.729 | 33.390 | 6.583 |
-
-The contextual ratio to the retained original control is **9.37× faster**, with
-**6.8% lower peak RSS**. Original was measured in an earlier session; this is a
-preliminary comparison, not a fresh matched original benchmark. Memory pressure, filesystem
-cache and machine capacity can affect these measurements. No warmup or cache flushing was used
-for the new builds. System-wide swap counters do not measure process-specific swapping.
-
-| Current internal stage | Mean seconds |
-| --- | ---: |
-| FASTA parsing | 0.370 |
-| Graph construction | 75.945 |
-| EC construction | 7.012 |
-| Minimizers and MPHF | 7.675 |
-| Serialization and writing | 3.920 |
-
-Construction combines bounded collections, exact four-byte adaptive edges, early five-byte
-key packing, a temporary prefix-owned rejection filter, and exact sparse full-word walk
-landmarks. Full-key verification, ordered claims and complete fallback layouts preserve graph
-membership. Compact queries and earlier bitmap/MPHF scratch retirement reduce overlapping
-allocations. See [construction details](development.md#index-construction).
-
-Every complete current index has SHA-256
-`2a5157b5ea55cf8fbb9c5ac4e7dc9d1e7217026fcfa0b9895d691ba3ac3f40a9`.
-The existing four-way cross-loading proof applies unchanged: both programs load both builders'
-indexes and reproduce **212,719 nonzero ECs and 8,890,219 aligned pairs** on all
-**10,261,737 TT-seq pairs**, with zero differences. Quantification was not rerun for these
-scratch-only changes; the new proof is complete index-byte identity.
-
-The [measurement evidence](benchmark-results.json) identifies the current construction binary
-and source separately from the frozen quantification build, and records inputs, individual
-construction times, exclusive stages, peak memory and existing cross-loading checks.
 
 ## Correctness and interpretation
 
@@ -638,41 +447,3 @@ and ambiguous isoform estimates even with identical ECs. Compare saved histogram
 interpreting model/EM speed. Fixed EC/model replays and matched iteration settings isolate EM
 behavior. Bulk poly(A) libraries can assess reference cost and compatibility; biological
 nascent-RNA accuracy requires suitable assays and independent evidence.
-
-### Quantification model audit
-
-The audit uses three retained eight-thread paired runs per tool on each complete fastp-trimmed
-library: SRR13638690 (4,411,003 pairs), SRR1039508 (22,176,801), SRR307903 (32,460,465) and
-SRR10919051 (10,172,656). The first three use GENCODE v50 ALL; the last uses the official
-Pachter Lab mature-plus-nascent reference. It compares all nine cross-tool run pairings and all
-three within-tool pairings per program, using native HDF5 values. These are correctness checks;
-the fresh full-library runs do not supply repeated performance estimates.
-
-| Library | Largest cross-tool count difference | Largest original-within-original count difference | Largest cross-tool / original-within-original TPM difference |
-| --- | ---: | ---: | ---: |
-| SRR13638690 | 1.080 | 1.080 | 68.983 / 68.983 |
-| SRR1039508 | 5.277 | 5.277 | 108.807 / 108.807 |
-| SRR307903 | 22.754 | 22.754 | 28.259 / 28.259 |
-| SRR10919051 | 2.996 | 2.996 | 65.558 / 65.558 |
-
-Within each cDNA library, the three retained kallistors runs agree to numerical precision;
-the nascent runs have modest sample-dependent variation. Replaying all ten distinct fragment
-histograms with the current quantifier reproduces every saved original/current output. All
-effective lengths and iteration counts match. Maximum residuals across all transcript rows are
-`1.921e-9` estimated counts and `4.221e-10` TPM. Fresh full fibroblast and nascent mappings also
-preserve complete counted EC maps, and their quantifications independently match a retained
-original run when their sampled histograms match.
-
-The largest relative count difference among transcripts reaching 10 estimated counts in either
-output is 1.64%, using absolute difference divided by the larger estimate. The 15.46% relative
-TPM outlier has only about 0.05 estimated counts. Large absolute TPM outliers are mainly explained
-by short-transcript effective lengths and normalization. These maxima describe these observations;
-three repeats do not establish distributional equivalence or bound other inputs.
-
-CALR-201 and CALR-233 have identical observed EC incidence in airway and fibroblast. Controlled
-fixed-update replays separate the small model change from six additional EM updates in the
-fibroblast case. The [sampling guide](fragment_length_sampling.md#interpreting-transcript-level-differences)
-explains this ambiguity and the existing all-observation option. Portable model fingerprints,
-error percentiles and the fresh checks are recorded under `quantification_variation_audit` in
-[the measurement evidence](benchmark-results.json). The audited mode is default unbiased
-short-read paired quantification without bootstrap sampling.

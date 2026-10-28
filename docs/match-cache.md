@@ -57,6 +57,9 @@ case-insensitive. For example, `1GiB` means 1,073,741,824 bytes; `1GB` means
 unrepresentable allocations and budgets smaller than one 32-byte entry per
 worker are rejected.
 
+Each worker's effective table is limited to 128 GiB by the cache's 32-bit slot index.
+Larger resolved tables are rejected even on a machine with enough addressable memory.
+
 On 32-bit targets, automatic allowances are capped at 1 GiB. Explicit sizes that
 exceed the target's addressable allocation size are rejected rather than silently
 replaced with a smaller allowance.
