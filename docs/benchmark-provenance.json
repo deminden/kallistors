@@ -8747,16 +8747,20 @@
       "sha256": "0ec35e77ab41311015f8db7b747d782f7cb4bcc52806bb3e626e82c7c9d75f90"
     },
     "mapping-comparison-results.json": {
-      "bytes": 83166,
-      "sha256": "fa4b938723b630f3c99aaf1d6bb0f34caadf9b90ff5341756d618dec38214f9e"
+      "bytes": 87834,
+      "sha256": "9cebd658c80d371dd20fc58a9d0be3f1f3aab817415bf030021c69c848a8840b"
     },
     "mapping-comparison-commands.json": {
-      "bytes": 163407,
-      "sha256": "22bdb7260d6df6e2e3908ffdbae20fe9e00f2c179fdf58131c1a31dac88fde65"
+      "bytes": 168196,
+      "sha256": "b7a6c198c7136b552b4b6e88a8db8b26f978600ef88a4bc6012ac98e5a15a983"
     },
     "salmon-piscem-results.json": {
       "bytes": 1197132,
       "sha256": "887247d14c00af4380424d0cb48be9f2c90276c7c385b07ee0b04dc763edca5a"
+    },
+    "index-build-repeats.json": {
+      "bytes": 43848,
+      "sha256": "b77461736ade9b439ba0f169ba8356a902ef10cf536001255f62d7de59d50b5e"
     }
   },
   "salmon_piscem": {
@@ -8820,5 +8824,24 @@
         "sha256": "0b441f25761c619a7653ce865fac3627108f907724622a06ba96c5c5683a2277"
       }
     }
+  },
+  "index_build_supplement": {
+    "workspace": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex",
+    "results": {
+      "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/results.json",
+      "bytes": 271598,
+      "sha256": "1c324532d56ec17336d81d22d0e3eacf17f22068b239d644605287233861436b"
+    },
+    "verification": {
+      "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/verification.json",
+      "bytes": 1041,
+      "sha256": "f8900f9b74165208c1cd89c87d2a4b983f143687dcf86fea6e2004cb6053f31f"
+    },
+    "coordinator": {
+      "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/run.py",
+      "bytes": 6153,
+      "sha256": "eeee69d9380c60d1ebdd518e2efbfcb0e75c6ba8dc71c4b76652db7878303307"
+    },
+    "published_data": "index-build-repeats.json"
   }
 }

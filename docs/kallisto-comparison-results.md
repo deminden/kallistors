@@ -112,8 +112,8 @@ inputs, build scratch and tool binaries. The main performance table reports medi
 Original/kallistors median build-time ratios are **10.92× on GENCODE** and **9.20× on
 mature + nascent**. The [combined construction table](../README.md#index-construction)
 also compares Salmon, piscem, Fulgor and Themisto on the same host, reference target sets and
-eight-thread budget. Salmon and piscem use one warmup and three builds; Fulgor and Themisto
-have one successful setup observation per available reference. See the
+eight-thread budget. Every successful tool/reference entry uses one warmup and three measured
+builds. See the
 [Salmon/piscem build details](salmon-piscem-results.md#index-construction) for their measurements.
 
 Fresh kallistors-built indexes passed separate cross-tool EC compatibility checks. Exact file

@@ -1,0 +1,845 @@
+{
+  "complete": true,
+  "scope": "Fresh eight-thread index builds: one warmup and median of three measured runs per available competitor/reference. No mapping or quantification timing was rerun.",
+  "conditions": [
+    {
+      "reference": "nascent",
+      "tool": "themisto",
+      "requested_threads": 8,
+      "warmups": 1,
+      "measurements": 3,
+      "median_wall_seconds": 1504.829490958,
+      "median_process_user_seconds": 2468.48,
+      "median_process_system_seconds": 31.91,
+      "median_peak_rss_bytes": 13284966400,
+      "median_index_bytes": 3471570526,
+      "median_allocated_index_bytes": 3471572992,
+      "timing_interrupted": false,
+      "trials": [
+        {
+          "phase": "warmup",
+          "repetition": 0,
+          "command": [
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "build",
+            "-k",
+            "31",
+            "-i",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/references/nascent/transcripts-clipped.fa",
+            "--index-prefix",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/warmup-0/generated/transcripts",
+            "--temp-dir",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/warmup-0/generated/temporary",
+            "--mem-gigas",
+            "8",
+            "--n-threads",
+            "8",
+            "--sequence-colors"
+          ],
+          "wall_seconds": 1507.2585603329999,
+          "os_real_seconds": 1507.25,
+          "process_user_seconds": 2475.16,
+          "process_system_seconds": 33.58,
+          "peak_rss_bytes": 13253033984,
+          "index_bytes": 3471570526,
+          "allocated_index_bytes": 3471572992,
+          "index_files": [
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/warmup-0/generated/transcripts.tdbg",
+              "bytes": 2051226004,
+              "sha256": "bc3edbd85e9f598803067f66ef26a40e6699b93d6eee86d555b7134eefe9fe0f"
+            },
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/warmup-0/generated/transcripts.tcolors",
+              "bytes": 1420344522,
+              "sha256": "6f87326f5d2f195782e713605473b6294fccefd1faa969b8a45262dddf6e8e0c"
+            }
+          ],
+          "executable": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "bytes": 42340792,
+            "sha256": "01bb654abd0a7995aa5325f3a2386e77aa515e5e720dba8e8a548e9f578ae627"
+          },
+          "byte_identical_to_historical": true,
+          "timing_interrupted": false,
+          "power_before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t88%; AC attached; not charging present: true\n",
+          "power_after": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t81%; AC attached; not charging present: true\n",
+          "contention": true,
+          "log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/warmup-0/build.log",
+            "bytes": 5523,
+            "sha256": "a81f217da61493ec14fb36289820d3f2aefe944f2cd877058acb298b96cbdfec"
+          },
+          "memory_log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/warmup-0/build.memory.log",
+            "bytes": 777,
+            "sha256": "26092b1cc77c80c8a4e9f2c3412343d00526adfc9cb8b9d4c3d436d28bae3319"
+          }
+        },
+        {
+          "phase": "measured",
+          "repetition": 1,
+          "command": [
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "build",
+            "-k",
+            "31",
+            "-i",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/references/nascent/transcripts-clipped.fa",
+            "--index-prefix",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-1/generated/transcripts",
+            "--temp-dir",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-1/generated/temporary",
+            "--mem-gigas",
+            "8",
+            "--n-threads",
+            "8",
+            "--sequence-colors"
+          ],
+          "wall_seconds": 1505.690208292,
+          "os_real_seconds": 1505.69,
+          "process_user_seconds": 2468.61,
+          "process_system_seconds": 31.94,
+          "peak_rss_bytes": 13279526912,
+          "index_bytes": 3471570526,
+          "allocated_index_bytes": 3471572992,
+          "index_files": [
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-1/generated/transcripts.tdbg",
+              "bytes": 2051226004,
+              "sha256": "bc3edbd85e9f598803067f66ef26a40e6699b93d6eee86d555b7134eefe9fe0f"
+            },
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-1/generated/transcripts.tcolors",
+              "bytes": 1420344522,
+              "sha256": "6f87326f5d2f195782e713605473b6294fccefd1faa969b8a45262dddf6e8e0c"
+            }
+          ],
+          "executable": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "bytes": 42340792,
+            "sha256": "01bb654abd0a7995aa5325f3a2386e77aa515e5e720dba8e8a548e9f578ae627"
+          },
+          "byte_identical_to_historical": true,
+          "timing_interrupted": false,
+          "power_before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t81%; AC attached; not charging present: true\n",
+          "power_after": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "contention": true,
+          "log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-1/build.log",
+            "bytes": 5531,
+            "sha256": "53917a96cc2f7eec29a52200a02e2daee64252635e3f847c698dfad6e6fe7480"
+          },
+          "memory_log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-1/build.memory.log",
+            "bytes": 777,
+            "sha256": "a63cf599369db2c24215e74000ec3f669c3686d0d6da75b0edc6cb96a950feef"
+          }
+        },
+        {
+          "phase": "measured",
+          "repetition": 2,
+          "command": [
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "build",
+            "-k",
+            "31",
+            "-i",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/references/nascent/transcripts-clipped.fa",
+            "--index-prefix",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-2/generated/transcripts",
+            "--temp-dir",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-2/generated/temporary",
+            "--mem-gigas",
+            "8",
+            "--n-threads",
+            "8",
+            "--sequence-colors"
+          ],
+          "wall_seconds": 1504.829490958,
+          "os_real_seconds": 1504.82,
+          "process_user_seconds": 2468.48,
+          "process_system_seconds": 31.39,
+          "peak_rss_bytes": 13284966400,
+          "index_bytes": 3471570526,
+          "allocated_index_bytes": 3471572992,
+          "index_files": [
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-2/generated/transcripts.tdbg",
+              "bytes": 2051226004,
+              "sha256": "bc3edbd85e9f598803067f66ef26a40e6699b93d6eee86d555b7134eefe9fe0f"
+            },
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-2/generated/transcripts.tcolors",
+              "bytes": 1420344522,
+              "sha256": "6f87326f5d2f195782e713605473b6294fccefd1faa969b8a45262dddf6e8e0c"
+            }
+          ],
+          "executable": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "bytes": 42340792,
+            "sha256": "01bb654abd0a7995aa5325f3a2386e77aa515e5e720dba8e8a548e9f578ae627"
+          },
+          "byte_identical_to_historical": true,
+          "timing_interrupted": false,
+          "power_before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "power_after": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "contention": true,
+          "log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-2/build.log",
+            "bytes": 5531,
+            "sha256": "24ec4f7fc6638e91609bd99172a7ed35dc5202fe8b77480bdcd003db43116e52"
+          },
+          "memory_log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-2/build.memory.log",
+            "bytes": 777,
+            "sha256": "590f83bfcd3229199174a2a485c09441db17761ae26f915d69f6ac40f726d25c"
+          }
+        },
+        {
+          "phase": "measured",
+          "repetition": 3,
+          "command": [
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "build",
+            "-k",
+            "31",
+            "-i",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/references/nascent/transcripts-clipped.fa",
+            "--index-prefix",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-3/generated/transcripts",
+            "--temp-dir",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-3/generated/temporary",
+            "--mem-gigas",
+            "8",
+            "--n-threads",
+            "8",
+            "--sequence-colors"
+          ],
+          "wall_seconds": 1500.584333416,
+          "os_real_seconds": 1500.58,
+          "process_user_seconds": 2454.27,
+          "process_system_seconds": 31.91,
+          "peak_rss_bytes": 13287194624,
+          "index_bytes": 3471570526,
+          "allocated_index_bytes": 3471572992,
+          "index_files": [
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-3/generated/transcripts.tdbg",
+              "bytes": 2051226004,
+              "sha256": "bc3edbd85e9f598803067f66ef26a40e6699b93d6eee86d555b7134eefe9fe0f"
+            },
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-3/generated/transcripts.tcolors",
+              "bytes": 1420344522,
+              "sha256": "6f87326f5d2f195782e713605473b6294fccefd1faa969b8a45262dddf6e8e0c"
+            }
+          ],
+          "executable": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "bytes": 42340792,
+            "sha256": "01bb654abd0a7995aa5325f3a2386e77aa515e5e720dba8e8a548e9f578ae627"
+          },
+          "byte_identical_to_historical": true,
+          "timing_interrupted": false,
+          "power_before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "power_after": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "contention": true,
+          "log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-3/build.log",
+            "bytes": 5531,
+            "sha256": "49ab6869fd6498b2c0136d9687626fe94b1720a92ef2d6fa8667489b0f2b2ac3"
+          },
+          "memory_log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/measured-3/build.memory.log",
+            "bytes": 777,
+            "sha256": "56fae904fcd0339db986662659d841f41348e5c81e927553b48be4fec45812dc"
+          }
+        }
+      ]
+    },
+    {
+      "reference": "gencode",
+      "tool": "themisto",
+      "requested_threads": 8,
+      "warmups": 1,
+      "measurements": 3,
+      "median_wall_seconds": 201.0812219999998,
+      "median_process_user_seconds": 506.62,
+      "median_process_system_seconds": 5.92,
+      "median_peak_rss_bytes": 9633841152,
+      "median_index_bytes": 515493942,
+      "median_allocated_index_bytes": 531222528,
+      "timing_interrupted": false,
+      "trials": [
+        {
+          "phase": "warmup",
+          "repetition": 0,
+          "command": [
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "build",
+            "-k",
+            "31",
+            "-i",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/references/gencode/transcripts-clipped.fa",
+            "--index-prefix",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/warmup-0/generated/transcripts",
+            "--temp-dir",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/warmup-0/generated/temporary",
+            "--mem-gigas",
+            "8",
+            "--n-threads",
+            "8",
+            "--sequence-colors"
+          ],
+          "wall_seconds": 200.6355492499997,
+          "os_real_seconds": 200.63,
+          "process_user_seconds": 503.3,
+          "process_system_seconds": 5.86,
+          "peak_rss_bytes": 9651421184,
+          "index_bytes": 515493942,
+          "allocated_index_bytes": 531222528,
+          "index_files": [
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/warmup-0/generated/transcripts.tdbg",
+              "bytes": 275081100,
+              "sha256": "da7b8c2f9f8ab95eb55f0e461671671ce41ba6c2b6683410eda80cdd1b91c68b"
+            },
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/warmup-0/generated/transcripts.tcolors",
+              "bytes": 240412842,
+              "sha256": "36f0315c4b7d3fd6d26c0f8f9c5b40e401aff66352d860d838889288db7258e7"
+            }
+          ],
+          "executable": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "bytes": 42340792,
+            "sha256": "01bb654abd0a7995aa5325f3a2386e77aa515e5e720dba8e8a548e9f578ae627"
+          },
+          "byte_identical_to_historical": true,
+          "timing_interrupted": false,
+          "power_before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "power_after": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "contention": false,
+          "log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/warmup-0/build.log",
+            "bytes": 5405,
+            "sha256": "160cc465ca6c56d2165dbe06fcb42eb49738ee2be06d17c4f9f3d6f3751db320"
+          },
+          "memory_log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/warmup-0/build.memory.log",
+            "bytes": 777,
+            "sha256": "599308736da9e16962084b5b8f4434238f660ab721a0f8c7b09e9442d3ec9cd2"
+          }
+        },
+        {
+          "phase": "measured",
+          "repetition": 1,
+          "command": [
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "build",
+            "-k",
+            "31",
+            "-i",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/references/gencode/transcripts-clipped.fa",
+            "--index-prefix",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-1/generated/transcripts",
+            "--temp-dir",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-1/generated/temporary",
+            "--mem-gigas",
+            "8",
+            "--n-threads",
+            "8",
+            "--sequence-colors"
+          ],
+          "wall_seconds": 201.00787941700037,
+          "os_real_seconds": 201.0,
+          "process_user_seconds": 505.2,
+          "process_system_seconds": 5.93,
+          "peak_rss_bytes": 9603694592,
+          "index_bytes": 515493942,
+          "allocated_index_bytes": 531222528,
+          "index_files": [
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-1/generated/transcripts.tdbg",
+              "bytes": 275081100,
+              "sha256": "da7b8c2f9f8ab95eb55f0e461671671ce41ba6c2b6683410eda80cdd1b91c68b"
+            },
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-1/generated/transcripts.tcolors",
+              "bytes": 240412842,
+              "sha256": "36f0315c4b7d3fd6d26c0f8f9c5b40e401aff66352d860d838889288db7258e7"
+            }
+          ],
+          "executable": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "bytes": 42340792,
+            "sha256": "01bb654abd0a7995aa5325f3a2386e77aa515e5e720dba8e8a548e9f578ae627"
+          },
+          "byte_identical_to_historical": true,
+          "timing_interrupted": false,
+          "power_before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "power_after": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "contention": true,
+          "log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-1/build.log",
+            "bytes": 5413,
+            "sha256": "528b849badb93a8de960eb27a60a559b416127b8a1d271c66abaf4843f0e170f"
+          },
+          "memory_log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-1/build.memory.log",
+            "bytes": 777,
+            "sha256": "55b1097c6c128df5d403a50e6bf0dbdca28ec960f00b64c5c9f2bb73257577e5"
+          }
+        },
+        {
+          "phase": "measured",
+          "repetition": 2,
+          "command": [
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "build",
+            "-k",
+            "31",
+            "-i",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/references/gencode/transcripts-clipped.fa",
+            "--index-prefix",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-2/generated/transcripts",
+            "--temp-dir",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-2/generated/temporary",
+            "--mem-gigas",
+            "8",
+            "--n-threads",
+            "8",
+            "--sequence-colors"
+          ],
+          "wall_seconds": 201.31391562500085,
+          "os_real_seconds": 201.31,
+          "process_user_seconds": 506.62,
+          "process_system_seconds": 5.87,
+          "peak_rss_bytes": 9633841152,
+          "index_bytes": 515493942,
+          "allocated_index_bytes": 531222528,
+          "index_files": [
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-2/generated/transcripts.tdbg",
+              "bytes": 275081100,
+              "sha256": "da7b8c2f9f8ab95eb55f0e461671671ce41ba6c2b6683410eda80cdd1b91c68b"
+            },
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-2/generated/transcripts.tcolors",
+              "bytes": 240412842,
+              "sha256": "36f0315c4b7d3fd6d26c0f8f9c5b40e401aff66352d860d838889288db7258e7"
+            }
+          ],
+          "executable": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "bytes": 42340792,
+            "sha256": "01bb654abd0a7995aa5325f3a2386e77aa515e5e720dba8e8a548e9f578ae627"
+          },
+          "byte_identical_to_historical": true,
+          "timing_interrupted": false,
+          "power_before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "power_after": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "contention": true,
+          "log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-2/build.log",
+            "bytes": 5413,
+            "sha256": "2d7d32e993c5dc98e44deb436b33eac39a19c988198244bb014603f77b514880"
+          },
+          "memory_log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-2/build.memory.log",
+            "bytes": 777,
+            "sha256": "7d7f29a7261cb8f012b810d2c491d8eeb5e611ca27c8fb1a73e7e418ef61ca24"
+          }
+        },
+        {
+          "phase": "measured",
+          "repetition": 3,
+          "command": [
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "build",
+            "-k",
+            "31",
+            "-i",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/references/gencode/transcripts-clipped.fa",
+            "--index-prefix",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-3/generated/transcripts",
+            "--temp-dir",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-3/generated/temporary",
+            "--mem-gigas",
+            "8",
+            "--n-threads",
+            "8",
+            "--sequence-colors"
+          ],
+          "wall_seconds": 201.0812219999998,
+          "os_real_seconds": 201.07,
+          "process_user_seconds": 509.24,
+          "process_system_seconds": 5.92,
+          "peak_rss_bytes": 9670475776,
+          "index_bytes": 515493942,
+          "allocated_index_bytes": 531222528,
+          "index_files": [
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-3/generated/transcripts.tdbg",
+              "bytes": 275081100,
+              "sha256": "da7b8c2f9f8ab95eb55f0e461671671ce41ba6c2b6683410eda80cdd1b91c68b"
+            },
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-3/generated/transcripts.tcolors",
+              "bytes": 240412842,
+              "sha256": "36f0315c4b7d3fd6d26c0f8f9c5b40e401aff66352d860d838889288db7258e7"
+            }
+          ],
+          "executable": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/themisto/build/bin/themisto",
+            "bytes": 42340792,
+            "sha256": "01bb654abd0a7995aa5325f3a2386e77aa515e5e720dba8e8a548e9f578ae627"
+          },
+          "byte_identical_to_historical": true,
+          "timing_interrupted": false,
+          "power_before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "power_after": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "contention": true,
+          "log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-3/build.log",
+            "bytes": 5413,
+            "sha256": "8e21e2ae6b981bdda793b7aebd458f238e067e5ea92f3690a2a3588b829d589f"
+          },
+          "memory_log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/themisto/measured-3/build.memory.log",
+            "bytes": 777,
+            "sha256": "8bb007fc727be736699852d485812a338640a461c41f5360f6f2d1951a2d716d"
+          }
+        }
+      ]
+    },
+    {
+      "reference": "gencode",
+      "tool": "fulgor",
+      "requested_threads": 8,
+      "warmups": 1,
+      "measurements": 3,
+      "median_wall_seconds": 46.283147041999655,
+      "median_process_user_seconds": 161.3,
+      "median_process_system_seconds": 35.87,
+      "median_peak_rss_bytes": 15191867392,
+      "median_index_bytes": 375787333,
+      "median_allocated_index_bytes": 375787520,
+      "timing_interrupted": false,
+      "trials": [
+        {
+          "phase": "warmup",
+          "repetition": 0,
+          "command": [
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/fulgor/build/fulgor",
+            "build",
+            "-l",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/references/gencode/filenames.txt",
+            "-o",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/warmup-0/generated/transcripts",
+            "-k",
+            "31",
+            "-m",
+            "19",
+            "-d",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/warmup-0/generated/temporary",
+            "-g",
+            "8",
+            "-t",
+            "8"
+          ],
+          "wall_seconds": 49.62764254100057,
+          "os_real_seconds": 49.53,
+          "process_user_seconds": 157.52,
+          "process_system_seconds": 36.57,
+          "peak_rss_bytes": 15241560064,
+          "index_bytes": 375787349,
+          "allocated_index_bytes": 375787520,
+          "index_files": [
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/warmup-0/generated/transcripts.fur",
+              "bytes": 375787349,
+              "sha256": "91578adc6537a2b3e88a7dec67ec68adc1e5d8856bce03a60c47a861703b4ede"
+            }
+          ],
+          "executable": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/fulgor/build/fulgor",
+            "bytes": 63306904,
+            "sha256": "a058593dab54d5d5191593e54100302d63219e310f4ccb2ffbb85020b32ce352"
+          },
+          "byte_identical_to_historical": false,
+          "timing_interrupted": false,
+          "power_before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "power_after": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "contention": true,
+          "log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/warmup-0/build.log",
+            "bytes": 10034,
+            "sha256": "92ac51ec222db0cde195222dc955b20abbca0290b52e001e9468b11033db54c3"
+          },
+          "memory_log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/warmup-0/build.memory.log",
+            "bytes": 777,
+            "sha256": "c2160758d87a9984857d3f65e23f7c22b1b833db04a695b5caba6483fcf58efc"
+          }
+        },
+        {
+          "phase": "measured",
+          "repetition": 1,
+          "command": [
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/fulgor/build/fulgor",
+            "build",
+            "-l",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/references/gencode/filenames.txt",
+            "-o",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-1/generated/transcripts",
+            "-k",
+            "31",
+            "-m",
+            "19",
+            "-d",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-1/generated/temporary",
+            "-g",
+            "8",
+            "-t",
+            "8"
+          ],
+          "wall_seconds": 46.78701254099997,
+          "os_real_seconds": 46.68,
+          "process_user_seconds": 160.76,
+          "process_system_seconds": 35.99,
+          "peak_rss_bytes": 15203172352,
+          "index_bytes": 375787429,
+          "allocated_index_bytes": 375787520,
+          "index_files": [
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-1/generated/transcripts.fur",
+              "bytes": 375787429,
+              "sha256": "00b41412e5ef5577a74baba21bff2c03e8469cd907c95f4f3314fa198a9829e6"
+            }
+          ],
+          "executable": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/fulgor/build/fulgor",
+            "bytes": 63306904,
+            "sha256": "a058593dab54d5d5191593e54100302d63219e310f4ccb2ffbb85020b32ce352"
+          },
+          "byte_identical_to_historical": false,
+          "timing_interrupted": false,
+          "power_before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "power_after": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "contention": false,
+          "log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-1/build.log",
+            "bytes": 10047,
+            "sha256": "677f850868c20f3c1142989ee8d21ab07e0bb19f3cc3f2fafe763be9fbb49885"
+          },
+          "memory_log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-1/build.memory.log",
+            "bytes": 777,
+            "sha256": "142a1f5e54c6861d5d6594865b328246fd295df6779349be6f1493da03e8292e"
+          }
+        },
+        {
+          "phase": "measured",
+          "repetition": 2,
+          "command": [
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/fulgor/build/fulgor",
+            "build",
+            "-l",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/references/gencode/filenames.txt",
+            "-o",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-2/generated/transcripts",
+            "-k",
+            "31",
+            "-m",
+            "19",
+            "-d",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-2/generated/temporary",
+            "-g",
+            "8",
+            "-t",
+            "8"
+          ],
+          "wall_seconds": 46.283147041999655,
+          "os_real_seconds": 46.18,
+          "process_user_seconds": 162.25,
+          "process_system_seconds": 35.86,
+          "peak_rss_bytes": 15191867392,
+          "index_bytes": 375787333,
+          "allocated_index_bytes": 375787520,
+          "index_files": [
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-2/generated/transcripts.fur",
+              "bytes": 375787333,
+              "sha256": "206f064da9ad984daa353f7e033e649036b83720fba3160541b8598ebadefbcd"
+            }
+          ],
+          "executable": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/fulgor/build/fulgor",
+            "bytes": 63306904,
+            "sha256": "a058593dab54d5d5191593e54100302d63219e310f4ccb2ffbb85020b32ce352"
+          },
+          "byte_identical_to_historical": false,
+          "timing_interrupted": false,
+          "power_before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "power_after": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "contention": false,
+          "log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-2/build.log",
+            "bytes": 10049,
+            "sha256": "cf87d3d5278b44de7a7511bd1f28e1b2610ec93c83425d64f24710688cd1c8dc"
+          },
+          "memory_log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-2/build.memory.log",
+            "bytes": 777,
+            "sha256": "84e4d99e7ae6f0e9bd9ac5c6e4a83fa6803cd859a1b052573bcedabedf71dec4"
+          }
+        },
+        {
+          "phase": "measured",
+          "repetition": 3,
+          "command": [
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/fulgor/build/fulgor",
+            "build",
+            "-l",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/references/gencode/filenames.txt",
+            "-o",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-3/generated/transcripts",
+            "-k",
+            "31",
+            "-m",
+            "19",
+            "-d",
+            "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-3/generated/temporary",
+            "-g",
+            "8",
+            "-t",
+            "8"
+          ],
+          "wall_seconds": 45.891730165999434,
+          "os_real_seconds": 45.79,
+          "process_user_seconds": 161.3,
+          "process_system_seconds": 35.87,
+          "peak_rss_bytes": 15191293952,
+          "index_bytes": 375787285,
+          "allocated_index_bytes": 375787520,
+          "index_files": [
+            {
+              "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-3/generated/transcripts.fur",
+              "bytes": 375787285,
+              "sha256": "e787a695ff48e819a1e11a81b3f9d3820fc69395a5e846419b6cfbfb39cea1e1"
+            }
+          ],
+          "executable": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex/source/fulgor/build/fulgor",
+            "bytes": 63306904,
+            "sha256": "a058593dab54d5d5191593e54100302d63219e310f4ccb2ffbb85020b32ce352"
+          },
+          "byte_identical_to_historical": false,
+          "timing_interrupted": false,
+          "power_before": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "power_after": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t80%; AC attached; not charging present: true\n",
+          "contention": false,
+          "log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-3/build.log",
+            "bytes": 10044,
+            "sha256": "8f6c9c794fa14380a4a4d38b46b6ab6f08ea54b70adedf1bdbd6926ff442d9bb"
+          },
+          "memory_log": {
+            "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/gencode/fulgor/measured-3/build.memory.log",
+            "bytes": 777,
+            "sha256": "0ccdb83065d29826d70fe5db9fda814ea979bf6c166d35ff9503b26f5529a1b4"
+          }
+        }
+      ]
+    }
+  ],
+  "verification": {
+    "complete": true,
+    "conditions": 3,
+    "build_trials": 12,
+    "themisto": "All eight build outputs byte-identical to historical indexes.",
+    "fulgor": {
+      "serialization": "Fresh builds differ from historical serialization; not asserted byte-identical.",
+      "colors_verified": 670670,
+      "probe_reads": 1025,
+      "all_probe_target_sets_equal": true,
+      "scope": "Complete color universe and sampled transcript-derived forward/reverse probes, not a repeated full-read mapping campaign.",
+      "query": {
+        "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/fulgor-validation/probes.fa",
+        "bytes": 108565,
+        "sha256": "98ebfef2d4eb1896573de8f0de6997576b83482a0d3e1c0f51bf73a035392200"
+      },
+      "index": {
+        "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/fulgor-validation/transcripts.fur",
+        "bytes": 375787301,
+        "sha256": "fdc635f88a5fa2b41da21ccd058d09f6161a28c465e6058b1da9776516b9f26f"
+      }
+    }
+  },
+  "raw_results": {
+    "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/results.json",
+    "bytes": 271598,
+    "sha256": "1c324532d56ec17336d81d22d0e3eacf17f22068b239d644605287233861436b"
+  },
+  "plan": {
+    "conditions": [
+      [
+        "nascent",
+        "themisto"
+      ],
+      [
+        "gencode",
+        "themisto"
+      ],
+      [
+        "gencode",
+        "fulgor"
+      ]
+    ],
+    "trials": [
+      [
+        "warmup",
+        0
+      ],
+      [
+        "measured",
+        1
+      ],
+      [
+        "measured",
+        2
+      ],
+      [
+        "measured",
+        3
+      ]
+    ],
+    "requested_threads": 8,
+    "old_evidence": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/mapping-fulgor-themisto-ff74fdd.noindex",
+    "policy": "All fresh trials retained, no historical trial selected into new medians. Immutable previous outputs. Serial build scratch deleted after evidence. No source changes.",
+    "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=26607715)\t90%; AC attached; not charging present: true\n",
+    "storage_guard_gib": {
+      "nascent": 60,
+      "gencode": 12
+    },
+    "storage_rationale": "Fresh serial trial, no overlapping native work; 40 GiB free guard exceeds the approximately 22 GiB failed scratch observed historically, plus final index and reserve. Regenerable Cargo dev cache retired before launch.",
+    "storage_amendment": "Initial 44.8 GiB-free warmup failed with Error writing to file. Preserve failed logs; retire stale artifacts, restore 60 GiB guard, restart fresh warmup. No measured observations existed."
+  },
+  "failed_warmup": {
+    "status": {
+      "stage": "failed",
+      "pid": 2563,
+      "updated": "2026-10-28T20:55:54.334615+00:00",
+      "error": "Traceback (most recent call last):\n  File \"/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/run.py\", line 79, in <module>\n    try:main()\n  File \"/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/run.py\", line 59, in main\n    row=run_process(cmd,trial/'build')\n  File \"/Users/dendem/Documents/Codex/kallistors/scripts/benchmark_common.py\", line 221, in run_process\n    raise RuntimeError(f'Command failed ({code}); see {prefix.with_suffix(\".log\")}')\nRuntimeError: Command failed (1); see /Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/warmup-0/build.log\n"
+    },
+    "log": {
+      "path": "/Users/dendem/Documents/Codex/kallistors/target/benchmarks/index-build-repeats-0.6.0.noindex/nascent/themisto/failed-warmup-1/build.log",
+      "bytes": 4590,
+      "sha256": "3741260525c9151899b355a238df20d4771f950dae95fdd64399748985e83a1d"
+    },
+    "included_in_medians": false
+  },
+  "note": "Generated trial indexes/scratch retired after recording their hashes. Historical indexes and all original comparison evidence retained. One additional untimed Fulgor diagnostic build verified full color universe and sampled mapping target sets; this is outside the timing cohort."
+}

@@ -106,26 +106,21 @@ For PBMC, kallistors mapped 43,165,816 versus 42,936,597 for Fulgor/Themisto. Fo
 
 ## Setup at eight requested threads
 
-These are single successful setup observations, not median-of-three index comparisons. Times exclude tool compilation and reference-adapter preparation. Disk columns count serialized indexes only, not sources, references, per-transcript shards, manifests, correctness archives or temporary peak disk use. Builder memory arguments of 8 GiB are resource hints, not RSS limits. The frozen original-built kallistors indexes were reused; no fresh kallistors setup time is mixed into this table.
+Each available tool/reference uses one warmup followed by three fresh measured builds at eight requested threads, on AC power. Every reported value below is the median of the three measurements. Times exclude compilation and reference-adapter preparation; disk columns cover serialized indexes only. All completed trials are retained, including background-activity flags. The mapping experiments continue to use the unchanged historical indexes.
 
-| Reference | Tool | Wall s | User CPU s | System CPU s | Peak RSS GiB | Logical index GiB | Allocated index GiB | Contention |
+| Reference | Tool | Wall s | User CPU s | System CPU s | Peak RSS GiB | Logical index GiB | Allocated index GiB | Flagged runs |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| gencode | fulgor | 50.926 | 157.09 | 40.39 | 14.170 | 0.350 | 0.350 | False |
-| gencode | themisto | 202.120 | 506.08 | 5.83 | 8.945 | 0.480 | 0.495 | False |
-| nascent | themisto | 1492.039 | 2438.74 | 33.29 | 12.477 | 3.233 | 3.233 | True |
+| gencode | fulgor | 46.283 | 161.30 | 35.87 | 14.149 | 0.350 | 0.350 | 0/3 |
+| gencode | themisto | 201.081 | 506.62 | 5.92 | 8.972 | 0.480 | 0.495 | 3/3 |
+| nascent | themisto | 1504.829 | 2468.48 | 31.91 | 12.373 | 3.233 | 3.233 | 3/3 |
+
+The [complete build records](index-build-repeats.json) include each warmup, measurement, command, index hash and raw-log fingerprint. Themisto's eight rebuilt indexes match the historical files byte for byte. Fulgor's serialization differs; an additional untimed build verified the complete 670,670-transcript color universe and identical target sets for 1,025 forward/reverse transcript-derived and unmapped probes. This probe check does not repeat the full mapping comparison or establish byte identity for Fulgor.
+
+One initial Themisto nascent warmup failed with “Error writing to file” after disk space fell to about 5.5 GiB. Its evidence was preserved, stale intermediate artifacts were retired, and a fresh successful warmup plus all three measurements ran with sufficient disk space. The failed warmup contributes no timing to the table. The original single setup observations remain in the JSON's `historical_setup` field; they are excluded from these medians.
 
 ### Build-time comparison with kallistors
 
-The same campaign measured kallistors index construction on this host and the same reference
-target sets at eight requested threads: median **11.123517 s** for GENCODE and **98.687386 s**
-for mature + nascent, each after one warmup and three builds. Dividing the competitor setup
-wall times above by those kallistors medians gives **4.58× for Fulgor** and **18.17× for
-Themisto** on GENCODE, and **15.12× for Themisto** on mature + nascent. These directly compare
-observed construction cost; Fulgor/Themisto contribute one successful setup observation each.
-The [README index table](../README.md#index-construction) includes original kallisto too;
-[all kallisto/kallistors build observations](kallisto-comparison-results.md#index-construction)
-retain the three-run measurements and resource use. The mapping runs themselves reused
-original-built kallistors indexes, as described above.
+The retained kallistors construction medians are **11.123517 s** on GENCODE and **98.687386 s** on mature + nascent, each from one warmup and three builds on this host and the same target sets. The fresh competitor/kallistors median ratios are **4.16× for Fulgor** and **18.08× for Themisto** on GENCODE, and **15.25× for Themisto** on mature + nascent. The [README construction table](../README.md#index-construction) also includes original kallisto, Salmon and piscem with the same warmup-plus-three method.
 
 ### Recorded setup failures and resource recovery
 

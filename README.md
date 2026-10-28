@@ -89,27 +89,27 @@ and methodology, and the [0.6.0 notes](docs/releases/0.6.0.md) for release chang
 
 Direct comparison of completed index construction on the same Apple Silicon machine,
 using the same transcript target sets and eight requested threads. **Build-time ratio = tool
-time / kallistors time**; for example, 4.58× means kallistors built the index 4.58× faster.
-kallistors, original kallisto, Salmon and piscem use one warmup followed by three builds;
-Fulgor and Themisto have one successful setup observation per available reference.
+time / kallistors time**; for example, 4× means kallistors built the index four times faster.
+Every successful entry is the median of three builds after one warmup.
 
-| Reference | Tool | Build time, s | Build-time ratio | Peak RSS, GiB | Index size, GiB | Measurement |
-| --- | --- | ---: | ---: | ---: | ---: | --- |
-| GENCODE v50 | kallistors | 11.12 | 1.00× | 4.87 | 1.23 | Median of 3 |
-| GENCODE v50 | kallisto 0.52.0 | 121.49 | 10.92× | 7.69 | 1.19 | Median of 3 |
-| GENCODE v50 | Salmon 2.8.0 | 52.18 | 4.69× | 10.11 | 1.96 | Median of 3 |
-| GENCODE v50 | piscem 0.23.0 | 47.12 | 4.24× | 5.14 | 0.57 | Median of 3 |
-| GENCODE v50 | Fulgor 4.2.0 | 50.93 | 4.58× | 14.17 | 0.35 | Single setup run |
-| GENCODE v50 | Themisto 3.2.2 | 202.12 | 18.17× | 8.94 | 0.48 | Single setup run |
-| Mature + nascent | kallistors | 98.69 | 1.00× | 18.80 | 5.94 | Median of 3 |
-| Mature + nascent | kallisto 0.52.0 | 907.84 | 9.20× | 20.15 | 6.13 | Median of 3 |
-| Mature + nascent | Salmon 2.8.0 | 255.78 | 2.59× | 15.42 | 5.31 | Median of 3 |
-| Mature + nascent | piscem 0.23.0 | 240.47 | 2.44× | 11.94 | 3.08 | Median of 3 |
-| Mature + nascent | Fulgor 4.2.0 | Unavailable | — | — | — | Build failed |
-| Mature + nascent | Themisto 3.2.2 | 1492.04 | 15.12× | 12.48 | 3.23 | Single setup run |
+| Reference | Tool | Build time, s | Build-time ratio | Peak RSS, GiB | Index size, GiB |
+| --- | --- | ---: | ---: | ---: | ---: |
+| GENCODE v50 | kallistors | 11.12 | 1.00× | 4.87 | 1.23 |
+| GENCODE v50 | kallisto 0.52.0 | 121.49 | 10.92× | 7.69 | 1.19 |
+| GENCODE v50 | Salmon 2.8.0 | 52.18 | 4.69× | 10.11 | 1.96 |
+| GENCODE v50 | piscem 0.23.0 | 47.12 | 4.24× | 5.14 | 0.57 |
+| GENCODE v50 | Fulgor 4.2.0 | 46.28 | 4.16× | 14.15 | 0.35 |
+| GENCODE v50 | Themisto 3.2.2 | 201.08 | 18.08× | 8.97 | 0.48 |
+| Mature + nascent | kallistors | 98.69 | 1.00× | 18.80 | 5.94 |
+| Mature + nascent | kallisto 0.52.0 | 907.84 | 9.20× | 20.15 | 6.13 |
+| Mature + nascent | Salmon 2.8.0 | 255.78 | 2.59× | 15.42 | 5.31 |
+| Mature + nascent | piscem 0.23.0 | 240.47 | 2.44× | 11.94 | 3.08 |
+| Mature + nascent | Fulgor 4.2.0 | Unavailable | — | — | — |
+| Mature + nascent | Themisto 3.2.2 | 1504.83 | 15.25× | 12.37 | 3.23 |
 
 Times exclude downloads, reference preparation and tool compilation; index sizes cover the
-saved indexes. Themisto's nascent setup had background activity; Fulgor's nascent build failed.
+saved indexes. All completed runs are retained, including background-activity flags.
+Fulgor's nascent build failed.
 See the [original build details](docs/kallisto-comparison-results.md#index-construction),
 [Salmon/piscem build details](docs/salmon-piscem-results.md#index-construction), and
 [Fulgor/Themisto setup details](docs/mapping-comparison-results.md#setup-at-eight-requested-threads).
