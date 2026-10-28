@@ -197,6 +197,8 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into<'index>(
         .unwrap_or_else(|| vec![0u32; super::MAX_FRAG_LEN as usize]);
 
     let fragment_budget = sampling.map_or(usize::MAX, FragmentLengthSampler::remaining);
+    // Sampling needs placement details. Switch to borrowed counting only after
+    // both fragment-length and bias observations are complete for this worker.
     if fragment_budget == 0
         && !super::bias_sampling_pending(counts.bias.as_ref(), options.max_bias)
         && super::counting_filters_supported(index, options)

@@ -72,11 +72,15 @@ pub(crate) fn reverse_complement_word(forward: u64, len: usize) -> u64 {
         return 0;
     }
     let reversed = forward.reverse_bits();
+    // Reversing bits also swaps the two bits within each base. Undo that swap
+    // before complementing (A/C/G/T codes complement by XOR with 3).
     let complement =
         !(((reversed & 0x5555_5555_5555_5555) << 1) | ((reversed & 0xaaaa_aaaa_aaaa_aaaa) >> 1));
     complement >> ((32 - len) * 2)
 }
 
+// Both words are right-aligned, with the first base in the highest used pair
+// of bits. Validate every byte before using the ASCII-to-two-bit shortcut.
 pub(crate) fn encode_kmer_pair(seq: &[u8]) -> Option<(u64, u64)> {
     if seq.len() > 32 {
         return None;

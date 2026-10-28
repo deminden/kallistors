@@ -1,3 +1,6 @@
+//! Serialize the kallisto v13 layout, including upstream bitmap tags and widths.
+//! In-memory packing choices must not leak into these on-disk representations.
+
 mod mphf;
 use mphf::write_boo_mphf;
 #[cfg(test)]
@@ -66,6 +69,8 @@ pub(super) fn write_index_with_report(
     writer.write_all(&mphf)?;
     let mphf = mphf_start.elapsed();
 
+    // The supported builder emits no D-list entries but still writes both
+    // required header fields: size and overhang.
     write_u64(&mut writer, 0)?;
     write_u64(&mut writer, 1)?;
 

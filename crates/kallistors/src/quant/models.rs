@@ -42,6 +42,8 @@ pub(super) fn empirical_frag_lens_by_transcript(
     let mut count = 0u64;
     let mut mass = 0.0;
     let mut truncated_means = Vec::with_capacity(histogram.len());
+    // A short transcript can only contain fragments up to its own length.
+    // Store each prefix's conditional mean, rather than applying one global mean.
     for (length, &observations) in histogram.iter().enumerate() {
         count += u64::from(observations);
         mass += length as f64 * f64::from(observations);
@@ -153,6 +155,8 @@ fn update_eff_lens_impl<const PARALLEL: bool>(
     let mut dbias5 = vec![0.0; num6];
     let mut bias_alpha_norm = 0.0;
 
+    // These shared histogram additions stay in transcript order. Parallelism is
+    // reserved for the independent per-transcript rescaling after normalization.
     for i in 0..transcript_seqs.len() {
         if i >= means.len() || i >= alpha.len() || i >= eff_lens.len() {
             break;

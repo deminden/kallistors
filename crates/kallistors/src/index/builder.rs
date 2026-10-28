@@ -485,6 +485,8 @@ fn flush_transcript(
         }
         normalized
     };
+    // Quantification retains the pre-trimming length even though graph keys
+    // are collected from the normalized, poly-A-trimmed sequence.
     let original_len = normalized.len() as u32;
     if !defer_normalization {
         trim_poly_a(&mut normalized);
@@ -499,6 +501,8 @@ fn flush_transcript(
 }
 
 fn trim_poly_a(seq: &mut Vec<u8>) {
+    // Ten trailing As trigger removal of the entire tail, not just ten bases.
+    // Shorter tails remain part of the reference, matching the index convention.
     if seq.len() >= 10 && seq[seq.len() - 10..].iter().all(|&b| b == b'A') {
         while seq.last() == Some(&b'A') {
             seq.pop();

@@ -53,6 +53,8 @@ pub(super) struct Mapper<'a> {
     index: &'a BifrostIndex,
     options: PseudoalignOptions,
     cache: QueryCache<'a>,
+    // Tag-free reads can disable strand filtering. Keep a distinct answer cache
+    // because equal cDNA bytes need not produce equal ECs under both policies.
     unstranded_cache: QueryCache<'a>,
     pool: Option<rayon::ThreadPool>,
 }
@@ -157,6 +159,8 @@ pub(super) fn write_batch<W: std::io::Write, F: FragmentObservation>(
     counts: &mut (u64, u64, u64),
     state: &mut BusWriteState<'_, W>,
 ) -> Result<()> {
+    // Indexed parallel collection preserves input order. Intern ECs here so
+    // worker completion order cannot change BUS IDs or --num read numbers.
     for row in rows {
         let number = counts.0;
         counts.0 += 1;

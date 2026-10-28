@@ -460,6 +460,8 @@ fn paired_segment_flags(mate_idx: usize) -> Flags {
 }
 
 fn template_lengths(left: &GenomeAlignment, right: &GenomeAlignment) -> (i32, i32) {
+    // TLEN spans reference coordinates, including intron skips in genome BAM.
+    // Read lengths alone would undercount a spliced fragment's outer span.
     if left.reference_sequence_id != right.reference_sequence_id {
         return (0, 0);
     }

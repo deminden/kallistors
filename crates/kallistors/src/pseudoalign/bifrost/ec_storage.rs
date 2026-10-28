@@ -50,6 +50,8 @@ impl FlatEcBlocks {
         }
     }
     pub(super) fn push(&mut self, lb: u32, ub: u32, ec_start: usize, ec_end: usize) {
+        // A block that exceeds the bit fields spills to an exact overflow row;
+        // exceeding the arena's u32 offsets promotes the whole table to Wide.
         if ec_end > u32::MAX as usize && matches!(self, Self::Compact { .. }) {
             let wide = (0..self.len())
                 .map(|i| self.get(i).expect("valid EC block"))

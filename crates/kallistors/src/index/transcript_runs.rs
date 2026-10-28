@@ -2,6 +2,8 @@
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct TRInfo {
     pub(super) trid: u32,
+    // Transcript offset with reverse orientation in the high bit. start/stop
+    // delimit the covered unitig k-mer starts, using half-open coordinates.
     pub(super) pos: u32,
     pub(super) start: u32,
     pub(super) stop: u32,

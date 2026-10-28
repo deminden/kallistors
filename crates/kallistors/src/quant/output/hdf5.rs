@@ -26,6 +26,8 @@ pub struct H5QuantOutput<'a> {
 }
 
 pub fn write_abundance_h5(path: &Path, output: H5QuantOutput<'_>) -> Result<()> {
+    // Dataset names, shapes and signed integer widths are the kallisto file
+    // contract. Reject out-of-range counters rather than silently narrowing them.
     let mut file = FileBuilder::new();
     let mut aux = file.create_group("aux");
 

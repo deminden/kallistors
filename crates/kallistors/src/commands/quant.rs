@@ -344,6 +344,8 @@ pub fn run(args: QuantArgs) -> Result<()> {
 
         Ok(())
     };
+    // Reserve one requested worker for HDF5 while TSV uses the remaining budget.
+    // Bootstraps use the full pool, so their path finishes TSV first.
     if args.threads > 1 && !args.plaintext && args.bootstrap_samples == 0 {
         std::thread::scope(|scope| -> Result<()> {
             let tsv = scope.spawn(write_tsv);

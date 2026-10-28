@@ -87,6 +87,8 @@ impl EmWork {
         self.active_transcripts
             .sort_unstable_by_key(|&tr| (roots[tr], tr));
         let mut order: Vec<_> = (0..self.multi_ecs.len()).collect();
+        // The original EC ID is the tie-breaker within each component. Grouping
+        // may change scheduling, but not the order of additions to a transcript.
         order.sort_unstable_by_key(|&id| {
             (
                 roots[self.multi_transcripts[self.multi_ecs[id].transcript_range.start]],

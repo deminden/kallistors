@@ -1,13 +1,15 @@
 //! Immutable transcript IDs with allocation-free native one/two-ID classes.
 //!
-//! On64-bit targets the Box slice's unused null-pointer niche holds the inline
-//! variant without enlarging the16-byte value. Narrow targets keep boxed
+//! On 64-bit targets the Box slice's unused null-pointer niche holds the inline
+//! variant without enlarging the 16-byte value. Narrow targets keep boxed
 //! storage. All ownership, moves and drops use ordinary safe Rust enum fields.
 use std::ops::Deref;
 
 #[derive(Clone)]
 pub(crate) enum EcIds {
     #[cfg(target_pointer_width = "64")]
+    // Equal entries encode a singleton. A real duplicate pair stays on the
+    // heap, preserving its multiplicity instead of collapsing it to one ID.
     Inline([u32; 2]),
     Heap(Box<[u32]>),
 }

@@ -198,6 +198,8 @@ def execute(workspace, tools, inputs, pilot=False, only=None, amend=False):
                     case_spec.update(reference=inputs['reference'], case=case)
                     row = run_one(root, key, case['id'], method, threads, phase, rep, commands, case_spec)
                     if case['kind'] == 'bulk' and 'mapping_probe' not in row:
+                        # This is a separate invocation, not a subtraction from
+                        # quantification wall time; keep both observations intact.
                         mapping_out = dest / 'mapping-probe'
                         mapping_commands = bulk_mapping_plan(tools, method, case, inputs['reference'], indexes, mapping_out, threads)
                         if mapping_commands:

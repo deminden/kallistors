@@ -3,6 +3,8 @@ use kallistors::pseudoalign::StrandSpecific;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SliceSpec {
+    // None selects a synthetic field; real file numbers and slice starts are
+    // zero-based. A missing stop extends to the end of that record.
     pub(crate) file: Option<usize>,
     pub(crate) start: usize,
     pub(crate) stop: Option<usize>,
@@ -469,6 +471,8 @@ pub(crate) fn concat_sequence_slices(
     spec: &TechnologySpec,
     tag_present: bool,
 ) -> Result<Vec<u8>> {
+    // The separator prevents any valid k-mer from crossing unrelated slices.
+    // Barcode and UMI concatenation intentionally has no such separator.
     let mut out = Vec::new();
     for (idx, seq_spec) in spec.seq.iter().enumerate() {
         if idx > 0 {
@@ -518,6 +522,8 @@ pub(crate) fn extract_sequence_slice(
         && umi_spec.file == seq_spec.file
         && umi_spec.file.is_some()
     {
+        // Without the tag, this prefix is cDNA rather than a tag/UMI region.
+        // Quality extraction below must use the identical adjusted boundary.
         let mut adjusted = seq_spec;
         adjusted.start = umi_spec.start.saturating_sub(spec.tag_len.unwrap_or(0));
         adjusted.stop = seq_spec.stop;

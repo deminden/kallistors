@@ -221,6 +221,8 @@ pub(super) fn read_onlist_with_lengths<R: Read>(reader: &mut R) -> Result<Onlist
                 }
                 map
             });
+            // Resolve only against colors already encountered in the file.
+            // A later base transcript must not retroactively resolve this shade.
             if let Some(color_idx) = map.get(base) {
                 shade_to_color[idx] = Some(*color_idx as u32);
             }

@@ -549,6 +549,9 @@ impl BooPhf {
         Ok(phf)
     }
 
+    /// Return a candidate bucket rank, not a membership proof. Keys absent
+    /// from the construction set can still hit a level; callers must verify
+    /// the corresponding sequence before accepting a mapping.
     #[inline]
     pub fn lookup(&self, key: &[u8; 8]) -> Option<u64> {
         if self.absolute_levels {

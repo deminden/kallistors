@@ -118,7 +118,8 @@ pub fn hexamer_to_int(seq: &[u8], revcomp: bool) -> Option<usize> {
     Some(hex)
 }
 
-/// Update a hexamer rolling hash with the next base.
+/// Slide a six-base window forward in the input, adding the next input base.
+/// In reverse-complement mode the new complemented base enters at the high end.
 pub fn update_hexamer(mut hex: usize, base: u8, revcomp: bool) -> Option<usize> {
     if !revcomp {
         hex = (hex & 0x3ff) << 2;

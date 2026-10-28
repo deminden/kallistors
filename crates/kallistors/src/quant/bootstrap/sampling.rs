@@ -64,7 +64,7 @@ impl SamplingPlan {
     pub(super) fn with_exact_inverse(mut self) -> Self {
         let total = self.total;
         let cumulative = &self.cumulative;
-        // Exact inverse CDF, shared by all bootstrap workers. Keep larger
+        // Exact inverse CDF, reused across serial samples. Keep larger
         // libraries on the bounded directory; at most 64 MiB is allocated.
         let inverse = if total <= (64 * 1024 * 1024 / 4)
             && total > 0

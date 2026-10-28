@@ -1,3 +1,7 @@
+//! Build topology from canonical keys, compact paths, then recover transcript
+//! coordinates and annotation blocks on those final paths. Packed keys, edges
+//! and locations are temporary build layouts; the writer owns v13 serialization.
+
 use compaction::UnitigPath;
 #[cfg(test)]
 use edges::RankedEdges;
@@ -189,6 +193,7 @@ pub(super) struct NodePayload {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct NodeBlock {
+    // Half-open range of k-mer starts within a unitig, not a range of base ends.
     pub(super) lb: u32,
     pub(super) ub: u32,
     pub(super) ec: Vec<u32>,

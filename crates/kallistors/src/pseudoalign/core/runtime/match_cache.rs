@@ -46,6 +46,8 @@ impl FastKmerMatchCache {
 
     #[inline]
     pub(super) fn get(&self, key: u64, flags: u8) -> Option<Option<FastKmerMatch>> {
+        // Outer None means uncached; Some(None) is a confirmed miss. Positive
+        // and negative records share a slot but retain independent exact keys.
         let entry = &self.entries[self.slot(key)];
         if entry.state == 1 && entry.key == key && entry.flags == flags {
             return Some(Some(FastKmerMatch {

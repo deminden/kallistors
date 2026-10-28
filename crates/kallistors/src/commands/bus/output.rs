@@ -33,6 +33,8 @@ pub(crate) fn write_bus_header(writer: &mut impl Write, bc_len: u32, umi_len: u3
 }
 
 pub(crate) fn write_bus_record(writer: &mut impl Write, record: &BusRecord) -> Result<()> {
+    // BUS records occupy 32 bytes; the final four bytes are zero padding.
+    // Encode fields explicitly instead of relying on Rust struct layout.
     let mut bytes = [0u8; 32];
     bytes[..8].copy_from_slice(&record.barcode.to_le_bytes());
     bytes[8..16].copy_from_slice(&record.umi.to_le_bytes());

@@ -194,6 +194,8 @@ def run_process(command, prefix, memory=True, markers=None, environment=None, ob
                 if observer is not None:
                     log.flush()
                 if markers:
+                    # These are parent-observed log arrival times, not internal
+                    # CPU timings. Retain a tail so split markers are still found.
                     pending += chunk
                     for key, marker in markers.items():
                         if key not in events and marker in pending:

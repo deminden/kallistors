@@ -22,6 +22,8 @@ type CountedRead<'a> = Counted<'a, ()>;
 const BATCH_READS: usize = 65_536;
 
 pub(super) fn supports(args: &BusArgs, spec: &TechnologySpec) -> bool {
+    // Packed batches retain sequences only. Layouts requiring headers, tag
+    // decisions or paired placement must first use their richer input adapter.
     !args.bam
         && super::counting::supports(args)
         && !args.batch_barcodes
@@ -58,6 +60,9 @@ impl Readers {
         max_reads: Option<u64>,
     ) -> Result<Self> {
         let multiplier = if group.interleaved { nfiles } else { 1 };
+        // The user limit counts logical reads; the interleaved parser counts
+        // physical records. Give the producer the same limit so prefetch cannot
+        // parse past the requested boundary and surface unrelated later errors.
         let record_limit = max_reads
             .unwrap_or(u64::MAX)
             .saturating_mul(multiplier as u64);

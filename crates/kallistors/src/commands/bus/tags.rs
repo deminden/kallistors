@@ -3,6 +3,8 @@
 use super::*;
 
 pub(super) fn normalize_corrected_barcode(mut barcode: Vec<u8>) -> Vec<u8> {
+    // Corrected tags may carry a sample suffix (for example, ACGT-1). Raw tags
+    // bypass this helper so their bytes retain the original encoding behavior.
     if let Some(pos) = barcode.iter().position(|base| *base == b'-') {
         barcode.truncate(pos);
     }
@@ -175,6 +177,8 @@ pub(super) fn umi_value(
             disable_strand_specific: false,
         }))
     } else {
+        // In tagged layouts, an unrecognized tag is treated as an internal read:
+        // retain it with the sentinel UMI and map without strand filtering.
         Ok(Some(UmiValue {
             binary: u64::MAX,
             flag: 0,

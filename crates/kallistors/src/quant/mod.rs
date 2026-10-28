@@ -43,6 +43,8 @@ const MIN_ALPHA: f64 = 1e-8;
 const ALPHA_LIMIT: f64 = 1e-7;
 const ALPHA_CHANGE_LIMIT: f64 = 1e-2;
 const ALPHA_CHANGE: f64 = 1e-2;
+// Smallest positive f64: the denominator guard skips zero/negative mass without
+// discarding representable positive subnormals as an ordinary epsilon would.
 const TOLERANCE: f64 = f64::from_bits(1);
 
 #[derive(Debug, Clone, Copy)]
@@ -606,6 +608,9 @@ fn em_quantify_input_threaded(
         };
 
         let stop_em = chcount == 0 && iter > options.min_rounds;
+        // Convergence first prunes tiny abundances, then allows one final EM
+        // update (within max_iter) to redistribute their mass. Returning at the
+        // first zero change count would omit that update.
         if final_round {
             break;
         }

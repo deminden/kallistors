@@ -112,6 +112,8 @@ def align_sc(item, genes, cells):
 
 
 def sparse_quantile(values, total, q):
+    # Only nonzero differences are stored. Include the implicit zeros in the
+    # requested population without materializing the dense gene-by-cell matrix.
     values = np.sort(values)
     zeros = total - len(values)
     pos = q * (total - 1)
@@ -122,6 +124,8 @@ def sparse_quantile(values, total, q):
 
 
 def sc_agreement(a, b):
+    # Use the union of labels: features or barcodes absent from one output count
+    # as zero there, rather than disappearing from the agreement calculation.
     genes, cells = sorted(set(a[0]) | set(b[0])), sorted(set(a[1]) | set(b[1]))
     x, y = align_sc(a, genes, cells), align_sc(b, genes, cells)
     diff = abs(x - y)

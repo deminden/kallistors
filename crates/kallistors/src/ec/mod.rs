@@ -7,6 +7,8 @@ use std::path::Path;
 use crate::{Error, Result};
 
 /// An EC list in kallisto text format.
+/// Row positions are EC IDs local to this list; members are transcript IDs.
+/// Loading preserves member order and duplicates rather than canonicalizing them.
 #[derive(Debug, Clone)]
 pub struct EcList {
     pub classes: Vec<Vec<u32>>,

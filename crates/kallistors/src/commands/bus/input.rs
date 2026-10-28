@@ -132,6 +132,8 @@ fn parse_batch_file(path: &Path, nfiles: usize) -> Result<Vec<ReadGroup>> {
             );
         }
         let id = parts[0].to_string();
+        // Repeated sample IDs (for example, separate lanes) share the synthetic
+        // batch barcode while retaining separate input groups.
         let next_batch_index = batch_ids.len();
         let batch_index = *batch_ids.entry(id.clone()).or_insert(next_batch_index);
         groups.push(ReadGroup {
@@ -195,6 +197,8 @@ fn infer_batch_nfiles(path: &Path) -> Result<usize> {
 
 fn resolve_batch_read_path(batch_dir: &Path, value: &str) -> PathBuf {
     let path = PathBuf::from(value);
+    // Preserve paths already valid from the working directory; only unresolved
+    // relative paths are interpreted beside the batch file.
     if value == "-" || path.is_absolute() || path.exists() {
         path
     } else {

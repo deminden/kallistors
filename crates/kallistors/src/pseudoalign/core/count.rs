@@ -23,6 +23,8 @@ impl FinalHitFold {
 
     #[inline(always)]
     pub(super) fn push(&mut self, index: &BifrostIndex, hit: Hit) {
+        // Empty annotations contribute no constraint; an empty intersection of
+        // nonempty annotations is terminal and must never restart the fold.
         if self.rejected {
             return;
         }

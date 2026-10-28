@@ -13,6 +13,9 @@ pub(super) fn bias_hexamer_for_match(index: &BifrostIndex, best_match: MatchInfo
     let contig_len = (ub as isize) - contig_start;
     let pos = best_match.unitig_pos as isize - contig_start;
     let p = best_match.read_pos as isize;
+    // The bias window is anchored at the inferred read start, two bases before
+    // it and four from it onward. Reverse matches require the opposite window
+    // orientation; the matched k-mer's start alone is not the sampling position.
     let pre = 2isize;
     let post = 4isize;
     let unitig = index.unitig_sequence(best_match.unitig_id)?;

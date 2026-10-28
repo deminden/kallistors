@@ -66,6 +66,8 @@ impl Hasher for EcFingerprintHasher {
 
 pub(crate) struct SharedEcKey {
     ec: Box<[u32]>,
+    // Distinct ECs with the same fingerprint form a chain; the hash alone is
+    // never an EC identity. Arc also keeps keys alive after the pool is cleared.
     previous: Option<Arc<SharedEcKey>>,
 }
 pub(crate) type SharedEcKeys = Vec<Arc<SharedEcKey>>;

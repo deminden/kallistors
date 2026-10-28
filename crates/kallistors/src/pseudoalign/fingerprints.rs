@@ -2,6 +2,8 @@
 
 use std::sync::atomic::{AtomicU16, Ordering};
 
+// Zero is unobserved. Conflicting or reserved fingerprints disable rejection
+// permanently for that bucket; equal fingerprints still require exact matching.
 pub(crate) const DISABLED: u16 = (1 << 12) - 1;
 
 #[inline]

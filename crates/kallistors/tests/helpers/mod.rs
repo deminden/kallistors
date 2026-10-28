@@ -86,6 +86,7 @@ pub fn write_fasta(path: &Path, transcripts: &[(String, Vec<u8>)]) -> std::io::R
 }
 
 fn make_seq(seed: usize, len: usize) -> Vec<u8> {
+    // Fixed arithmetic keeps fixtures reproducible across RNG-library changes.
     let bases = *b"ACGT";
     let mut seq = Vec::with_capacity(len);
     let mut state = 0x9e37_79b9_7f4a_7c15u64 ^ (seed as u64);
@@ -238,6 +239,8 @@ pub fn command_status_with_timeout(
                 return Ok(status);
             }
             let kill_result = child.kill();
+            // Reap even if the child raced with kill and already exited, so a
+            // timed-out fixture command cannot leave a zombie behind.
             let wait_result = child.wait();
             if let Err(error) = kill_result
                 && error.kind() != io::ErrorKind::InvalidInput

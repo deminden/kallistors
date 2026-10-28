@@ -2,6 +2,9 @@
 
 use super::*;
 
+// COUNT_ONLY can omit the hit vector while PLACEMENT still retains the first
+// orientation hit and best match for strand/fragment filters. TRACE records
+// decisions separately, so enabling diagnostics does not require another mapper.
 pub(super) fn ec_for_read_bifrost_fast_with_cache<
     'index,
     const TRACE: bool,
@@ -231,6 +234,8 @@ fn ec_for_read_bifrost_fast_with_cache_cached<
             state.used_revcomp = used_revcomp;
         }
         let mut accept_for_stream = true;
+        // A relaxed probe can confirm a jump without constraining the online
+        // fold. The final all-hit fold still sees it; keep those roles distinct.
         if matched_relaxed && has_hit {
             accept_for_stream = false;
             if TRACE
@@ -742,6 +747,8 @@ fn ec_for_read_bifrost_fast_with_cache_cached<
                 .as_deref()
                 .is_none_or(|mask| ec.iter().all(|&id| mask.get(id as usize) == Some(&true)))
         {
+            // Only index-owned slices may escape the worker scratch. This case
+            // also proves that final on-list filtering would leave the EC intact.
             return Some(BorrowedReadEc {
                 borrowed: Some(ec),
                 read: ReadEc {

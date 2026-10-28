@@ -12,6 +12,9 @@ use crate::pseudoalign::minimizers::{
 };
 use crate::pseudoalign::{BifrostIndex, PseudoalignOptions, Strand};
 
+// Tuple order: unitig ID, unitig start, read k-mer start, minimizer offset,
+// used reverse complement, special unitig, overcrowded minimizer,
+// relaxed match, forward strand. The scanner uses the last two independently.
 pub(super) type CandidateMatch = (usize, usize, usize, usize, bool, bool, bool, bool, bool);
 
 pub(super) struct ProbeCandidates {

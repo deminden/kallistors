@@ -157,6 +157,8 @@ impl GenomeModel {
             if start_one_based == 0 {
                 bail!("invalid GTF exon start: {}", fields[3]);
             }
+            // GTF intervals are one-based and closed. Internally retain
+            // zero-based half-open intervals, so the numeric end is unchanged.
             let start = start_one_based - 1;
             let end = fields[4]
                 .parse::<usize>()
@@ -289,6 +291,8 @@ impl TranscriptProjection {
         if remaining > 0 {
             return None;
         }
+        // Exons were walked in transcript order, which runs backward on minus
+        // strands. BAM CIGAR operations always follow increasing genome positions.
         segments.sort_by_key(|segment| segment.start);
         let mut ops = Vec::new();
         let mut previous_segment_end = None;

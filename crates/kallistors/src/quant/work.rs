@@ -17,6 +17,8 @@ pub(super) struct EmWork {
 
 impl EmWork {
     pub(super) fn compact_transcript_ids(&mut self) {
+        // After this rewrite, working arrays use dense IDs; active_transcripts
+        // remains the dense-to-original map for model refreshes and final output.
         let mut dense_ids = vec![0usize; self.singleton_alpha.len()];
         let mut singleton_alpha = Vec::with_capacity(self.active_transcripts.len());
         for (dense, &original) in self.active_transcripts.iter().enumerate() {
@@ -85,6 +87,8 @@ pub(super) fn weighted_alpha_sum<I: IncomingEcId>(
 
 pub(super) struct EcScales {
     pub(super) values: Vec<f64>,
+    // An absent contribution must skip arithmetic entirely. A stored zero is
+    // not equivalent when a weight or alpha is nonfinite (0 * infinity is NaN).
     pub(super) present: Vec<u8>,
 }
 
@@ -192,6 +196,8 @@ impl EmIncoming {
 }
 
 pub(super) fn prepare_em_work(ec_classes: &[Vec<u32>], counts: &[u32], eff_lens: &[f64]) -> EmWork {
+    // Singleton counts are fixed assignments. Only observed multi-target ECs
+    // need iterative redistribution, but their original edge order is retained.
     let mut singleton_alpha = vec![0.0f64; eff_lens.len()];
     let mut multi_ecs = Vec::new();
     let mut multi_transcripts = Vec::new();

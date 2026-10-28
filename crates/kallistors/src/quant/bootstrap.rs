@@ -39,6 +39,8 @@ pub fn bootstrap_quantify(
     Ok(out)
 }
 
+// Bounds concurrent worker scratch, not total RSS: shared inputs and retained
+// output samples also occupy memory throughout the bootstrap run.
 const BOOTSTRAP_SCRATCH_BUDGET: usize = 2 * 1024 * 1024 * 1024;
 
 /// Quantify independent bootstrap samples with bounded requested workers.
@@ -239,6 +241,8 @@ fn em_quantify_fixed_eff_lens_with_pool<const PARALLEL: bool>(
     } else {
         None
     };
+    // Initialize with the full transcript count even after compaction, preserving
+    // the starting values and floating-point arithmetic of the uncompressed EM path.
     let mut alpha = vec![1.0 / num_trans as f64; em_work.singleton_alpha.len()];
     let mut next_alpha = if PARALLEL {
         Vec::new()

@@ -47,6 +47,8 @@ pub struct PackedFastqBatch {
 
 #[derive(Debug, Clone)]
 pub struct PackedSeqBatch {
+    // Record spans refer to one batch-owned byte buffer. Headers and qualities are
+    // consumed but not retained, so callers needing them must use full records.
     storage: Vec<u8>,
     records: Vec<PackedSeqRecord>,
 }
@@ -209,6 +211,8 @@ pub fn open_fastq_reader(path: &Path) -> Result<FastqReader<FastqInput>> {
         let file = BufReader::with_capacity(FASTQ_IO_BUFFER_BYTES, file);
         // Consume our compressed buffer directly; the Read adapter would add
         // another buffer and copy between it and this one.
+        // A concatenation of lane files is multiple gzip members. Decode all
+        // members so a valid first member cannot hide the remaining reads.
         let decoder = flate2::bufread::MultiGzDecoder::new(file);
         FastqInput::Gzip(Box::new(BufReader::with_capacity(
             FASTQ_IO_BUFFER_BYTES,

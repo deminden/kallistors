@@ -201,6 +201,8 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
             }
         }
         drop(work_tx);
+        // Disconnect both queues before joining: an early worker exit can leave
+        // the producer blocked in send even though no more batches are needed.
         drop(producer_rx);
 
         match producer.join() {

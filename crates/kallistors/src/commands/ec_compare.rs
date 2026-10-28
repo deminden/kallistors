@@ -13,6 +13,8 @@ pub fn run(a_path: &Path, b_path: &Path) -> Result<()> {
         return Ok(());
     }
 
+    // This diagnostic compares table layout, including EC numbering. Weighted
+    // mapping agreement requires matching transcript sets and counts instead.
     for (i, (ac, bc)) in a.classes.iter().zip(b.classes.iter()).enumerate() {
         if ac != bc {
             println!("mismatch at ec {}", i);

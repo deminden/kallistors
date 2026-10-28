@@ -94,6 +94,8 @@ pub struct BifrostIndex {
     pub index_version: u64,
     pub k: usize,
     pub g: usize,
+    // Packed loaders may leave ASCII vectors empty. Accessors use encoded
+    // metadata for node counts and decode bases only when a caller needs them.
     pub unitigs: Vec<Vec<u8>>,
     pub km_unitigs: Vec<Vec<u8>>,
     pub h_kmers: Vec<Vec<u8>>,

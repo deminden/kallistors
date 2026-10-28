@@ -37,6 +37,8 @@ def load_counts(path: Path) -> Counter[tuple[int, ...]]:
             if ec_id < 0 or count < 0 or (count and not transcripts) or any(t < 0 for t in transcripts) or len(set(transcripts)) != len(transcripts):
                 raise ValueError(f"{path}:{line_number}: invalid EC count or empty counted class")
             if count:
+                # EC numbers are local to a run. Aggregate by the full member
+                # set; this assumes both exports use the same transcript numbering.
                 counts[transcripts] += count
     if not saw_content or not (saw_data or saw_header):
         raise ValueError(f"{path}: empty or malformed EC export")

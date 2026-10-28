@@ -77,6 +77,8 @@ def canonical_reference(source, out, kind='gencode50'):
             else:
                 raise ValueError(f'Unsupported reference kind: {kind}')
             if any(c not in b'ACGT' for c in seq):
+                # Feed every indexer the same deterministic replacement instead
+                # of letting each tool apply its own ambiguous-base policy.
                 seq = bytes(c if c in b'ACGT' else b'ACGT'[i % 4] for i, c in enumerate(seq))
                 changed += 1
             dst.write(b'>' + tx.encode() + b'\n')

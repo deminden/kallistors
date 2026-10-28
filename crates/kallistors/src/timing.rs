@@ -1,3 +1,6 @@
+//! Accumulated diagnostic scope durations, including overlapping worker scopes.
+//! These totals are not disjoint phases and must not be summed as command wall time.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};

@@ -28,7 +28,7 @@ const REP_HASH_GROUPS: [[u64; 256]; 5] = {
     }
     groups
 };
-// Three-base groups keep the initializer table within512 bytes.
+// Three-base groups keep the initializer table within 512 bytes.
 static REP_GROUP_THREE: [u64; 64] = {
     let mut groups = [0; 64];
     let mut i = 0;

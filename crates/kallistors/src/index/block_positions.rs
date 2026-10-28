@@ -32,6 +32,8 @@ impl BlockPositions {
         self.ends.push(self.values.len());
     }
     pub(super) fn push_last_unique(&mut self, value: u32) {
+        // Input for each group is sorted, so adjacent comparison is sufficient.
+        // Compare within this group only: neighboring transcripts may share a position.
         let group = self.ends.len() - 1;
         let start = if group == 0 { 0 } else { self.ends[group - 1] };
         if self.values.len() == start || self.values.last() != Some(&value) {

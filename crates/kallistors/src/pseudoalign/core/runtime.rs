@@ -24,7 +24,8 @@ use std::sync::OnceLock;
 use super::super::minimizers::minimizers_for_encoded_kmer_into;
 use super::super::{BifrostIndex, PseudoalignOptions};
 
-// Runtime switches and tiny per-thread caches keep hot read loops allocation-light.
+// Runtime switches are sampled once per process. Per-thread lookup state avoids
+// synchronization in the read loop; match-table capacity comes from the budget scope.
 pub(crate) static DISABLE_FAST_PATH: OnceLock<bool> = OnceLock::new();
 pub(crate) static DISABLE_MINIMIZER_CACHE: OnceLock<bool> = OnceLock::new();
 pub(crate) static DISABLE_MATCH_CACHE: OnceLock<bool> = OnceLock::new();
@@ -96,6 +97,8 @@ pub(crate) fn ensure_cache_context(index: &BifrostIndex) {
 
 #[inline]
 fn ensure_cache_context_key(context: (u64, usize, usize)) {
+    // Workers can outlive a mapping invocation. Index identity, not its memory
+    // address, prevents answers from a previous graph surviving allocator reuse.
     CACHE_CONTEXT.with(|owner| {
         let previous = owner.get();
         if previous != Some(context) {
@@ -191,6 +194,8 @@ pub(crate) fn fast_path_enabled(
     dbg: bool,
     options: PseudoalignOptions,
 ) -> bool {
+    // This gate is the semantic contract of the compact scanner. Options needing
+    // different hit collection or folding must use the general scanner.
     if env_flag(&DISABLE_FAST_PATH, "KALLISTORS_DISABLE_FAST_PATH") {
         return false;
     }

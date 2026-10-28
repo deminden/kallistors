@@ -207,7 +207,8 @@ pub(super) fn finish_read(
         }
     }
 
-    // Apply synthetic D-list dummy hits (kallisto um_dummy behavior).
+    // Apply synthetic D-list dummy hits (kallisto um_dummy behavior). They must
+    // participate in the fold before on-list filtering because they can reject it.
     if append_dummy_hit && let Some(onlist) = dlist_onlist {
         let dummy = onlist_cardinality(onlist);
         let ec = [dummy];
@@ -243,6 +244,8 @@ pub(super) fn finish_read(
         return None;
     }
     let min_range = options.min_range.max(1);
+    // Coverage spans the leftmost hit's start through the rightmost hit's end,
+    // not the number of probes; successful jumps deliberately skip probes.
     if maxpos >= minpos && (maxpos - minpos + index.k) < min_range {
         return None;
     }

@@ -119,6 +119,8 @@ impl<'index> QueryCache<'index> {
 }
 
 fn cacheable_ec(ec: &Option<Cow<'_, [u32]>>) -> bool {
+    // Borrowed answers cost only a slice into the live index. Owned intersections
+    // need a size cap so a few highly ambiguous reads cannot inflate every slot.
     match ec {
         None | Some(Cow::Borrowed(_)) => true,
         Some(Cow::Owned(values)) => values.len() <= 256,

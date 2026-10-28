@@ -31,6 +31,8 @@ pub fn ec_for_pair_bifrost_counting(
     };
     let mut a: Option<ReadEc> = scan(left, true);
     let mut b: Option<ReadEc> = scan(right, false);
+    // A mate with no evidence permits the other's EC. Contradictory evidence
+    // rejects the whole pair, so check the rejection flag before dropping empties.
     if a.as_ref().is_some_and(|v| v.hard_reject_pair)
         || b.as_ref().is_some_and(|v| v.hard_reject_pair)
     {
