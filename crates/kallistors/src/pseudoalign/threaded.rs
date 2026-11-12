@@ -114,6 +114,115 @@ fn produce_batches<R: PackedSeqBatchSource>(
     Ok(())
 }
 
+/// Fragment-length sampling budget for numbered paired buffers, independent of
+/// thread timing.
+///
+/// Workers take buffers in input order. Buffer `i` (1-based) may record up to
+/// `goal - observations(buffers 1..=i - lag)` observations, where `lag` is the
+/// worker count: the budget a worker sees when the `lag - 1` buffers handed
+/// out just before its own are still running, which is how a shared,
+/// submit-on-finish counter behaves when workers run at the same speed. Making
+/// that dependency explicit fixes the sampled set for any timing; a worker
+/// only ever waits for strictly earlier buffers, so the wait always ends.
+struct OrderedSampler {
+    goal: usize,
+    lag: u64,
+    state: std::sync::Mutex<OrderedSamplerState>,
+    ready: std::sync::Condvar,
+    /// First buffer known to have a zero budget; every later one has too.
+    finished_from: std::sync::atomic::AtomicU64,
+}
+
+struct OrderedSamplerState {
+    /// `prefix[n]`: observations recorded by buffers `1..=n`, for the
+    /// contiguous run of completed buffers.
+    prefix: Vec<usize>,
+    /// Completed buffers beyond that run.
+    pending: std::collections::BTreeMap<u64, usize>,
+    aborted: bool,
+}
+
+impl OrderedSampler {
+    fn new(goal: usize, workers: usize) -> Self {
+        Self {
+            goal,
+            lag: workers.max(1) as u64,
+            state: std::sync::Mutex::new(OrderedSamplerState {
+                prefix: vec![0],
+                pending: std::collections::BTreeMap::new(),
+                aborted: false,
+            }),
+            ready: std::sync::Condvar::new(),
+            finished_from: std::sync::atomic::AtomicU64::new(if goal == 0 { 0 } else { u64::MAX }),
+        }
+    }
+
+    /// Whether every buffer handed out from now on has a zero budget.
+    fn finished(&self) -> bool {
+        self.finished_from
+            .load(std::sync::atomic::Ordering::Acquire)
+            != u64::MAX
+    }
+
+    fn budget(&self, sequence: u64) -> usize {
+        // Budgets only shrink with the sequence number, but an earlier buffer
+        // can still be finishing after a later one found its budget empty.
+        if sequence
+            >= self
+                .finished_from
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return 0;
+        }
+        if sequence <= self.lag {
+            return self.goal;
+        }
+        let needed = (sequence - self.lag) as usize;
+        let mut state = self.state.lock().expect("fragment sampler");
+        while state.prefix.len() <= needed && !state.aborted {
+            state = self.ready.wait(state).expect("fragment sampler");
+        }
+        if state.aborted {
+            return 0;
+        }
+        let budget = self.goal.saturating_sub(state.prefix[needed]);
+        if budget == 0 {
+            // Prefix sums only grow, so no later buffer can sample either.
+            self.finished_from
+                .fetch_min(sequence, std::sync::atomic::Ordering::AcqRel);
+        }
+        budget
+    }
+
+    fn complete(&self, sequence: u64, observations: usize) {
+        let mut state = self.state.lock().expect("fragment sampler");
+        state.pending.insert(sequence, observations);
+        loop {
+            let next = state.prefix.len() as u64;
+            let Some(observed) = state.pending.remove(&next) else {
+                break;
+            };
+            let total = state.prefix[state.prefix.len() - 1] + observed;
+            state.prefix.push(total);
+        }
+        drop(state);
+        self.ready.notify_all();
+    }
+
+    fn abort(&self) {
+        self.state.lock().expect("fragment sampler").aborted = true;
+        self.ready.notify_all();
+    }
+}
+
+struct AbortOnDrop<'a>(&'a OrderedSampler);
+
+impl Drop for AbortOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub fn pseudoalign_single_end_bifrost_with_options_threaded<
     R: ReadSource + PackedSeqBatchSource + Send,
 >(
@@ -313,11 +422,12 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
     let mut final_error: Option<Error> = None;
 
     let key_pool = Arc::new(super::utils::SharedEcPool::default());
-    let sampler = super::paired::FragmentLengthSampler::new(options.fragment_length_samples);
+    let sampler = OrderedSampler::new(options.fragment_length_samples, threads);
     thread::scope(|scope| {
         let (left_tx, left_rx) = bounded::<PackedSeqBatch>(1);
         let (right_tx, right_rx) = bounded::<PackedSeqBatch>(1);
-        let (work_tx, work_rx) = bounded::<Vec<PairedChunk>>(0);
+        let (work_tx, work_rx) = bounded::<(u64, Vec<PairedChunk>)>(0);
+        let mut sequence = 0u64;
         let mut handles = Vec::with_capacity(threads);
 
         let read_start = Instant::now();
@@ -337,9 +447,17 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
                     let mut pairs = super::core::ScopedEcPairs::new(index, threads);
                     let mut acc = EcCounts::new(options.bias);
                     let mut acc_map = EcCountMap::shared(key_pool);
-                    while let Ok(chunks) = rx.recv() {
-                        let budget = sampler.remaining();
-                        let local_sampler = super::paired::FragmentLengthSampler::new(budget);
+                    // A worker that stops early must not leave others waiting.
+                    let _abort = AbortOnDrop(sampler);
+                    while let Ok((sequence, chunks)) = rx.recv() {
+                        // Record this buffer's observations first and wait for
+                        // its budget afterwards, when earlier buffers are done.
+                        let recording = options.fragment_length_samples != 0 && !sampler.finished();
+                        let local_sampler = if recording {
+                            super::paired::FragmentLengthSampler::recording()
+                        } else {
+                            super::paired::FragmentLengthSampler::new(0)
+                        };
                         for chunk in chunks {
                             super::paired::pseudoalign_paired_bifrost_batch_into(
                                 index,
@@ -354,10 +472,17 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
                                 &mut pairs,
                             )?;
                         }
-                        if options.fragment_length_samples != 0 {
-                            sampler.submit(budget - local_sampler.remaining());
-                        }
+                        let observed = local_sampler.take_recorded();
+                        let budget = if recording {
+                            sampler.budget(sequence)
+                        } else {
+                            0
+                        };
+                        let kept = budget.min(observed.len());
+                        super::paired::add_fragment_lengths(&mut acc, &observed[..kept]);
+                        sampler.complete(sequence, kept);
                     }
+                    std::mem::forget(_abort);
                     Ok((acc, acc_map.into_shared_keys()))
                 }),
             );
@@ -369,7 +494,7 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
             let right = right_rx.recv().ok();
             match (left, right) {
                 (Some(left_batch), Some(right_batch)) => {
-                    let limit = if options.fragment_length_samples != 0 && sampler.remaining() > 0 {
+                    let limit = if options.fragment_length_samples != 0 && !sampler.finished() {
                         PAIRED_SAMPLING_BUFFER_BYTES
                     } else {
                         0
@@ -377,7 +502,8 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
                     match batch_builder.push(left_batch, right_batch, limit) {
                         Ok(batches) => {
                             for batch in batches {
-                                if work_tx.send(batch).is_err() {
+                                sequence += 1;
+                                if work_tx.send((sequence, batch)).is_err() {
                                     final_error =
                                         Some(Error::InvalidFormat("worker queue closed".into()));
                                     break;
@@ -402,7 +528,7 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
         }
         if final_error.is_none()
             && let Some(batch) = batch_builder.finish()
-            && work_tx.send(batch).is_err()
+            && work_tx.send((sequence + 1, batch)).is_err()
         {
             final_error = Some(Error::InvalidFormat("worker queue closed".into()));
         }
@@ -557,5 +683,80 @@ mod paired_batch_tests {
         jobs.push(builder.finish().unwrap());
         assert_eq!(lengths(jobs), vec![vec![(100, 100)], vec![(3, 4)]]);
         assert!(builder.push(packed(&[1]), packed(&[1, 2]), 100).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ordered_sampler_tests {
+    use super::OrderedSampler;
+
+    /// Budget each buffer gets from the lag rule, computed sequentially.
+    fn expected(goal: usize, lag: usize, observed: &[usize]) -> Vec<usize> {
+        let mut prefix = vec![0];
+        let mut budgets = Vec::new();
+        for (index, &available) in observed.iter().enumerate() {
+            let budget = if index < lag {
+                goal
+            } else {
+                goal.saturating_sub(prefix[index + 1 - lag])
+            };
+            budgets.push(budget);
+            prefix.push(prefix[index] + budget.min(available));
+        }
+        budgets
+    }
+
+    #[test]
+    fn budgets_follow_the_lag_rule_for_any_completion_order() {
+        let observed: Vec<usize> = (0..60).map(|i| 200 + (i * 37) % 120).collect();
+        for workers in [1usize, 3, 8] {
+            let want = expected(10_000, workers, &observed);
+            let sampler = OrderedSampler::new(10_000, workers);
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let got: Vec<std::sync::atomic::AtomicUsize> =
+                (0..observed.len()).map(|_| Default::default()).collect();
+            std::thread::scope(|scope| {
+                for worker in 0..workers {
+                    let (sampler, next, got, observed) = (&sampler, &next, &got, &observed);
+                    scope.spawn(move || {
+                        loop {
+                            let index = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let Some(&available) = observed.get(index) else {
+                                break;
+                            };
+                            // Stagger completions so later buffers often finish first.
+                            std::thread::sleep(std::time::Duration::from_micros(
+                                ((index * 7 + worker * 13) % 5) as u64 * 50,
+                            ));
+                            let budget = sampler.budget(index as u64 + 1);
+                            got[index].store(budget, std::sync::atomic::Ordering::SeqCst);
+                            sampler.complete(index as u64 + 1, budget.min(available));
+                        }
+                    });
+                }
+            });
+            let got: Vec<usize> = got
+                .iter()
+                .map(|value| value.load(std::sync::atomic::Ordering::SeqCst))
+                .collect();
+            assert_eq!(got, want, "workers={workers}");
+            assert!(sampler.finished());
+        }
+    }
+
+    #[test]
+    fn an_earlier_buffer_finishing_late_keeps_its_budget() {
+        let sampler = OrderedSampler::new(10, 1);
+        assert_eq!(sampler.budget(1), 10);
+        sampler.complete(1, 4);
+        // Buffer 3 cannot start until buffer 2 completes, so compute buffer 2 first.
+        assert_eq!(sampler.budget(2), 6);
+        sampler.complete(2, 6);
+        assert_eq!(sampler.budget(3), 0);
+        // A late query for an earlier buffer still sees its real budget.
+        let late = OrderedSampler::new(10, 2);
+        late.complete(1, 10);
+        assert_eq!(late.budget(3), 0);
+        assert_eq!(late.budget(2), 10);
     }
 }
