@@ -41,8 +41,8 @@ pub(super) fn scan_read(
     let mut any_dlist_kmer = false;
     let mut dlist_early_return = false;
     let mut append_dummy_hit = false;
-    // Kallisto falls back to incremental scanning after a failed jump; track that window.
-    let mut backoff_until: Option<usize> = None;
+    // Upstream probes one valid k-mer after a failed jump, then resumes its
+    // outer scan regardless of the proposed jump endpoint.
     let mut fallback_probe_pending = false;
 
     let mut pos = 0usize;
@@ -52,14 +52,6 @@ pub(super) fn scan_read(
             && state.visited_positions.len() < 4096
         {
             state.visited_positions.push(pos);
-        }
-        let mut in_backoff = false;
-        if let Some(until) = backoff_until {
-            if pos > until {
-                backoff_until = None;
-            } else {
-                in_backoff = true;
-            }
         }
         let kmer = &seq[pos..pos + index.k];
         let kmer_in_dlist = index.dlist.as_ref().is_some_and(|dlist| {
@@ -77,6 +69,7 @@ pub(super) fn scan_read(
             continue;
         }
         let fallback_probe = std::mem::take(&mut fallback_probe_pending);
+        let in_backoff = fallback_probe;
         let probe::ProbeOutcome::Candidates(probe::ProbeCandidates {
             mut matched,
             min_candidates,
@@ -564,7 +557,6 @@ pub(super) fn scan_read(
                     hits.push(hit);
                 }
                 if use_backoff {
-                    backoff_until = Some(next_pos);
                     fallback_probe_pending = true;
                 }
             }

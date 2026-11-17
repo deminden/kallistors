@@ -144,7 +144,7 @@ linking. Run just the affected target during development:
 | `quantification` | EM against an independent dense reference, serial/threaded bit parity, count conservation, active bias correction and TSV/HDF5/bootstrap values |
 | `bus` | Technology layouts, input validation, BUS records and decoded BAM/index outputs |
 | `upstream` | Opt-in comparisons with original kallisto, including both builders crossed with both quantifiers |
-| `full_index` | Opt-in GENCODE v50 scanner/abundant-node/fallback regressions and official NAC ambiguous-jump parity |
+| `full_index` | Opt-in GENCODE v50 scanner/abundant-node/fallback regressions and official NAC ambiguous/failed-jump parity |
 
 For example, `cargo test --locked -p kallistors --test mapping` runs only mapping integration
 checks. Individual modules and cases can be selected with the usual test-name filter.
@@ -183,9 +183,18 @@ Full-index regressions require prepared GENCODE v50 indexes and are also ignored
 The reverse-unitig SVIL case additionally uses `data/srr-small/gencode.v50.kallistors.idx`,
 built with `kallistors index` from the same ALL transcript FASTA; `KALLISTORS_TEST_RUST_INDEX`
 can select its path. The other full-index cases use the original builder's index.
-The paired NAC regression also requires the original-built Pachter Lab mature-plus-nascent index
-at `data/official-human-nac/human_nac.mature-plus-nascent.idx`; `KALLISTORS_TEST_NAC_INDEX`
-can select its path. It checks two real TT-seq pairs in both scanners and at one/eight threads.
+The paired NAC regressions use an index built from the official Pachter Lab mature-plus-nascent
+reference; the default index path is `data/official-human-nac/human_nac.mature-plus-nascent.idx`.
+`KALLISTORS_TEST_NAC_INDEX` can select its path. They cover ambiguous jump probes and the
+conflicting terminal hit in `SRR10919051.4665298`, using both scanners and one/eight threads.
+Run them sequentially so each full-index test can release its index before the next loads:
+
+```bash
+KALLISTORS_TEST_NAC_INDEX=/path/to/human_nac.mature-plus-nascent.idx \
+  cargo test --locked --release -p kallistors --test full_index paired_nac_ -- \
+  --ignored --test-threads=1
+```
+
 Enabling an external test without its prerequisite fails clearly. Ordinary tests do not download
 data or measure speed: use the [benchmark workflow](benchmarks.md) to evaluate performance.
 HDF5 readback through the Rust library checks values; native-library validation below supplies
@@ -452,9 +461,11 @@ and memory with alternating controls. Use the same executable for all validation
   Shade/bias loaders keep eager names. Abundant-node keys remain
   explicitly associated with their EC payloads; source candidate order is preserved.
 - **Matching:** jump and midpoint probes advance across ambiguous bases to the next valid k-mer,
-  preserving upstream iterator positions and end-of-read behavior. Caches verify complete keys and mode/index ownership. Conservative 12-bit
-  fingerprints check all nine possible g-mer anchors for k=31/g=23; conflicting or special
-  buckets bypass rejection. Full keys still prove a hit. Encoded fallback queries, exact overlap
+  preserving upstream iterator positions and end-of-read behavior. After a failed jump, both
+  scanners restrict only the next valid k-mer probe before resuming ordinary lookup; invalid
+  bases do not consume the pending probe. Caches verify complete keys and mode/index ownership.
+  Conservative 12-bit fingerprints check all nine possible g-mer anchors for k=31/g=23;
+  conflicting or special buckets bypass rejection. Full keys still prove a hit. Encoded fallback queries, exact overlap
   reuse and bounded AArch64 vector paths preserve ties, strand priority and scalar fallbacks.
   Read minimizer initialization shares exact forward and reverse-complement group lookups
   for 23-base windows; other lengths retain the general initializer.

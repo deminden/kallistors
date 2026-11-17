@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.1
+
+### Correctness and compatibility
+
+- Match original kallisto's failed-jump recovery in both the general and fast scanners:
+  probe the next valid k-mer once, then resume ordinary lookup. Keep the probe pending
+  across invalid bases. This preserves later conflicting hits that can reject a read or pair.
+- Add the real TT-seq pair `SRR10919051.4665298` as a regression for both scanner traces
+  and paired mapping at one and eight threads.
+
+See the [0.6.1 release notes](docs/releases/0.6.1.md).
+
 ## 0.6.0
 
 ### Correctness and compatibility

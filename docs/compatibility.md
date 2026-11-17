@@ -9,6 +9,9 @@ separate compatibility checks.
 
 - Complete EC parity means identical counts for each transcript set, independent of EC numbering.
   Equal `run_info.json` totals alone do not establish EC parity.
+- Both scanners resume ordinary lookup after one recovery probe following a failed jump.
+  The probe waits for the next valid k-mer across invalid bases, preserving later conflicting
+  hits used to reject incompatible mappings.
 - `--fr-stranded` and `--rf-stranded` retain strand annotations. A mapped mate rejected by
   strand rejects the pair; a genuinely unmapped mate can still allow its matching partner.
 - Paired effective lengths use the empirical fragment histogram. The default

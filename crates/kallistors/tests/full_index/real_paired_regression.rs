@@ -135,3 +135,57 @@ fn paired_nac_ambiguous_jump_probes_keep_complete_upstream_ecs() {
         }
     }
 }
+
+// SRR10919051.4665298, from the trimmed TT-seq benchmark. Upstream kallisto
+// v0.52.0 rejects this pair: mate 1 ends with a hit to [232255], which conflicts
+// with its initial [251846,251888] hits. A failed jump must restrict only the
+// next valid k-mer probe, or the terminal hit's alternate minimizer is missed.
+#[test]
+#[ignore = "requires the official Pachter Lab human NAC index"]
+fn paired_nac_failed_jump_keeps_conflicting_terminal_hit_in_both_scanners() {
+    use kallistors::io::ReadSource;
+    use kallistors::pseudoalign::{
+        build_bifrost_index_quant_packed_threaded, trace_read_pair_bifrost,
+    };
+
+    let path = std::env::var_os("KALLISTORS_TEST_NAC_INDEX")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            workspace_root().join("data/official-human-nac/human_nac.mature-plus-nascent.idx")
+        });
+    let index = build_bifrost_index_quant_packed_threaded(&path, 8).expect("load NAC index");
+    let reads1 = include_bytes!("../fixtures/paired_nac_failed_jump_1.fixture");
+    let reads2 = include_bytes!("../fixtures/paired_nac_failed_jump_2.fixture");
+    let a = FastqReader::new(Cursor::new(reads1))
+        .next_record()
+        .unwrap()
+        .unwrap();
+    let b = FastqReader::new(Cursor::new(reads2))
+        .next_record()
+        .unwrap()
+        .unwrap();
+    for fast in [false, true] {
+        let mut options = PseudoalignOptions::default();
+        options.investigation.trace_fast_path = fast;
+        let trace = trace_read_pair_bifrost(&index, &a.seq, &b.seq, Strand::Unstranded, options);
+        assert!(trace.merged_ec.is_none(), "fast={fast}: {trace:?}");
+        assert!(trace.hard_reject_pair, "fast={fast}: {trace:?}");
+    }
+    for threads in [1, 8] {
+        let mut left = FastqReader::new(Cursor::new(reads1));
+        let mut right = FastqReader::new(Cursor::new(reads2));
+        let counts = pseudoalign_paired_bifrost_with_options_threaded(
+            &index,
+            &mut left,
+            &mut right,
+            Strand::Unstranded,
+            PseudoalignOptions::default(),
+            threads,
+        )
+        .expect("map conflicting paired read");
+        assert_eq!(counts.reads_processed, 1, "threads={threads}");
+        assert_eq!(counts.reads_aligned, 0, "threads={threads}");
+        assert!(counts.ec_list.is_empty(), "threads={threads}");
+        assert!(counts.counts.is_empty(), "threads={threads}");
+    }
+}

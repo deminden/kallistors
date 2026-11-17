@@ -72,7 +72,8 @@ fn ec_for_read_bifrost_fast_with_cache_cached<
     };
     let mut has_online_intersection = false;
     let mut last_online_block = None;
-    let mut backoff_until: Option<usize> = None;
+    // Upstream probes one valid k-mer after a failed jump, then resumes its
+    // outer scan regardless of the proposed jump endpoint.
     let mut fallback_probe_pending = false;
     let minimizer_cache_disabled = env_flag(
         &DISABLE_MINIMIZER_CACHE,
@@ -89,14 +90,6 @@ fn ec_for_read_bifrost_fast_with_cache_cached<
             state.saw_valid_kmer = true;
             if state.visited_positions.len() < 4096 {
                 state.visited_positions.push(pos);
-            }
-        }
-        let mut in_backoff = false;
-        if let Some(until) = backoff_until {
-            if pos > until {
-                backoff_until = None;
-            } else {
-                in_backoff = true;
             }
         }
         let kmer = &seq[pos..pos + index.k];
@@ -118,6 +111,7 @@ fn ec_for_read_bifrost_fast_with_cache_cached<
             continue;
         };
         let fallback_probe = std::mem::take(&mut fallback_probe_pending);
+        let in_backoff = fallback_probe;
         if dlist_onlist.is_some() && kmer_in_dlist {
             append_dummy_hit = true;
         }
@@ -699,7 +693,6 @@ fn ec_for_read_bifrost_fast_with_cache_cached<
                     }
                 }
                 if use_backoff {
-                    backoff_until = Some(next_pos);
                     fallback_probe_pending = true;
                 }
             }
