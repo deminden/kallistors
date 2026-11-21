@@ -11,12 +11,16 @@ use super::{
     PseudoalignOptions, ReadDebugState, Strand,
 };
 
-/// Upstream-style observation goal shared by paired workers. Each batch snapshots
-/// the remaining quota, then publishes its observations when that batch finishes.
-/// Concurrent batches can overshoot the goal, as in original kallisto.
+/// Fragment-length observation quota for one batch, or for a whole serial run.
+/// Threaded paired mapping gives each buffer its own quota from
+/// `threaded::OrderedSampler`, which fixes the sampled set for any timing.
 pub(crate) struct FragmentLengthSampler {
     goal: usize,
     observations: std::sync::atomic::AtomicUsize,
+    /// When set, observations are collected in read order instead of being
+    /// added to the batch's histogram, so the caller can keep a prefix once
+    /// its budget is known.
+    recorded: Option<std::sync::Mutex<Vec<u32>>>,
 }
 
 impl FragmentLengthSampler {
@@ -24,7 +28,24 @@ impl FragmentLengthSampler {
         Self {
             goal,
             observations: std::sync::atomic::AtomicUsize::new(0),
+            recorded: None,
         }
+    }
+
+    /// Collect every observation of a batch, in order, with no quota.
+    pub(crate) fn recording() -> Self {
+        Self {
+            goal: usize::MAX,
+            observations: std::sync::atomic::AtomicUsize::new(0),
+            recorded: Some(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    pub(crate) fn take_recorded(&self) -> Vec<u32> {
+        self.recorded
+            .as_ref()
+            .map(|recorded| std::mem::take(&mut *recorded.lock().expect("fragment record")))
+            .unwrap_or_default()
     }
 
     pub(crate) fn remaining(&self) -> usize {
@@ -36,6 +57,24 @@ impl FragmentLengthSampler {
         self.observations
             .fetch_add(count, std::sync::atomic::Ordering::Relaxed);
     }
+}
+
+/// Add recorded fragment lengths, in order, to a worker's histogram.
+pub(crate) fn add_fragment_lengths(counts: &mut EcCounts, lengths: &[u32]) {
+    if lengths.is_empty() {
+        return;
+    }
+    let mut stats = counts.fragment_length_stats.take().unwrap_or_default();
+    let mut hist = counts
+        .fragment_length_hist
+        .take()
+        .unwrap_or_else(|| vec![0u32; super::MAX_FRAG_LEN as usize]);
+    for &length in lengths {
+        hist[length as usize] = hist[length as usize].saturating_add(1);
+        stats.add(f64::from(length));
+    }
+    counts.fragment_length_stats = Some(stats);
+    counts.fragment_length_hist = Some(hist);
 }
 
 pub fn pseudoalign_paired_naive<R1: ReadSource, R2: ReadSource>(
@@ -374,8 +413,12 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into<'index>(
             {
                 let idx = frag_len as usize;
                 if idx < frag_hist.len() {
-                    frag_hist[idx] = frag_hist[idx].saturating_add(1);
-                    frag_stats.add(frag_len as f64);
+                    if let Some(recorded) = sampling.and_then(|sampler| sampler.recorded.as_ref()) {
+                        recorded.lock().expect("fragment record").push(idx as u32);
+                    } else {
+                        frag_hist[idx] = frag_hist[idx].saturating_add(1);
+                        frag_stats.add(frag_len as f64);
+                    }
                     sampled += 1;
                 }
             }
