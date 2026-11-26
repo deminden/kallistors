@@ -16,7 +16,8 @@ separate compatibility checks.
   strand rejects the pair; a genuinely unmapped mate can still allow its matching partner.
 - Paired effective lengths use the empirical fragment histogram. The default
   [sampling policy](fragment_length_sampling.md) follows original kallisto's 10,000-observation
-  goal and 8 MiB sequence buffers. Concurrent scheduling can change the sampled histogram.
+  goal and 8 MiB sequence buffers. With several threads the sample can exceed the goal; it is
+  fixed for a given input and thread count, whereas original kallisto's depends on worker timing.
 - Single-end quantification requires a fragment mean and standard deviation (`-l` and `-s`).
 - Different fragment models can change effective lengths, EM convergence and ambiguous isoform
   estimates even when EC counts match. Matching upstream behavior establishes compatibility;

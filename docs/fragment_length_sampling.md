@@ -11,13 +11,21 @@ The default follows ordinary short-read quantification in original kallisto v0.5
 1. Aim for 10,000 qualifying fragment observations.
 2. Form logical sequence buffers of 8 MiB, counting both mate sequences and one
    terminating byte per mate, with upstream's strict `< buffer_size` fit rule.
-3. At the start of each logical buffer, snapshot the remaining quota.
-4. Collect qualifying observations up to that buffer's quota.
-5. Publish the buffer's observation count when it finishes.
+3. Number the logical buffers in input order.
+4. Give buffer `i` a quota of the goal minus the observations kept by buffers
+   `1..=i - W`, where `W` is the number of mapping workers. The first `W` buffers
+   each receive the full goal.
+5. Keep each buffer's first qualifying observations, in read order, up to its quota.
 
-Concurrent batches can start with the same remaining quota and overshoot the goal. Their
-scheduling can change the final histogram and, consequently, abundance estimates. Original
-kallisto uses this behavior too; identical EC counts alone do not guarantee identical abundance.
+Original kallisto snapshots a shared remaining quota at the start of each buffer and
+publishes the buffer's count when it finishes. Concurrent buffers can therefore start
+with the same quota and overshoot the goal, and their scheduling can change the final
+histogram and, consequently, abundance estimates. The quota above is the one that shared
+counter gives when `W` workers run in step. kallistors applies it explicitly, so the
+sample is the same in every run for a fixed input, goal and thread count. It can still
+exceed the goal with several threads, and it differs between thread counts. Because
+original kallisto's sample depends on timing, identical EC counts alone do not guarantee
+identical abundance.
 Parser chunks retain their smaller size for input throughput. A logical sampling buffer
 can span several parser chunks or split one; its quota is carried across all those chunks.
 Once sampling finishes, mapping uses the usual small work batches. No sequence copies
@@ -43,14 +51,15 @@ count may exceed the requested goal with multiple threads.
 ## Validation
 
 Regression tests cover byte-boundary splits, cross-chunk quotas, variable mate lengths,
-oversized pairs, remaining batch quotas, concurrent overshoot, short inputs, exact EC
+oversized pairs, remaining batch quotas, ordered quotas under shuffled completion order,
+short inputs, exact EC
 invariance between sampled and all-observation runs, and serial/multithreaded execution using
 self-contained Rust-built synthetic indexes. Opt-in upstream comparisons use a separately
 built original-kallisto index. The complete EC map remains the correctness gate for speed
 experiments. To isolate EM arithmetic, replay the same ECs and histogram with both implementations.
-Within kallistors, `--fragment-length-samples 0` provides a deterministic all-observation
-fragment model for a fixed input; original kallisto requires diagnostic controls for a matched
-model.
+Within kallistors, the default sampled model is fixed for a given input and thread count, and
+`--fragment-length-samples 0` provides an all-observation model that is also independent of
+the thread count; original kallisto requires diagnostic controls for a matched model.
 
 Sampling is retained for upstream compatibility. Its speed effect is assessed with complete
 quantification runs.
@@ -68,7 +77,7 @@ fragment model, within-program variation and one-versus-eight-thread comparison.
 effective lengths, expressed-target percentiles and within-program variation together.
 Agreement with one upstream estimate does not establish biological accuracy.
 
-For reproducible fragment estimation within kallistors, `--fragment-length-samples 0` uses
-all qualifying observations. It can add processing work and produces a different model from
-the default sampled run. Replaying an identical saved histogram and EC map with matched EM
+For a fragment model that does not depend on the thread count, `--fragment-length-samples 0`
+uses all qualifying observations. It can add processing work and produces a different model
+from the default sampled run. Replaying an identical saved histogram and EC map with matched EM
 settings isolates implementation differences from sampling differences.

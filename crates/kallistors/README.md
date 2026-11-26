@@ -11,7 +11,7 @@ GENCODE datasets** and **2.8–3.5× faster on mature-plus-nascent RNA** than or
 
 ## Performance
 
-The existing 0.6.0 benchmark reports remain relevant to 0.6.1. The results below use native
+The existing 0.6.0 benchmark reports remain relevant to 0.6.2. The results below use native
 release builds on the same Apple Silicon machine, eight requested threads, one warmup and
 the median of three measured runs. **Speedup = comparator wall time / kallistors wall time**.
 
@@ -110,7 +110,7 @@ for sequence-specific bias correction during quantification.
 
 ```toml
 [dependencies]
-kallistors = "0.6.1"
+kallistors = "0.6.2"
 ```
 
 The library exposes index construction/loading, pseudoalignment and transcript quantification.
@@ -128,6 +128,6 @@ outside the supported surface. Long-read filtering is available for BUS workflow
 - [Rust API examples](https://github.com/deminden/kallistors/blob/main/docs/development.md#using-the-rust-library)
 - [Supported behavior and compatibility limits](https://github.com/deminden/kallistors/blob/main/docs/compatibility.md)
 - [Match-cache memory settings](https://github.com/deminden/kallistors/blob/main/docs/match-cache.md)
-- [0.6.1 release notes](https://github.com/deminden/kallistors/blob/main/docs/releases/0.6.1.md)
+- [0.6.2 release notes](https://github.com/deminden/kallistors/blob/main/docs/releases/0.6.2.md)
 
 Licensed under the MIT License; see the included `LICENSE` file.

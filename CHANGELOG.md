@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.2
+
+### Reproducibility
+
+- Make the paired fragment-length sample independent of worker timing. Logical buffers are
+  numbered in input order, and each receives the quota a shared counter gives when the
+  workers run in step. For a fixed input, goal and thread count, every run now samples the
+  same observations. Previously the sample, and through effective lengths every abundance,
+  could change between multithreaded runs. Contributed by David Holtz (drbh) in
+  [#1](https://github.com/deminden/kallistors/pull/1).
+
+See the [0.6.2 release notes](docs/releases/0.6.2.md).
+
 ## 0.6.1
 
 ### Correctness and compatibility
