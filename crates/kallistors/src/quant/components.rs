@@ -47,6 +47,7 @@ impl Components {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct EmComponent {
     fixed: bool,
     parallel: bool,

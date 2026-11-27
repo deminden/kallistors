@@ -1,6 +1,17 @@
 mod buckets;
 mod candidate_cache;
 pub(crate) use candidate_cache::CachedBucket;
+pub(crate) use encoded::EncodedUnitigs;
+
+/// Packed graph sequences for unit tests of structures built from them.
+#[cfg(test)]
+pub(crate) fn encoded_unitigs_for_test(
+    unitigs: &[Vec<u8>],
+    km_unitigs: &[Vec<u8>],
+    g: usize,
+) -> EncodedUnitigs {
+    precompute_encoded_unitigs(unitigs, km_unitigs, g, None)
+}
 mod decoding;
 mod ec_storage;
 mod positional_arena;
@@ -24,7 +35,7 @@ use ec_storage::FlatEcBlocks;
 use ec_storage::{FlatEcIndex, MinzOffsets, MinzPositionIndex, SelectiveFallbackKmerIndex};
 #[cfg(test)]
 use encoded::EncodedSequence;
-use encoded::{EncodedBaseStore, EncodedUnitigs, SequenceMetadata};
+use encoded::{EncodedBaseStore, SequenceMetadata};
 use loader::build_bifrost_index_with_positions_threaded_impl;
 
 #[path = "bifrost/positions.rs"]
@@ -102,6 +113,8 @@ pub struct BifrostIndex {
     pub h_kmer_map: Option<HashMap<u64, usize>>,
     pub dlist: Option<HashSet<u64>>,
     pub(crate) encoded_unitigs: EncodedUnitigs,
+    /// Graph k-mer membership filter, built during loading when enabled.
+    pub(crate) kmer_filter: Option<std::sync::Arc<super::core::KmerFilter>>,
     pub kmer_pos_index: Option<KmerPosIndex>,
     pub kmer_index: Option<KmerEcIndex>,
     pub(crate) flat_ec: FlatEcIndex,

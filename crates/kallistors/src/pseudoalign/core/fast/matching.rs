@@ -2,6 +2,8 @@
 
 use super::*;
 
+static VERIFY_KMER_FILTER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 #[inline]
 pub(super) fn all_ascii_uppercase(sequence: &[u8]) -> bool {
     #[cfg(target_arch = "aarch64")]
@@ -571,21 +573,76 @@ pub(super) fn match_kmer_at_pos_fast_with_codes<const CACHED: bool>(
             return None;
         }
     }
-    let matched = match_kmer_at_pos_fast_uncached_with_codes::<CACHED>(
-        index,
-        kmer,
-        read_fwd,
-        read_rev,
-        allow_forward,
-        allow_rev,
-        diff,
-        min_candidates,
-        cache,
-        allow_relaxed,
-        allow_tail_minimizer,
-        minimizer_cache_disabled,
-    );
-    if !match_cache_disabled && (cache_misses || matched.is_some() || negative_cache_enabled) {
+    let absent = !match_cache_disabled
+        && cache.kmer_filter.as_ref().is_some_and(|filter| {
+            filter.k() == kmer.len() && !filter.may_contain(read_fwd.min(read_rev))
+        });
+    let matched = if absent {
+        // No graph k-mer equals this one, so the full lookup would return
+        // None. Leave the candidate list as a cached negative does: backoff
+        // callers read it for rescue decisions.
+        if !allow_tail_minimizer {
+            if CACHED {
+                minimizer_candidates_single_cell(
+                    cache,
+                    kmer,
+                    index.g,
+                    read_fwd,
+                    read_rev,
+                    min_candidates,
+                );
+            } else {
+                minimizer_candidates_cached_into_with_code(
+                    cache,
+                    kmer,
+                    index.g,
+                    read_fwd,
+                    read_rev,
+                    min_candidates,
+                    minimizer_cache_disabled,
+                );
+            }
+        }
+        if env_flag(&VERIFY_KMER_FILTER, "KALLISTORS_VERIFY_KMER_FILTER") {
+            let full = match_kmer_at_pos_fast_uncached_with_codes::<CACHED>(
+                index,
+                kmer,
+                read_fwd,
+                read_rev,
+                allow_forward,
+                allow_rev,
+                diff,
+                &mut Vec::new(),
+                cache,
+                allow_relaxed,
+                allow_tail_minimizer,
+                minimizer_cache_disabled,
+            );
+            assert!(full.is_none(), "k-mer filter rejected a matching k-mer");
+        }
+        None
+    } else {
+        match_kmer_at_pos_fast_uncached_with_codes::<CACHED>(
+            index,
+            kmer,
+            read_fwd,
+            read_rev,
+            allow_forward,
+            allow_rev,
+            diff,
+            min_candidates,
+            cache,
+            allow_relaxed,
+            allow_tail_minimizer,
+            minimizer_cache_disabled,
+        )
+    };
+    // A filter rejection is as cheap to repeat as a cache probe, so it is not
+    // stored; the slot keeps an entry that saves a full lookup.
+    if !absent
+        && !match_cache_disabled
+        && (cache_misses || matched.is_some() || negative_cache_enabled)
+    {
         cache.match_put(cache_key, flags, matched);
     }
     matched

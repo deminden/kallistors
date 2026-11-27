@@ -261,6 +261,9 @@ pub(super) fn ec_for_read_bifrost_fast_counting_borrowed<'index, const PLACEMENT
 
 // Scope existing per-thread state over an ordered sequence batch. The same
 // scanner handles every read; reset/diagnostic/alternate paths keep old calls.
+/// Reads or pairs ahead whose first/last k-mer match slots are prefetched.
+const PREFETCH_PAIRS: usize = 2;
+
 pub(crate) fn try_single_counting_batch<'index>(
     index: &'index BifrostIndex,
     batch: &crate::io::PackedSeqBatch,
@@ -280,7 +283,22 @@ pub(crate) fn try_single_counting_batch<'index>(
     super::runtime::with_mphf_lookup_cache(|cache| {
         let mut scratch = cache.scan_scratch.take().unwrap_or_default();
         let pair_scope_entered = pairs.enter(index, &mut scratch.pairs);
-        for record in batch.records() {
+        let prefetch = index.k == 31
+            && index.g == 23
+            && cache.prefetch_match_capacity()
+            && !super::runtime::env_flag(
+                &super::runtime::DISABLE_MATCH_CACHE,
+                "KALLISTORS_DISABLE_MATCH_CACHE",
+            );
+        if prefetch {
+            for idx in 0..PREFETCH_PAIRS.min(batch.len()) {
+                cache.prefetch_match_word_ends(batch.seq(idx));
+            }
+        }
+        for (idx, record) in batch.records().enumerate() {
+            if prefetch && idx + PREFETCH_PAIRS < batch.len() {
+                cache.prefetch_match_word_ends(batch.seq(idx + PREFETCH_PAIRS));
+            }
             if record.seq.len() < index.k {
                 count(None);
                 continue;
@@ -361,14 +379,31 @@ fn paired_counting_batch_with_cache<'index, const PLACEMENT: bool>(
                 &super::runtime::DISABLE_MATCH_CACHE,
                 "KALLISTORS_DISABLE_MATCH_CACHE",
             );
+        // Hint the match-cache slots of the first and last k-mer of both mates
+        // PREFETCH_PAIRS ahead; read-only, so matching and order are unchanged.
+        let end = range.end;
+        if prefetch {
+            for ahead in range.start..(range.start + PREFETCH_PAIRS).min(end) {
+                // SAFETY: ahead lies inside the validated range.
+                let (l, r) = unsafe { (left.seq_unchecked(ahead), right.seq_unchecked(ahead)) };
+                cache.prefetch_match_word_ends(l);
+                cache.prefetch_match_word_ends(r);
+            }
+        }
         for idx in range {
             // SAFETY: the caller validated both batch lengths and this range.
             let left_sequence = unsafe { left.seq_unchecked(idx) };
             let right_sequence = unsafe { right.seq_unchecked(idx) };
-            // Pure encoding and read-only hardware hints. Actual matcher gets,
-            // puts, filters, rejected mates and callback order remain unchanged.
-            if prefetch {
-                cache.prefetch_initial_match_words(left_sequence, right_sequence);
+            if prefetch && idx + PREFETCH_PAIRS < end {
+                // SAFETY: idx + PREFETCH_PAIRS lies inside the validated range.
+                let (l, r) = unsafe {
+                    (
+                        left.seq_unchecked(idx + PREFETCH_PAIRS),
+                        right.seq_unchecked(idx + PREFETCH_PAIRS),
+                    )
+                };
+                cache.prefetch_match_word_ends(l);
+                cache.prefetch_match_word_ends(r);
             }
             let mut scan = |seq: &[u8]| {
                 if seq.len() < index.k {

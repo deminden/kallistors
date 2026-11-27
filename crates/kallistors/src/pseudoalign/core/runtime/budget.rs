@@ -12,6 +12,7 @@ const _: () = assert!(
 
 pub(crate) struct MatchCacheBudgetScope {
     previous: usize,
+    shared: bool,
 }
 
 impl MatchCacheBudgetScope {
@@ -31,12 +32,39 @@ impl MatchCacheBudgetScope {
             return Err(error);
         }
         MATCH_CACHE_ENTRIES.with(|current| current.set(entries));
-        Ok(Self { previous })
+        Ok(Self {
+            previous,
+            shared: false,
+        })
+    }
+
+    /// Route this thread's exact-match records to a table shared by all
+    /// workers of one mapping run. The private table shrinks to the bootstrap
+    /// size for the scope and is restored, empty, on drop.
+    pub(crate) fn enter_shared(
+        table: std::sync::Arc<super::match_cache::SharedMatchTable>,
+        filter: Option<std::sync::Arc<super::KmerFilter>>,
+    ) -> crate::Result<Self> {
+        let mut scope = Self::enter(MATCH_CACHE_DEFAULT_ENTRIES.min(1 << 10))?;
+        MPHF_LOOKUP_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.matches.shared = Some(table);
+            cache.kmer_filter = filter;
+        });
+        scope.shared = true;
+        Ok(scope)
     }
 }
 
 impl Drop for MatchCacheBudgetScope {
     fn drop(&mut self) {
+        if self.shared {
+            MPHF_LOOKUP_CACHE.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                cache.matches.shared = None;
+                cache.kmer_filter = None;
+            });
+        }
         MATCH_CACHE_ENTRIES.with(|current| current.set(self.previous));
         resize_match_cache(self.previous).expect("restore exact-match cache scope");
     }

@@ -298,78 +298,189 @@ fn step_group<I: crate::quant::IncomingEcId + Sync, const TRACK: bool>(
         }
         return changes;
     }
-    let mut changes = 0;
-    for _ in 0..rounds {
-        changes = 0;
-        let mut unchanged = true;
-        let mut finite_scales = true;
-        for (ec, (scale, present)) in work.multi_ecs[group.ecs]
+    scatter_rounds::<I, TRACK>(group, work, ids, alpha, values, present, rounds)
+}
+
+thread_local! {
+    static SCATTER: std::cell::RefCell<(Vec<f64>, Vec<f64>)> =
+        const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
+/// One pass per round over the component's edges, the same order of
+/// operations as the serial scalar kernel: each EC's products
+/// `alpha * weight` give its denominator, then `product * (count / denom)` is
+/// added to every member in EC order. The gather form computes the same
+/// `weight * alpha * (count / denom)` terms in the same order per transcript,
+/// but reads every edge twice through two index arrays.
+#[allow(clippy::too_many_arguments)]
+fn scatter_rounds<I: crate::quant::IncomingEcId, const TRACK: bool>(
+    group: &mut EmComponent,
+    work: &EmWork,
+    ids: &[I],
+    alpha: &mut [f64],
+    values: &mut [f64],
+    present: &mut [u8],
+    rounds: usize,
+) -> usize {
+    let base = group.transcripts.start;
+    let singleton = &work.singleton_alpha[group.transcripts];
+    let rows = &work.multi_ecs[group.ecs];
+    SCATTER.with(|scratch| {
+        let (next, products) = &mut *scratch.borrow_mut();
+        next.resize(alpha.len(), 0.0);
+        let longest = rows
             .iter()
-            .zip(values.iter_mut().zip(present.iter_mut()))
-        {
-            let mut denominator = 0.0;
-            for (&tr, &weight) in ids[ec.transcript_range]
-                .iter()
-                .zip(&work.multi_weights[ec.transcript_range])
-            {
-                denominator += alpha[tr.as_usize() - group.transcripts.start] * weight;
-            }
-            if denominator < crate::quant::TOLERANCE {
-                *present = 0;
-                *scale = 0.0;
-            } else {
-                *present = 1;
-                *scale = ec.count / denominator;
-            }
-            finite_scales &= scale.is_finite();
+            .map(|ec| ec.transcript_range.end - ec.transcript_range.start)
+            .max()
+            .unwrap_or(0);
+        if products.len() < 2 * longest {
+            products.resize(2 * longest, 0.0);
         }
-        let zero_safe = incoming.finite_weights && finite_scales;
-        for (local, value) in alpha.iter_mut().enumerate() {
-            let tr = group.transcripts.start + local;
-            let old = *value;
-            if zero_safe && old.to_bits() == 0 && work.singleton_alpha[tr].to_bits() == 0 {
-                continue;
-            }
-            let range = incoming.offsets[tr]..incoming.offsets[tr + 1];
-            let weights = &incoming.weights[range.clone()];
-            let next = match &incoming.ec_indices {
-                crate::quant::IncomingEcIds::Compact(ids) => sum_incoming(
-                    &ids[range],
-                    weights,
-                    values,
-                    present,
-                    group.ecs.start,
-                    work.singleton_alpha[tr],
-                    old,
-                ),
-                crate::quant::IncomingEcIds::Wide(ids) => sum_incoming(
-                    &ids[range],
-                    weights,
-                    values,
-                    present,
-                    group.ecs.start,
-                    work.singleton_alpha[tr],
-                    old,
-                ),
-            };
-            *value = next;
-            unchanged &= next.to_bits() == old.to_bits();
-            if TRACK {
-                changes += usize::from(
-                    next > crate::quant::ALPHA_CHANGE_LIMIT
-                        && (next - old).abs() / next > crate::quant::ALPHA_CHANGE,
+        let mut changes = 0;
+        for _ in 0..rounds {
+            next.copy_from_slice(singleton);
+            let (left_products, right_products) = products.split_at_mut(longest);
+            let (pairs, tail) = rows.as_chunks::<2>();
+            let (value_pairs, value_tail) = values.as_chunks_mut::<2>();
+            let (flag_pairs, flag_tail) = present.as_chunks_mut::<2>();
+            for (([left, right], [left_value, right_value]), [left_flag, right_flag]) in
+                pairs.iter().zip(value_pairs).zip(flag_pairs)
+            {
+                let left_ids = &ids[left.transcript_range];
+                let right_ids = &ids[right.transcript_range];
+                let left_products = &mut left_products[..left_ids.len()];
+                let right_products = &mut right_products[..right_ids.len()];
+                let (left_denominator, right_denominator) = pair_products(
+                    left_ids,
+                    &work.multi_weights[left.transcript_range],
+                    left_products,
+                    right_ids,
+                    &work.multi_weights[right.transcript_range],
+                    right_products,
+                    alpha,
+                    base,
+                );
+                // Scatter in EC order, including when both rows share members.
+                scatter_row(
+                    left,
+                    left_ids,
+                    left_products,
+                    left_denominator,
+                    left_value,
+                    left_flag,
+                    next,
+                    base,
+                );
+                scatter_row(
+                    right,
+                    right_ids,
+                    right_products,
+                    right_denominator,
+                    right_value,
+                    right_flag,
+                    next,
+                    base,
                 );
             }
+            for ((ec, value), flag) in tail
+                .iter()
+                .zip(value_tail.iter_mut())
+                .zip(flag_tail.iter_mut())
+            {
+                let row = &ids[ec.transcript_range];
+                let row_products = &mut left_products[..row.len()];
+                let mut denominator = 0.0;
+                for ((&tr, &weight), product) in row
+                    .iter()
+                    .zip(&work.multi_weights[ec.transcript_range])
+                    .zip(row_products.iter_mut())
+                {
+                    *product = alpha[tr.as_usize() - base] * weight;
+                    denominator += *product;
+                }
+                scatter_row(ec, row, row_products, denominator, value, flag, next, base);
+            }
+            changes = 0;
+            let mut unchanged = true;
+            for (value, &next) in alpha.iter_mut().zip(next.iter()) {
+                let old = *value;
+                unchanged &= next.to_bits() == old.to_bits();
+                if TRACK {
+                    changes += usize::from(
+                        next > crate::quant::ALPHA_CHANGE_LIMIT
+                            && (next - old).abs() / next > crate::quant::ALPHA_CHANGE,
+                    );
+                }
+                *value = next;
+            }
+            if unchanged {
+                group.fixed = true;
+                break;
+            }
         }
-        if unchanged {
-            group.fixed = true;
-            break;
+        if TRACK {
+            group.last_changed = changes != 0;
         }
+        changes
+    })
+}
+
+/// Two rows' denominators as interleaved but independent chains; each row
+/// keeps its own multiplication and addition order.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn pair_products<I: crate::quant::IncomingEcId>(
+    left_ids: &[I],
+    left_weights: &[f64],
+    left_products: &mut [f64],
+    right_ids: &[I],
+    right_weights: &[f64],
+    right_products: &mut [f64],
+    alpha: &[f64],
+    base: usize,
+) -> (f64, f64) {
+    let shared = left_ids.len().min(right_ids.len());
+    let (mut left_denominator, mut right_denominator) = (0.0, 0.0);
+    for i in 0..shared {
+        left_products[i] = alpha[left_ids[i].as_usize() - base] * left_weights[i];
+        left_denominator += left_products[i];
+        right_products[i] = alpha[right_ids[i].as_usize() - base] * right_weights[i];
+        right_denominator += right_products[i];
     }
-    if TRACK {
-        group.last_changed = changes != 0;
+    for i in shared..left_ids.len() {
+        left_products[i] = alpha[left_ids[i].as_usize() - base] * left_weights[i];
+        left_denominator += left_products[i];
     }
-    changes
+    for i in shared..right_ids.len() {
+        right_products[i] = alpha[right_ids[i].as_usize() - base] * right_weights[i];
+        right_denominator += right_products[i];
+    }
+    (left_denominator, right_denominator)
+}
+
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn scatter_row<I: crate::quant::IncomingEcId>(
+    ec: &crate::quant::EmMultiEc,
+    row: &[I],
+    products: &[f64],
+    denominator: f64,
+    value: &mut f64,
+    flag: &mut u8,
+    next: &mut [f64],
+    base: usize,
+) {
+    if denominator < crate::quant::TOLERANCE {
+        *flag = 0;
+        *value = 0.0;
+        return;
+    }
+    let scale = ec.count / denominator;
+    *flag = 1;
+    *value = scale;
+    for (&tr, &product) in row.iter().zip(products) {
+        next[tr.as_usize() - base] += product * scale;
+    }
 }
 
 /// An independent nonzero witness excludes every earlier global stop. Other
@@ -396,50 +507,133 @@ pub(in crate::quant) fn tile<I: crate::quant::IncomingEcId + Sync>(
         return (taken, 0);
     };
     pool.install(|| {
-        let group = &mut groups[witness];
+        // The witness decides how many rounds this tile takes. Step it on private
+        // copies while the other components speculatively take the full cap in
+        // parallel; components share no transcripts or ECs, so neither side reads
+        // the other's state. If the witness stops early, restore the others and
+        // repeat them for exactly `taken` rounds, so every value is unchanged.
+        let mut group = groups[witness].clone();
         let start = group.transcripts.start;
-        let mut taken = 0;
-        let mut changes = 0;
-        for offset in 0..cap {
-            let trs = group.transcripts;
-            let ecs = group.ecs;
-            changes = if group.fixed {
-                0
-            } else {
-                step_group::<I, true>(
-                    group,
+        let trs = group.transcripts;
+        let ecs = group.ecs;
+        let mut witness_alpha = alpha[trs.start..trs.end].to_vec();
+        let mut witness_values = scales.values[ecs.start..ecs.end].to_vec();
+        let mut witness_present = scales.present[ecs.start..ecs.end].to_vec();
+        let snapshot = Snapshot::take(groups, alpha, scales);
+        let ((taken, changes), speculative) = rayon::join(
+            || {
+                let mut taken = 0;
+                let mut changes = 0;
+                for offset in 0..cap {
+                    changes = if group.fixed {
+                        0
+                    } else {
+                        step_group::<I, true>(
+                            &mut group,
+                            work,
+                            incoming,
+                            ids,
+                            &mut witness_alpha,
+                            &mut witness_values,
+                            &mut witness_present,
+                            1,
+                        )
+                    };
+                    taken = offset + 1;
+                    if first_iter + offset > minimum && changes == 0 {
+                        break;
+                    }
+                }
+                (taken, changes)
+            },
+            || {
+                // Preserve original tree/depth ownership. Computing the witness through
+                // a singleton step_range would attach subtree bits to the wrong tree.
+                step_range::<I, true>(
+                    groups,
                     work,
                     incoming,
                     ids,
-                    &mut alpha[trs.start..trs.end],
-                    &mut scales.values[ecs.start..ecs.end],
-                    &mut scales.present[ecs.start..ecs.end],
-                    1,
+                    alpha,
+                    &mut scales.values,
+                    &mut scales.present,
+                    0,
+                    0,
+                    cap,
+                    0,
+                    Some(start),
                 )
-            };
-            taken = offset + 1;
-            if first_iter + offset > minimum && changes == 0 {
-                break;
-            }
-        }
-        // Preserve original tree/depth ownership. Computing the witness through
-        // a singleton step_range would attach subtree bits to the wrong tree.
-        let others = step_range::<I, true>(
-            groups,
-            work,
-            incoming,
-            ids,
-            alpha,
-            &mut scales.values,
-            &mut scales.present,
-            0,
-            0,
-            taken,
-            0,
-            Some(start),
+            },
         );
+        let others = if taken == cap {
+            speculative
+        } else {
+            snapshot.restore(groups, alpha, scales);
+            step_range::<I, true>(
+                groups,
+                work,
+                incoming,
+                ids,
+                alpha,
+                &mut scales.values,
+                &mut scales.present,
+                0,
+                0,
+                taken,
+                0,
+                Some(start),
+            )
+        };
+        alpha[trs.start..trs.end].copy_from_slice(&witness_alpha);
+        scales.values[ecs.start..ecs.end].copy_from_slice(&witness_values);
+        scales.present[ecs.start..ecs.end].copy_from_slice(&witness_present);
+        let target = &mut groups[witness];
+        target.fixed = group.fixed;
+        target.last_changed = group.last_changed;
+        target.scalar_finite = group.scalar_finite;
         (taken, changes + others)
     })
+}
+
+/// Pre-tile state of every component, restored when speculation overshoots.
+struct Snapshot {
+    flags: Vec<(bool, bool, bool, u64)>,
+    alpha: Vec<f64>,
+    values: Vec<f64>,
+    present: Vec<u8>,
+}
+
+impl Snapshot {
+    fn take(groups: &[EmComponent], alpha: &[f64], scales: &crate::quant::EcScales) -> Self {
+        Self {
+            flags: groups
+                .iter()
+                .map(|g| (g.fixed, g.last_changed, g.scalar_finite, g.fixed_subtrees))
+                .collect(),
+            alpha: alpha.to_vec(),
+            values: scales.values.clone(),
+            present: scales.present.clone(),
+        }
+    }
+
+    fn restore(
+        self,
+        groups: &mut [EmComponent],
+        alpha: &mut [f64],
+        scales: &mut crate::quant::EcScales,
+    ) {
+        for (group, (fixed, last_changed, scalar_finite, subtrees)) in
+            groups.iter_mut().zip(self.flags)
+        {
+            group.fixed = fixed;
+            group.last_changed = last_changed;
+            group.scalar_finite = scalar_finite;
+            group.fixed_subtrees = subtrees;
+        }
+        alpha.copy_from_slice(&self.alpha);
+        scales.values.copy_from_slice(&self.values);
+        scales.present.copy_from_slice(&self.present);
+    }
 }
 
 #[inline]

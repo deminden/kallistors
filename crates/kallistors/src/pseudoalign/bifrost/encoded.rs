@@ -88,6 +88,12 @@ fn canonical_minimizer_bytes(word: u64, g: usize) -> [u8; 8] {
 }
 
 impl EncodedSequence<'_> {
+    /// The packed words, 32 bases each with the first base in the top bits.
+    #[inline]
+    pub(crate) fn words(&self) -> &[u64] {
+        self.words
+    }
+
     #[inline]
     pub(super) fn minimizer_at(&self, start: usize, g: usize) -> Option<[u8; 8]> {
         if g == 0 || g > 32 {
@@ -318,6 +324,12 @@ impl EncodedBaseStore {
         }
         let records = std::mem::take(records);
         self.metadata = SequenceMetadata::InlineShort(records);
+    }
+
+    /// Number of stored sequences.
+    #[inline]
+    pub(crate) fn count(&self) -> usize {
+        self.metadata.len()
     }
 
     #[inline]

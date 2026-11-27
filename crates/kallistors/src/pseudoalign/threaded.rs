@@ -114,6 +114,18 @@ fn produce_batches<R: PackedSeqBatchSource>(
     Ok(())
 }
 
+/// One exact-match table for all workers, with the same total budget as the
+/// private tables it replaces, so a k-mer resolved by one worker hits for all.
+fn shared_match_table(
+    entries_per_worker: usize,
+    threads: usize,
+) -> Result<Option<Arc<super::core::SharedMatchTable>>> {
+    if std::env::var_os("KALLISTORS_PRIVATE_MATCH_CACHE").is_some() {
+        return Ok(None);
+    }
+    super::core::SharedMatchTable::new(entries_per_worker.saturating_mul(threads)).map(Some)
+}
+
 /// Fragment-length sampling budget for numbered paired buffers, independent of
 /// thread timing.
 ///
@@ -223,6 +235,29 @@ impl Drop for AbortOnDrop<'_> {
     }
 }
 
+/// Graph k-mer filter that lets workers reject absent k-mers in one load.
+fn shared_kmer_filter(
+    index: &BifrostIndex,
+    threads: usize,
+) -> Option<Arc<super::core::KmerFilter>> {
+    if std::env::var_os("KALLISTORS_NO_KMER_FILTER").is_some() {
+        return None;
+    }
+    if let Some(filter) = &index.kmer_filter {
+        return Some(Arc::clone(filter));
+    }
+    let start = Instant::now();
+    let filter = super::core::KmerFilter::build(index, threads).map(Arc::new);
+    if std::env::var_os("KALLISTORS_TIMINGS").is_some() {
+        eprintln!(
+            "[kmer-filter] built={} in {:.3}s",
+            filter.is_some(),
+            start.elapsed().as_secs_f64()
+        );
+    }
+    filter
+}
+
 pub fn pseudoalign_single_end_bifrost_with_options_threaded<
     R: ReadSource + PackedSeqBatchSource + Send,
 >(
@@ -265,6 +300,10 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
     let mut final_error: Option<Error> = None;
     let key_pool = Arc::new(super::utils::SharedEcPool::default());
 
+    let shared_matches = shared_match_table(cache_entries, threads)?;
+    let shared_matches = &shared_matches;
+    let kmer_filter = shared_kmer_filter(index, threads);
+    let kmer_filter = &kmer_filter;
     thread::scope(|scope| {
         // One prefetched batch overlaps decoding; rendezvous dispatch bounds read
         // storage independently of worker count without dropping or reordering input.
@@ -281,7 +320,13 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
             let key_pool = Arc::clone(&key_pool);
             handles.push(
                 scope.spawn(move || -> Result<(EcCounts, super::utils::SharedEcKeys)> {
-                    let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
+                    let _cache_budget = match &shared_matches {
+                        Some(table) => super::core::MatchCacheBudgetScope::enter_shared(
+                            Arc::clone(table),
+                            kmer_filter.clone(),
+                        )?,
+                        None => super::core::MatchCacheBudgetScope::enter(cache_entries)?,
+                    };
                     let mut pairs = super::core::ScopedEcPairs::new(index, threads);
                     let mut acc = EcCounts::new(options.bias);
                     let mut acc_map = EcCountMap::shared(key_pool);
@@ -423,6 +468,10 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
 
     let key_pool = Arc::new(super::utils::SharedEcPool::default());
     let sampler = OrderedSampler::new(options.fragment_length_samples, threads);
+    let shared_matches = shared_match_table(cache_entries, threads)?;
+    let shared_matches = &shared_matches;
+    let kmer_filter = shared_kmer_filter(index, threads);
+    let kmer_filter = &kmer_filter;
     thread::scope(|scope| {
         let (left_tx, left_rx) = bounded::<PackedSeqBatch>(1);
         let (right_tx, right_rx) = bounded::<PackedSeqBatch>(1);
@@ -443,7 +492,13 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
             let key_pool = Arc::clone(&key_pool);
             handles.push(
                 scope.spawn(move || -> Result<(EcCounts, super::utils::SharedEcKeys)> {
-                    let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
+                    let _cache_budget = match &shared_matches {
+                        Some(table) => super::core::MatchCacheBudgetScope::enter_shared(
+                            Arc::clone(table),
+                            kmer_filter.clone(),
+                        )?,
+                        None => super::core::MatchCacheBudgetScope::enter(cache_entries)?,
+                    };
                     let mut pairs = super::core::ScopedEcPairs::new(index, threads);
                     let mut acc = EcCounts::new(options.bias);
                     let mut acc_map = EcCountMap::shared(key_pool);

@@ -2,13 +2,15 @@
 
 mod block_cache;
 mod budget;
+mod kmer_filter;
 mod match_cache;
 mod minimizer_cache;
+pub(crate) use kmer_filter::KmerFilter;
 
 use block_cache::{BlockLookupCache, BlockLookupCacheEntry};
 use budget::MATCH_CACHE_DEFAULT_ENTRIES;
 pub(crate) use budget::MatchCacheBudgetScope;
-pub(crate) use match_cache::FastKmerMatch;
+pub(crate) use match_cache::{FastKmerMatch, SharedMatchTable};
 use match_cache::{FastKmerMatchCache, FastKmerMatchCacheEntry};
 use minimizer_cache::{MinimizerCandidateCache, MinimizerCandidateCacheEntry};
 
@@ -53,6 +55,8 @@ pub(crate) struct MphfLookupCache {
     query_fingerprints: super::super::fingerprints::QueryFingerprintCache,
     pub(super) scan_scratch: Option<Box<super::fast::FastScannerScratch>>,
     pub(super) slow_rev_buf: Vec<u8>,
+    /// Graph k-mer membership filter shared by the workers of one run.
+    pub(crate) kmer_filter: Option<std::sync::Arc<KmerFilter>>,
 }
 
 impl Default for MphfLookupCache {
@@ -65,6 +69,7 @@ impl Default for MphfLookupCache {
             query_fingerprints: super::super::fingerprints::QueryFingerprintCache::default(),
             scan_scratch: Some(Box::default()),
             slow_rev_buf: Vec::new(),
+            kmer_filter: None,
         }
     }
 }

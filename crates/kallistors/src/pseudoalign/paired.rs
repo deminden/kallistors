@@ -265,6 +265,13 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into<'index>(
 
     let mut sampled = 0usize;
     let mut merged = Vec::new();
+    // Sampling reads only each mate's EC and best placement, which the
+    // counting scanner also keeps; strand, shade, union and on-list modes use
+    // the full hit list, so they keep the complete scanner.
+    let placement_counting = options.strand_specific.is_none()
+        && !options.do_union
+        && !options.dfk_onlist
+        && !index.use_shade;
     for idx in read_range {
         let a_seq = unsafe { left_batch.seq_unchecked(idx) };
         let b_seq = unsafe { right_batch.seq_unchecked(idx) };
@@ -279,6 +286,8 @@ pub(crate) fn pseudoalign_paired_bifrost_batch_into<'index>(
         let scan = |seq: &[u8]| {
             if count_only {
                 super::core::ec_for_read_bifrost_counting(index, seq, strand, options)
+            } else if placement_counting {
+                super::core::ec_for_read_bifrost_single(index, seq, strand, options)
             } else {
                 super::ec_for_read_bifrost(index, seq, strand, None, options)
             }

@@ -61,7 +61,7 @@ pub(super) fn build_bifrost_index_with_positions_threaded_impl(
         }
     }
     drop(compressed_scratch);
-    let packed_bases = packed_graph.then(|| {
+    let mut packed_bases = packed_graph.then(|| {
         packed_values.shrink_to_fit();
         EncodedBaseStore {
             metadata: SequenceMetadata::new(packed_offsets, packed_lengths),
@@ -216,70 +216,168 @@ pub(super) fn build_bifrost_index_with_positions_threaded_impl(
         ));
     }
     let mut node_kmer = vec![0; k];
-    let prefix = if packed_graph
-        && store_ec_blocks
-        && load_positional_info
-        && node_count >= (1 << 20)
-        && abundant_base != 0
+    // Packed one-pass loads build the minimizer table from the unitig bases,
+    // MPHF and position bitmaps, none of which the EC node records below touch.
+    // Run that parallel build concurrently with the serial node decode.
+    let mut early_encoded = None;
+    let mut early_one_pass = None;
+    if packed_graph
         && let Some(pool) = rayon_pool.as_ref()
+        && let Some(unitig_bases) = packed_bases.take()
     {
-        super::positional_parallel::read_prefix(
-            &mut reader,
-            abundant_base,
-            k,
+        let encoded = EncodedUnitigs {
+            unitig_bases,
+            km_bases: EncodedBaseStore::from_fixed_words(std::mem::take(&mut packed_km_words), k),
+            g,
+        };
+        let ctx = one_pass::Context {
+            encoded: &encoded,
+            mphf: &mphf,
             pool,
-            &mut ec_blocks,
-        )?;
-        abundant_base
+            buckets: hmap_min_unitigs_sz,
+            k,
+        };
+        early_one_pass = Some(one_pass::eligible(
+            &ctx,
+            &bmp_unitigs,
+            &bmp_km,
+            special_minz.len(),
+        ));
+        early_encoded = Some(encoded);
+    }
+    let overlap = early_one_pass == Some(true);
+    let mut overlapped_minimizers = None;
+    let mut loaded_filter = None;
+    // Abundant k-mer keys do not change during node decode (only their ids).
+    let abundant: Vec<u64> = if overlap {
+        h_kmer_map
+            .as_ref()
+            .map_or_else(Vec::new, |map| map.keys().copied().collect())
     } else {
-        0
+        Vec::new()
     };
-    for node_row in prefix..node_count {
-        if node_row < abundant_base {
-            // Vector-backed graph entries retain their serialized order.
-            reader.seek_relative(k as i64)?;
+    let mut decode_nodes = || -> Result<()> {
+        let prefix = if packed_graph
+            && store_ec_blocks
+            && load_positional_info
+            && node_count >= (1 << 20)
+            && abundant_base != 0
+            && let Some(pool) = rayon_pool.as_ref()
+        {
+            super::positional_parallel::read_prefix(
+                &mut reader,
+                abundant_base,
+                k,
+                pool,
+                &mut ec_blocks,
+            )?;
+            abundant_base
         } else {
-            // Bifrost reinserts abundant k-mers into a hash table when loading
-            // the graph. Its iteration order can differ from the graph file's
-            // order. Node records carry the authoritative k-mer/EC association.
-            reader.read_exact(&mut node_kmer)?;
-            if packed_graph {
-                associate_abundant_word(
-                    &mut packed_h_words,
-                    h_kmer_map.as_mut().expect("nonempty abundant k-mers"),
-                    abundant_base,
-                    node_row,
-                    &node_kmer,
-                )?;
+            0
+        };
+        for node_row in prefix..node_count {
+            if node_row < abundant_base {
+                // Vector-backed graph entries retain their serialized order.
+                reader.seek_relative(k as i64)?;
             } else {
-                associate_abundant_node(
-                    &mut h_kmers,
-                    h_kmer_map.as_mut().expect("nonempty abundant k-mers"),
-                    abundant_base,
-                    node_row,
-                    &node_kmer,
+                // Bifrost reinserts abundant k-mers into a hash table when loading
+                // the graph. Its iteration order can differ from the graph file's
+                // order. Node records carry the authoritative k-mer/EC association.
+                reader.read_exact(&mut node_kmer)?;
+                if packed_graph {
+                    associate_abundant_word(
+                        &mut packed_h_words,
+                        h_kmer_map.as_mut().expect("nonempty abundant k-mers"),
+                        abundant_base,
+                        node_row,
+                        &node_kmer,
+                    )?;
+                } else {
+                    associate_abundant_node(
+                        &mut h_kmers,
+                        h_kmer_map.as_mut().expect("nonempty abundant k-mers"),
+                        abundant_base,
+                        node_row,
+                        &node_kmer,
+                    )?;
+                }
+            }
+            let node_size = read_u32_le(&mut reader)? as usize;
+            if !store_ec_blocks && !load_positional_info {
+                flat_ec.push_buffered_node(&mut reader, node_size, &mut node_buf)?;
+                continue;
+            }
+            if store_ec_blocks {
+                with_buffered_node(&mut reader, node_size, &mut node_buf, |bytes| {
+                    ec_blocks.append_payload(bytes, load_positional_info)
+                })?;
+            } else {
+                let blocks = read_buffered_blocks(
+                    &mut reader,
+                    node_size,
+                    &mut node_buf,
+                    load_positional_info,
                 )?;
+                flat_ec.push_unitig_blocks(&blocks);
             }
         }
-        let node_size = read_u32_le(&mut reader)? as usize;
-        if !store_ec_blocks && !load_positional_info {
-            flat_ec.push_buffered_node(&mut reader, node_size, &mut node_buf)?;
-            continue;
-        }
-        if store_ec_blocks {
-            with_buffered_node(&mut reader, node_size, &mut node_buf, |bytes| {
-                ec_blocks.append_payload(bytes, load_positional_info)
-            })?;
-        } else {
-            let blocks =
-                read_buffered_blocks(&mut reader, node_size, &mut node_buf, load_positional_info)?;
-            flat_ec.push_unitig_blocks(&blocks);
-        }
+        Ok(())
+    };
+    if overlap {
+        let encoded = early_encoded.as_ref().expect("encoded before overlap");
+        let pool = rayon_pool.as_ref().expect("eligible pool");
+        let (bitmaps, km_bitmaps, special) = (
+            std::mem::take(&mut bmp_unitigs),
+            std::mem::take(&mut bmp_km),
+            std::mem::take(&mut special_minz),
+        );
+        let filter_threads = (load_threads / 2).max(1);
+        let (decoded, built, filter) = std::thread::scope(|scope| {
+            // The node decode leaves cores idle beside the minimizer build;
+            // the read-mapping k-mer filter needs only the graph sequences.
+            let filter = (std::env::var_os("KALLISTORS_NO_KMER_FILTER").is_none()).then(|| {
+                let abundant = &abundant;
+                scope.spawn(move || {
+                    super::super::core::KmerFilter::build_from(encoded, abundant, k, filter_threads)
+                })
+            });
+            let mphf = &mphf;
+            let builder = scope.spawn(move || {
+                one_pass::build(
+                    one_pass::Context {
+                        encoded,
+                        mphf,
+                        pool,
+                        buckets: hmap_min_unitigs_sz,
+                        k,
+                    },
+                    bitmaps,
+                    km_bitmaps,
+                    special,
+                )
+            });
+            let decoded = decode_nodes();
+            let filter = filter
+                .and_then(|handle| handle.join().ok())
+                .flatten()
+                .map(std::sync::Arc::new);
+            (decoded, builder.join(), filter)
+        });
+        decoded?;
+        loaded_filter = filter;
+        overlapped_minimizers = Some(match built {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        });
+    } else {
+        decode_nodes()?;
     }
     flat_ec.owned_ec_blocks = ec_blocks.finish();
     crate::index::scratch_pages::retire(std::mem::take(&mut flat_ec.ec_intern_cache));
     crate::index::scratch_pages::retire(node_buf);
-    let encoded_unitigs = if let Some(unitig_bases) = packed_bases {
+    let encoded_unitigs = if let Some(encoded) = early_encoded {
+        encoded
+    } else if let Some(unitig_bases) = packed_bases {
         EncodedUnitigs {
             unitig_bases,
             km_bases: EncodedBaseStore::from_fixed_words(packed_km_words, k),
@@ -301,21 +399,23 @@ pub(super) fn build_bifrost_index_with_positions_threaded_impl(
     };
     crate::index::scratch_pages::retire(packed_h_words);
     drop(_graph_timing);
-    let use_one_pass = packed_graph
-        && rayon_pool.as_ref().is_some_and(|pool| {
-            one_pass::eligible(
-                &one_pass::Context {
-                    encoded: &encoded_unitigs,
-                    mphf: &mphf,
-                    pool,
-                    buckets: hmap_min_unitigs_sz,
-                    k,
-                },
-                &bmp_unitigs,
-                &bmp_km,
-                special_minz.len(),
-            )
-        });
+    let use_one_pass = early_one_pass.unwrap_or_else(|| {
+        packed_graph
+            && rayon_pool.as_ref().is_some_and(|pool| {
+                one_pass::eligible(
+                    &one_pass::Context {
+                        encoded: &encoded_unitigs,
+                        mphf: &mphf,
+                        pool,
+                        buckets: hmap_min_unitigs_sz,
+                        k,
+                    },
+                    &bmp_unitigs,
+                    &bmp_km,
+                    special_minz.len(),
+                )
+            })
+    });
     // Keep the existing serial fallback and small-reference dispatch intact.
     // Only the structurally eligible huge-reference attempt needs a one-worker
     // executor; no additional workers are used for a one-thread request.
@@ -349,7 +449,9 @@ pub(super) fn build_bifrost_index_with_positions_threaded_impl(
     } else {
         None
     };
-    let (minz_positions, minz_fingerprints) = if let Some(result) = large {
+    let (minz_positions, minz_fingerprints) = if let Some(result) = overlapped_minimizers {
+        result
+    } else if let Some(result) = large {
         for bitmap in bmp_unitigs {
             bitmap.retire();
         }
@@ -516,6 +618,11 @@ pub(super) fn build_bifrost_index_with_positions_threaded_impl(
         km_unitigs,
         h_kmers,
         h_kmer_map,
+        kmer_filter: if onlist.use_shade {
+            None
+        } else {
+            loaded_filter
+        },
         dlist,
         encoded_unitigs,
         kmer_pos_index: None,
