@@ -31,6 +31,8 @@ pub(super) struct FastKmerMatchCache {
     /// When set, every worker reads and writes this one table instead of
     /// `entries`, so a k-mer resolved by any worker is a hit for all of them.
     pub(super) shared: Option<std::sync::Arc<SharedMatchTable>>,
+    /// Inserts into `shared` not yet added to its run-wide total.
+    pub(super) pending_inserts: u32,
 }
 
 /// One 32-byte slot holding the same positive and negative records as
@@ -56,7 +58,18 @@ const LOW_MASK: u64 = SEQ_ONE - 1;
 pub(crate) struct SharedMatchTable {
     pointer: std::ptr::NonNull<SharedMatchEntry>,
     len: usize,
+    /// Slots in use, a prefix of the allocation. Keys hash into this range,
+    /// so untouched pages of the budget are never faulted in.
+    active: std::sync::atomic::AtomicUsize,
+    /// Inserts recorded by all workers, in batches of [`INSERT_BATCH`].
+    inserts: std::sync::atomic::AtomicU64,
 }
+
+/// First active range: every worker's first probes land in it, so it starts
+/// well above a private table's warm-up size (2M entries, 64 MiB).
+const INITIAL_ACTIVE: usize = 1 << 21;
+/// Inserts a worker counts locally before adding them to the shared total.
+pub(super) const INSERT_BATCH: u32 = 256;
 
 // SAFETY: the table only exposes atomics and frees its allocation on drop.
 unsafe impl Send for SharedMatchTable {}
@@ -76,7 +89,30 @@ impl SharedMatchTable {
                 layout.size()
             )))
         })?;
-        Ok(std::sync::Arc::new(Self { pointer, len }))
+        Ok(std::sync::Arc::new(Self {
+            pointer,
+            len,
+            active: std::sync::atomic::AtomicUsize::new(len.min(INITIAL_ACTIVE)),
+            inserts: std::sync::atomic::AtomicU64::new(0),
+        }))
+    }
+
+    /// Adds `count` inserts to the run's total and doubles the active range
+    /// once the total reaches its size. The range follows the run's
+    /// distinct k-mers rather than the worker count. Cached replies depend
+    /// only on their key, so a remapped slot only turns hits into misses.
+    pub(super) fn record_inserts(&self, count: u32) {
+        use std::sync::atomic::Ordering;
+        let total = self.inserts.fetch_add(u64::from(count), Ordering::Relaxed) + u64::from(count);
+        let active = self.active.load(Ordering::Relaxed);
+        if active < self.len && total >= active as u64 {
+            let _ = self.active.compare_exchange(
+                active,
+                (active * 2).min(self.len),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+        }
     }
 
     #[inline]
@@ -87,7 +123,8 @@ impl SharedMatchTable {
     #[inline]
     fn slot(&self, key: u64) -> usize {
         let hash = key.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 32;
-        ((hash * self.len as u64) >> 32) as usize
+        let active = self.active.load(std::sync::atomic::Ordering::Relaxed);
+        ((hash * active as u64) >> 32) as usize
     }
 
     #[inline]
@@ -219,6 +256,7 @@ impl FastKmerMatchCache {
             // Complete query/flag keys still decide every positive/negative hit.
             entries: vec![FastKmerMatchCacheEntry::default(); MATCH_CACHE_ENTRIES.with(Cell::get)],
             shared: None,
+            pending_inserts: 0,
         }
     }
 
@@ -254,6 +292,11 @@ impl FastKmerMatchCache {
     #[inline]
     pub(super) fn put(&mut self, key: u64, flags: u8, value: Option<FastKmerMatch>) {
         if let Some(shared) = &self.shared {
+            self.pending_inserts += 1;
+            if self.pending_inserts == INSERT_BATCH {
+                self.pending_inserts = 0;
+                shared.record_inserts(INSERT_BATCH);
+            }
             return shared.put(key, flags, value);
         }
         let slot = self.slot(key);
