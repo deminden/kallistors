@@ -13,19 +13,22 @@ The default follows ordinary short-read quantification in original kallisto v0.5
    terminating byte per mate, with upstream's strict `< buffer_size` fit rule.
 3. Number the logical buffers in input order.
 4. Give buffer `i` a quota of the goal minus the observations kept by buffers
-   `1..=i - W`, where `W` is the number of mapping workers. The first `W` buffers
-   each receive the full goal.
+   `1..i`. The first buffer receives the full goal.
 5. Keep each buffer's first qualifying observations, in read order, up to its quota.
 
 Original kallisto snapshots a shared remaining quota at the start of each buffer and
 publishes the buffer's count when it finishes. Concurrent buffers can therefore start
 with the same quota and overshoot the goal, and their scheduling can change the final
 histogram and, consequently, abundance estimates. The quota above is the one that shared
-counter gives when `W` workers run in step. kallistors applies it explicitly, so the
-sample is the same in every run for a fixed input, goal and thread count. It can still
-exceed the goal with several threads, and it differs between thread counts. Because
-original kallisto's sample depends on timing, identical EC counts alone do not guarantee
-identical abundance.
+counter gives when one worker runs, and kallistors applies it for any number of workers,
+so the sample is the first qualifying observations in input order: the same in every run
+for a fixed input and goal, at every thread count, and never above the goal. This matches
+original kallisto on one thread. With several threads original kallisto's sample depends
+on timing, so identical EC counts alone do not guarantee identical abundance.
+
+Before 0.7.0, buffer `i`'s quota followed buffers `1..=i - W`, where `W` was the worker
+count: the quota a shared counter gives when `W` workers run in step. That sample was fixed
+for a given thread count but differed between thread counts.
 Parser chunks retain their smaller size for input throughput. A logical sampling buffer
 can span several parser chunks or split one; its quota is carried across all those chunks.
 Once sampling finishes, mapping uses the usual small work batches. No sequence copies
@@ -45,8 +48,7 @@ Both `quant` and `pseudoalign` accept `--fragment-length-samples N`. The default
 counting and EM implementations with an identical observation model. For the Rust API, set
 `PseudoalignOptions::fragment_length_samples`.
 
-Paired `quant` reports the actual observation count, mean, and standard deviation. The actual
-count may exceed the requested goal with multiple threads.
+Paired `quant` reports the actual observation count, mean, and standard deviation.
 
 ## Validation
 
@@ -57,9 +59,9 @@ invariance between sampled and all-observation runs, and serial/multithreaded ex
 self-contained Rust-built synthetic indexes. Opt-in upstream comparisons use a separately
 built original-kallisto index. The complete EC map remains the correctness gate for speed
 experiments. To isolate EM arithmetic, replay the same ECs and histogram with both implementations.
-Within kallistors, the default sampled model is fixed for a given input and thread count, and
-`--fragment-length-samples 0` provides an all-observation model that is also independent of
-the thread count; original kallisto requires diagnostic controls for a matched model.
+Within kallistors, the default sampled model is fixed for a given input at every thread
+count, and `--fragment-length-samples 0` provides an all-observation model; original
+kallisto requires diagnostic controls for a matched model.
 
 Sampling is retained for upstream compatibility. Its speed effect is assessed with complete
 quantification runs.
@@ -77,7 +79,6 @@ fragment model, within-program variation and one-versus-eight-thread comparison.
 effective lengths, expressed-target percentiles and within-program variation together.
 Agreement with one upstream estimate does not establish biological accuracy.
 
-For a fragment model that does not depend on the thread count, `--fragment-length-samples 0`
-uses all qualifying observations. It can add processing work and produces a different model
-from the default sampled run. Replaying an identical saved histogram and EC map with matched EM
+`--fragment-length-samples 0` uses all qualifying observations. It can add processing work
+and produces a different model from the default sampled run. Replaying an identical saved histogram and EC map with matched EM
 settings isolates implementation differences from sampling differences.

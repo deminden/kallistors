@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.7.0 (unreleased)
+
+### Performance
+
+- Paired quantification of 4.4M GENCODE v50 pairs at 8 threads takes 4.9 s instead of
+  8.3 s (1.67x): one lock-free match cache shared by all workers, a graph k-mer filter in
+  front of the full lookup, batched MPHF probes and prefetching, overlapped index decoding,
+  parallel decoding of size-tagged gzip members, and a concurrent, one-pass EM. EC sets are
+  identical and abundances agree within floating-point ordering noise.
+- The shared match cache grows with the run's distinct k-mers instead of touching its whole
+  budget: peak RSS at 14 threads falls from 4.5 GB to 2.8 GB.
+
+### Reproducibility
+
+- The paired fragment-length sample no longer depends on the thread count: it is the first
+  qualifying observations in input order, as on one thread. Effective lengths, and through
+  them abundances, are now the same at every thread count. Multithreaded results differ from
+  0.6.2, which tied the sample to the worker count.
+
+### API
+
+- New `readkit` feature: `pseudoalign_paired_batches_threaded` and
+  `pseudoalign_single_end_batches_threaded` map reads from a readkit `BatchSource`, moving
+  each batch's sequence buffers into the pipeline without a copy. `io::readkit` converts
+  batches by move or copy.
+- `PackedSeqBatch::from_parts` builds a sequence batch over an existing buffer.
+- `Error::Source` carries a caller-supplied source's error with its own type.
+
 ## 0.6.2
 
 ### Reproducibility
