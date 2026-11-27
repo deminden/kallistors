@@ -947,6 +947,8 @@ dependencies = [
 [[package]]
 name = "readkit"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ebb5234a0c4bbd08aea5f9ff81a1a470338392e6c18977d3c083b96a7a4b173"
 dependencies = [
  "readkit-batch",
  "readkit-fastq",
@@ -956,10 +958,14 @@ dependencies = [
 [[package]]
 name = "readkit-batch"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ea1cbf9d671d26daea8d8cdb29d91b34fc123c4d5b2f6f1dbd714026c4da03f"
 
 [[package]]
 name = "readkit-fastq"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "110fd47f03b81349d236b3604fa2aacd33dd766b0d71f7db70af0e76561b091d"
 dependencies = [
  "memchr",
  "readkit-batch",
@@ -969,6 +975,8 @@ dependencies = [
 [[package]]
 name = "readkit-io"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd66a7ddd0885f4bb641a2999bb50777848407fa12295722eab689c5b0f97f8a"
 dependencies = [
  "readkit-batch",
 ]
