@@ -11,4 +11,8 @@ pub enum Error {
     UnsupportedFeature(String),
     #[error("missing file: {0}")]
     MissingFile(PathBuf),
+    /// An error from a caller-supplied read source, kept with its own type so
+    /// callers can recover it with `downcast_ref`.
+    #[error("read source: {0}")]
+    Source(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
 }

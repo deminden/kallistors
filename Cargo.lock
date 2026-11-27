@@ -591,6 +591,9 @@ dependencies = [
  "noodles-sam",
  "rayon",
  "rdst",
+ "readkit",
+ "readkit-batch",
+ "readkit-io",
  "serde_json",
  "strength_reduce",
  "tempfile",
@@ -939,6 +942,35 @@ dependencies = [
  "rayon",
  "tikv-jemallocator",
  "voracious_radix_sort",
+]
+
+[[package]]
+name = "readkit"
+version = "0.1.1"
+dependencies = [
+ "readkit-batch",
+ "readkit-fastq",
+ "readkit-io",
+]
+
+[[package]]
+name = "readkit-batch"
+version = "0.1.1"
+
+[[package]]
+name = "readkit-fastq"
+version = "0.1.1"
+dependencies = [
+ "memchr",
+ "readkit-batch",
+ "readkit-io",
+]
+
+[[package]]
+name = "readkit-io"
+version = "0.1.1"
+dependencies = [
+ "readkit-batch",
 ]
 
 [[package]]

@@ -11,6 +11,8 @@ use crate::error::Error;
 const FASTQ_IO_BUFFER_BYTES: usize = 1 << 20;
 
 mod parallel_gz;
+#[cfg(feature = "readkit")]
+pub mod readkit;
 
 /// A FASTQ record (raw bytes, no validation).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +114,28 @@ impl PackedSeqBatch {
             storage: Vec::with_capacity(bytes),
             records: Vec::with_capacity(records),
         }
+    }
+
+    /// A batch over sequences already laid out in one buffer, such as a
+    /// readkit sequence column, without copying them. `spans[i]` is the byte
+    /// range of sequence `i` in `storage`.
+    pub fn from_parts(
+        storage: Vec<u8>,
+        spans: impl IntoIterator<Item = std::ops::Range<u32>>,
+    ) -> Result<Self> {
+        let len = storage.len();
+        let records = spans
+            .into_iter()
+            .map(|span| {
+                if span.start > span.end || span.end as usize > len {
+                    return Err(Error::InvalidFormat(format!(
+                        "sequence span {span:?} outside a {len}-byte buffer"
+                    )));
+                }
+                Ok(PackedSeqRecord { seq: span.into() })
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self { storage, records })
     }
 
     pub fn is_empty(&self) -> bool {

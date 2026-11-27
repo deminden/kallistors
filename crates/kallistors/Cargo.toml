@@ -37,10 +37,21 @@ noodles-csi = "0.62.0"
 noodles-sam = "0.91.0"
 rdst = "0.20.14"
 memchr = "2.8.3"
+readkit-batch = { version = "0.1.1", path = "../../../readkit/crates/readkit-batch", optional = true }
+readkit-io = { version = "0.1.1", path = "../../../readkit/crates/readkit-io", optional = true }
+
+[features]
+## Map reads from readkit batch sources.
+readkit = ["dep:readkit-batch", "dep:readkit-io"]
 
 [dev-dependencies]
+readkit = { version = "0.1.1", path = "../../../readkit/crates/readkit", default-features = false, features = ["fastq"] }
 tempfile = "3.27.0"
 serde_json = "1.0.154"
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc = "0.2.190"
+
+[[example]]
+name = "readkit_parity"
+required-features = ["readkit"]
