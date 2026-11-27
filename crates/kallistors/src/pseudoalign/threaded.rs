@@ -130,12 +130,13 @@ fn shared_match_table(
 /// thread timing.
 ///
 /// Workers take buffers in input order. Buffer `i` (1-based) may record up to
-/// `goal - observations(buffers 1..=i - lag)` observations, where `lag` is the
-/// worker count: the budget a worker sees when the `lag - 1` buffers handed
-/// out just before its own are still running, which is how a shared,
-/// submit-on-finish counter behaves when workers run at the same speed. Making
-/// that dependency explicit fixes the sampled set for any timing; a worker
-/// only ever waits for strictly earlier buffers, so the wait always ends.
+/// `goal - observations(buffers 1..=i - lag)` observations. With `lag` equal
+/// to the worker count this is the budget a worker sees when the `lag - 1`
+/// buffers handed out just before its own are still running, which is how a
+/// shared, submit-on-finish counter behaves when workers run at the same
+/// speed. Mapping uses `lag = 1`, which makes the sample independent of the
+/// worker count as well as of timing. A worker only ever waits for strictly
+/// earlier buffers, so the wait always ends.
 struct OrderedSampler {
     goal: usize,
     lag: u64,
@@ -155,10 +156,10 @@ struct OrderedSamplerState {
 }
 
 impl OrderedSampler {
-    fn new(goal: usize, workers: usize) -> Self {
+    fn new(goal: usize, lag: usize) -> Self {
         Self {
             goal,
-            lag: workers.max(1) as u64,
+            lag: lag.max(1) as u64,
             state: std::sync::Mutex::new(OrderedSamplerState {
                 prefix: vec![0],
                 pending: std::collections::BTreeMap::new(),
@@ -575,7 +576,10 @@ pub(crate) fn paired_pipeline(
     let mut final_error: Option<Error> = None;
 
     let key_pool = Arc::new(super::utils::SharedEcPool::default());
-    let sampler = OrderedSampler::new(options.fragment_length_samples, threads);
+    // Lag 1: each buffer's budget follows every earlier buffer, so the sample
+    // is the first qualifying pairs in input order, as on one thread, for any
+    // worker count.
+    let sampler = OrderedSampler::new(options.fragment_length_samples, 1);
     let shared_matches = shared_match_table(cache_entries, threads)?;
     let shared_matches = &shared_matches;
     let kmer_filter = shared_kmer_filter(index, threads);
