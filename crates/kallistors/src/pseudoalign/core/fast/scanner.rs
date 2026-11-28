@@ -2,6 +2,67 @@
 
 use super::*;
 
+/// Slice equality that skips the element comparison when both hits name the
+/// same index-owned EC, as consecutive hits in one unitig block do.
+#[inline(always)]
+fn same_ec(left: &[u32], right: &[u32]) -> bool {
+    std::ptr::eq(left, right) || left == right
+}
+
+/// Positions ahead of a failed k-mer whose match-cache slots are hinted.
+/// After a miss the scanner tries `pos + 1`, `pos + 2`, ... until something
+/// matches, so these addresses are known before the probes that need them.
+const STREAK_PREFETCH: usize = 6;
+
+/// Forward k-mer code of a position ahead of the scanner, rolled one base at
+/// a time while the prefetched positions advance consecutively.
+struct AheadCursor {
+    k: usize,
+    mask: u64,
+    pos: usize,
+    codes: Option<(u64, u64)>,
+}
+
+impl AheadCursor {
+    fn new(k: usize) -> Self {
+        Self {
+            k,
+            mask: if k >= 32 {
+                u64::MAX
+            } else {
+                (1u64 << (2 * k)) - 1
+            },
+            pos: usize::MAX,
+            codes: None,
+        }
+    }
+
+    #[inline(always)]
+    fn prefetch(&mut self, seq: &[u8], target: usize, last_pos: usize, cache: &MphfLookupCache) {
+        if target > last_pos {
+            return;
+        }
+        let codes = match self.codes {
+            Some((forward, reverse)) if self.pos.wrapping_add(1) == target => {
+                let code = crate::dna::BASE_CODES[seq[target + self.k - 1] as usize];
+                (code != crate::dna::INVALID_BASE_CODE).then(|| {
+                    let code = u64::from(code);
+                    (
+                        ((forward << 2) | code) & self.mask,
+                        (reverse >> 2) | ((3 - code) << (2 * (self.k - 1))),
+                    )
+                })
+            }
+            _ => crate::dna::encode_kmer_pair(&seq[target..target + self.k]),
+        };
+        self.pos = target;
+        self.codes = codes;
+        if let Some((forward, reverse)) = codes {
+            cache.prefetch_match_key(forward, forward.min(reverse));
+        }
+    }
+}
+
 // COUNT_ONLY can omit the hit vector while PLACEMENT still retains the first
 // orientation hit and best match for strand/fragment filters. TRACE records
 // decisions separately, so enabling diagnostics does not require another mapper.
@@ -85,6 +146,9 @@ fn ec_for_read_bifrost_fast_with_cache_cached<
     let mut kmer_cursor = KmerPairCursor::new(index.k);
     let mut pos = 0usize;
     let last_pos = seq.len() - index.k;
+    let prefetch_streaks = !TRACE && !match_cache_disabled && cache.prefetch_match_capacity();
+    let mut ahead = AheadCursor::new(index.k);
+    let mut previous_miss = usize::MAX;
     while pos <= last_pos {
         if TRACE && let Some(state) = dbg.as_deref_mut() {
             state.saw_valid_kmer = true;
@@ -196,6 +260,17 @@ fn ec_for_read_bifrost_fast_with_cache_cached<
                 && state.first_no_match.is_none()
             {
                 state.first_no_match = Some((pos, 0));
+            }
+            if prefetch_streaks {
+                // Read-only hints: lookups, insertions and order are unchanged.
+                if previous_miss.wrapping_add(1) == pos {
+                    ahead.prefetch(seq, pos + STREAK_PREFETCH, last_pos, cache);
+                } else {
+                    for distance in 1..=STREAK_PREFETCH {
+                        ahead.prefetch(seq, pos + distance, last_pos, cache);
+                    }
+                }
+                previous_miss = pos;
             }
             pos += 1;
             continue;
@@ -393,7 +468,7 @@ fn ec_for_read_bifrost_fast_with_cache_cached<
                     let block_idx2 = next_hit.block_idx;
                     let next_relaxed = next_hit.matched_relaxed;
                     let next_ec = ec_slice(index, uid2, block_idx2);
-                    if uid2 == uid && next_ec == current_ec {
+                    if uid2 == uid && same_ec(next_ec, current_ec) {
                         if TRACE && let Some(state) = dbg.as_deref_mut() {
                             state.jump_decisions.push(JumpDecisionTrace {
                                 read_pos: pos,
@@ -478,8 +553,9 @@ fn ec_for_read_bifrost_fast_with_cache_cached<
                                 let block_idx3 = mid_hit.block_idx;
                                 let mid_relaxed = mid_hit.matched_relaxed;
                                 let mid_ec = ec_slice(index, uid3, block_idx3);
-                                let mid_matches_current = uid3 == uid && mid_ec == current_ec;
-                                let mid_matches_next = uid3 == uid2 && mid_ec == next_ec;
+                                let mid_matches_current =
+                                    uid3 == uid && same_ec(mid_ec, current_ec);
+                                let mid_matches_next = uid3 == uid2 && same_ec(mid_ec, next_ec);
                                 if mid_matches_current || mid_matches_next {
                                     if TRACE && let Some(state) = dbg.as_deref_mut() {
                                         state.jump_decisions.push(JumpDecisionTrace {

@@ -114,16 +114,29 @@ fn produce_batches<R: PackedSeqBatchSource>(
     Ok(())
 }
 
+/// One exact-match table for all workers, with the same total budget as the
+/// private tables it replaces, so a k-mer resolved by one worker hits for all.
+fn shared_match_table(
+    entries_per_worker: usize,
+    threads: usize,
+) -> Result<Option<Arc<super::core::SharedMatchTable>>> {
+    if std::env::var_os("KALLISTORS_PRIVATE_MATCH_CACHE").is_some() {
+        return Ok(None);
+    }
+    super::core::SharedMatchTable::new(entries_per_worker.saturating_mul(threads)).map(Some)
+}
+
 /// Fragment-length sampling budget for numbered paired buffers, independent of
 /// thread timing.
 ///
 /// Workers take buffers in input order. Buffer `i` (1-based) may record up to
-/// `goal - observations(buffers 1..=i - lag)` observations, where `lag` is the
-/// worker count: the budget a worker sees when the `lag - 1` buffers handed
-/// out just before its own are still running, which is how a shared,
-/// submit-on-finish counter behaves when workers run at the same speed. Making
-/// that dependency explicit fixes the sampled set for any timing; a worker
-/// only ever waits for strictly earlier buffers, so the wait always ends.
+/// `goal - observations(buffers 1..=i - lag)` observations. With `lag` equal
+/// to the worker count this is the budget a worker sees when the `lag - 1`
+/// buffers handed out just before its own are still running, which is how a
+/// shared, submit-on-finish counter behaves when workers run at the same
+/// speed. Mapping uses `lag = 1`, which makes the sample independent of the
+/// worker count as well as of timing. A worker only ever waits for strictly
+/// earlier buffers, so the wait always ends.
 struct OrderedSampler {
     goal: usize,
     lag: u64,
@@ -143,10 +156,10 @@ struct OrderedSamplerState {
 }
 
 impl OrderedSampler {
-    fn new(goal: usize, workers: usize) -> Self {
+    fn new(goal: usize, lag: usize) -> Self {
         Self {
             goal,
-            lag: workers.max(1) as u64,
+            lag: lag.max(1) as u64,
             state: std::sync::Mutex::new(OrderedSamplerState {
                 prefix: vec![0],
                 pending: std::collections::BTreeMap::new(),
@@ -223,11 +236,88 @@ impl Drop for AbortOnDrop<'_> {
     }
 }
 
+/// Graph k-mer filter that lets workers reject absent k-mers in one load.
+fn shared_kmer_filter(
+    index: &BifrostIndex,
+    threads: usize,
+) -> Option<Arc<super::core::KmerFilter>> {
+    if std::env::var_os("KALLISTORS_NO_KMER_FILTER").is_some() {
+        return None;
+    }
+    if let Some(filter) = &index.kmer_filter {
+        return Some(Arc::clone(filter));
+    }
+    let start = Instant::now();
+    let filter = super::core::KmerFilter::build(index, threads).map(Arc::new);
+    if std::env::var_os("KALLISTORS_TIMINGS").is_some() {
+        eprintln!(
+            "[kmer-filter] built={} in {:.3}s",
+            filter.is_some(),
+            start.elapsed().as_secs_f64()
+        );
+    }
+    filter
+}
+
+/// Runs `produce` on its own thread, feeding batches through a one-slot queue
+/// to `consume` on this thread, so input decoding overlaps mapping.
+///
+/// A producer error is reported ahead of the consumer's: when the producer
+/// fails, its queue closes and the consumer sees a short (or mismatched)
+/// stream, which is a consequence rather than the cause.
+pub(crate) fn with_producer<T, P, C, O>(produce: P, consume: C) -> Result<O>
+where
+    T: Send,
+    P: FnOnce(&Sender<T>) -> Result<()> + Send,
+    C: FnOnce(&mut dyn FnMut() -> Result<Option<T>>) -> Result<O>,
+{
+    thread::scope(|scope| {
+        let (tx, rx) = bounded::<T>(1);
+        let read_start = Instant::now();
+        let producer = scope.spawn(move || produce(&tx));
+        let consumed = consume(&mut || Ok(rx.recv().ok()));
+        // Disconnect before joining: an early consumer exit can leave the
+        // producer blocked in send even though no more batches are needed.
+        drop(rx);
+        let produced = producer
+            .join()
+            .unwrap_or_else(|_| Err(Error::InvalidFormat("producer thread panicked".into())));
+        timing::add_duration(Stage::FastqReadDecompress, read_start.elapsed());
+        produced?;
+        consumed
+    })
+}
+
 pub fn pseudoalign_single_end_bifrost_with_options_threaded<
     R: ReadSource + PackedSeqBatchSource + Send,
 >(
     index: &BifrostIndex,
     reader: &mut R,
+    strand: Strand,
+    filter: Option<FragmentFilter>,
+    options: PseudoalignOptions,
+    threads: usize,
+) -> Result<EcCounts> {
+    if threads <= 1 {
+        return single_end_pipeline(
+            index,
+            &mut || reader.next_packed_seq_batch(4_096),
+            strand,
+            filter,
+            options,
+            threads,
+        );
+    }
+    with_producer(
+        |tx| produce_batches(reader, tx, 4_096),
+        |next| single_end_pipeline(index, next, strand, filter, options, threads),
+    )
+}
+
+/// Single-end mapping over sequence batches in input order, from any source.
+pub(crate) fn single_end_pipeline(
+    index: &BifrostIndex,
+    next: &mut dyn FnMut() -> Result<Option<PackedSeqBatch>>,
     strand: Strand,
     filter: Option<FragmentFilter>,
     options: PseudoalignOptions,
@@ -244,7 +334,7 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
         let mut pairs = super::core::ScopedEcPairs::new(index, threads.max(1));
         let mut counts = EcCounts::new(options.bias);
         let mut map = EcCountMap::default();
-        while let Some(batch) = reader.next_packed_seq_batch(4_096)? {
+        while let Some(batch) = next()? {
             super::single::pseudoalign_single_end_bifrost_batch_into(
                 index,
                 batch,
@@ -265,15 +355,15 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
     let mut final_error: Option<Error> = None;
     let key_pool = Arc::new(super::utils::SharedEcPool::default());
 
+    let shared_matches = shared_match_table(cache_entries, threads)?;
+    let shared_matches = &shared_matches;
+    let kmer_filter = shared_kmer_filter(index, threads);
+    let kmer_filter = &kmer_filter;
     thread::scope(|scope| {
-        // One prefetched batch overlaps decoding; rendezvous dispatch bounds read
-        // storage independently of worker count without dropping or reordering input.
-        let (producer_tx, producer_rx) = bounded::<PackedSeqBatch>(1);
+        // Rendezvous dispatch bounds read storage independently of worker
+        // count without dropping or reordering input.
         let (work_tx, work_rx) = bounded::<PackedSeqBatch>(0);
         let mut handles = Vec::with_capacity(threads);
-
-        let read_start = Instant::now();
-        let producer = scope.spawn(move || produce_batches(reader, &producer_tx, 4_096));
 
         let pseudoalign_start = Instant::now();
         for _ in 0..threads {
@@ -281,7 +371,13 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
             let key_pool = Arc::clone(&key_pool);
             handles.push(
                 scope.spawn(move || -> Result<(EcCounts, super::utils::SharedEcKeys)> {
-                    let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
+                    let _cache_budget = match &shared_matches {
+                        Some(table) => super::core::MatchCacheBudgetScope::enter_shared(
+                            Arc::clone(table),
+                            kmer_filter.clone(),
+                        )?,
+                        None => super::core::MatchCacheBudgetScope::enter(cache_entries)?,
+                    };
                     let mut pairs = super::core::ScopedEcPairs::new(index, threads);
                     let mut acc = EcCounts::new(options.bias);
                     let mut acc_map = EcCountMap::shared(key_pool);
@@ -303,57 +399,25 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
         }
 
         drop(work_rx);
-        while let Ok(batch) = producer_rx.recv() {
-            if work_tx.send(batch).is_err() {
-                final_error = Some(Error::InvalidFormat("worker queue closed".into()));
-                break;
+        loop {
+            match next() {
+                Ok(Some(batch)) => {
+                    if work_tx.send(batch).is_err() {
+                        final_error = Some(Error::InvalidFormat("worker queue closed".into()));
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    final_error = Some(err);
+                    break;
+                }
             }
         }
         drop(work_tx);
-        // Disconnect both queues before joining: an early worker exit can leave
-        // the producer blocked in send even though no more batches are needed.
-        drop(producer_rx);
-
-        match producer.join() {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                if final_error.is_none() {
-                    final_error = Some(err);
-                }
-            }
-            Err(_) => {
-                if final_error.is_none() {
-                    final_error = Some(Error::InvalidFormat("producer thread panicked".into()));
-                }
-            }
-        }
-        timing::add_duration(Stage::FastqReadDecompress, read_start.elapsed());
 
         key_pool.clear();
-        for handle in handles {
-            match handle.join() {
-                Ok(Ok((counts, keys))) => {
-                    let merge_start = Instant::now();
-                    super::utils::merge_shared_ec_counts(
-                        &mut merged,
-                        &mut merged_map,
-                        counts,
-                        keys,
-                    );
-                    timing::add_duration(Stage::EcMerge, merge_start.elapsed());
-                }
-                Ok(Err(err)) => {
-                    if final_error.is_none() {
-                        final_error = Some(err);
-                    }
-                }
-                Err(_) => {
-                    if final_error.is_none() {
-                        final_error = Some(Error::InvalidFormat("worker thread panicked".into()));
-                    }
-                }
-            }
-        }
+        join_workers(handles, &mut merged, &mut merged_map, &mut final_error);
         timing::add_duration(Stage::Pseudoalign, pseudoalign_start.elapsed());
     });
 
@@ -362,6 +426,39 @@ pub fn pseudoalign_single_end_bifrost_with_options_threaded<
     } else {
         Ok(merged)
     }
+}
+
+type WorkerResult = Result<(EcCounts, super::utils::SharedEcKeys)>;
+
+fn join_workers(
+    handles: Vec<thread::ScopedJoinHandle<'_, WorkerResult>>,
+    merged: &mut EcCounts,
+    merged_map: &mut EcCountMap,
+    final_error: &mut Option<Error>,
+) {
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok((counts, keys))) => {
+                let merge_start = Instant::now();
+                super::utils::merge_shared_ec_counts(merged, merged_map, counts, keys);
+                timing::add_duration(Stage::EcMerge, merge_start.elapsed());
+            }
+            Ok(Err(err)) => {
+                if final_error.is_none() {
+                    *final_error = Some(err);
+                }
+            }
+            Err(_) => {
+                if final_error.is_none() {
+                    *final_error = Some(Error::InvalidFormat("worker thread panicked".into()));
+                }
+            }
+        }
+    }
+}
+
+fn mate_mismatch() -> Error {
+    Error::InvalidFormat("paired FASTQ length mismatch".into())
 }
 
 pub fn pseudoalign_paired_bifrost_with_options_threaded<
@@ -381,39 +478,96 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
             index, reader1, reader2, strand, options,
         );
     }
+    if threads <= 1 {
+        // Ordinary mapping parses sequence-only batches without workers.
+        return paired_pipeline(
+            index,
+            &mut || {
+                let left = reader1.next_packed_seq_batch(super::BATCH_SIZE / 2)?;
+                let right = reader2.next_packed_seq_batch(super::BATCH_SIZE / 2)?;
+                match (left, right) {
+                    (None, None) => Ok(None),
+                    (Some(left), Some(right)) => Ok(Some((left, right))),
+                    _ => Err(mate_mismatch()),
+                }
+            },
+            strand,
+            options,
+            threads,
+        );
+    }
+    // One decoding thread per mate file, zipped batch by batch.
+    thread::scope(|scope| {
+        let (left_tx, left_rx) = bounded::<PackedSeqBatch>(1);
+        let (right_tx, right_rx) = bounded::<PackedSeqBatch>(1);
+        let read_start = Instant::now();
+        let left = scope.spawn(move || produce_batches(reader1, &left_tx, super::BATCH_SIZE / 2));
+        let right = scope.spawn(move || produce_batches(reader2, &right_tx, super::BATCH_SIZE / 2));
+        let consumed = paired_pipeline(
+            index,
+            &mut || match (left_rx.recv().ok(), right_rx.recv().ok()) {
+                (None, None) => Ok(None),
+                (Some(left), Some(right)) => Ok(Some((left, right))),
+                _ => Err(mate_mismatch()),
+            },
+            strand,
+            options,
+            threads,
+        );
+        // Release blocked senders before joining producers after an error.
+        drop(left_rx);
+        drop(right_rx);
+        let mut produced = Ok(());
+        for producer in [left, right] {
+            let result = producer
+                .join()
+                .unwrap_or_else(|_| Err(Error::InvalidFormat("producer thread panicked".into())));
+            if produced.is_ok() {
+                produced = result;
+            }
+        }
+        timing::add_duration(Stage::FastqReadDecompress, read_start.elapsed());
+        produced?;
+        consumed
+    })
+}
+
+/// Paired mapping over batches of both mates in input order, from any source.
+pub(crate) fn paired_pipeline(
+    index: &BifrostIndex,
+    next: &mut dyn FnMut() -> Result<Option<(PackedSeqBatch, PackedSeqBatch)>>,
+    strand: Strand,
+    options: PseudoalignOptions,
+    threads: usize,
+) -> Result<EcCounts> {
     let cache_entries = options
         .match_cache_size
         .allocation(threads)?
         .entries_per_worker();
     if threads <= 1 {
         let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
-        // Ordinary mapping parses sequence-only batches without workers.
         let mut pairs = super::core::ScopedEcPairs::new(index, threads.max(1));
         let mut counts = EcCounts::new(options.bias);
         let mut ec_map = EcCountMap::default();
         let sampler = super::paired::FragmentLengthSampler::new(options.fragment_length_samples);
-        loop {
-            let left = reader1.next_packed_seq_batch(super::BATCH_SIZE / 2)?;
-            let right = reader2.next_packed_seq_batch(super::BATCH_SIZE / 2)?;
-            match (left, right) {
-                (None, None) => return Ok(counts),
-                (Some(left), Some(right)) => {
-                    super::paired::pseudoalign_paired_bifrost_batch_into(
-                        index,
-                        &left,
-                        &right,
-                        0..left.len(),
-                        strand,
-                        options,
-                        &mut counts,
-                        &mut ec_map,
-                        (options.fragment_length_samples != 0).then_some(&sampler),
-                        &mut pairs,
-                    )?;
-                }
-                _ => return Err(Error::InvalidFormat("paired FASTQ length mismatch".into())),
+        while let Some((left, right)) = next()? {
+            if left.len() != right.len() {
+                return Err(mate_mismatch());
             }
+            super::paired::pseudoalign_paired_bifrost_batch_into(
+                index,
+                &left,
+                &right,
+                0..left.len(),
+                strand,
+                options,
+                &mut counts,
+                &mut ec_map,
+                (options.fragment_length_samples != 0).then_some(&sampler),
+                &mut pairs,
+            )?;
         }
+        return Ok(counts);
     }
 
     let threads = threads.max(1);
@@ -422,106 +576,103 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
     let mut final_error: Option<Error> = None;
 
     let key_pool = Arc::new(super::utils::SharedEcPool::default());
-    let sampler = OrderedSampler::new(options.fragment_length_samples, threads);
+    // Lag 1: each buffer's budget follows every earlier buffer, so the sample
+    // is the first qualifying pairs in input order, as on one thread, for any
+    // worker count.
+    let sampler = OrderedSampler::new(options.fragment_length_samples, 1);
+    let shared_matches = shared_match_table(cache_entries, threads)?;
+    let shared_matches = &shared_matches;
+    let kmer_filter = shared_kmer_filter(index, threads);
+    let kmer_filter = &kmer_filter;
     thread::scope(|scope| {
-        let (left_tx, left_rx) = bounded::<PackedSeqBatch>(1);
-        let (right_tx, right_rx) = bounded::<PackedSeqBatch>(1);
         let (work_tx, work_rx) = bounded::<(u64, Vec<PairedChunk>)>(0);
         let mut sequence = 0u64;
         let mut handles = Vec::with_capacity(threads);
-
-        let read_start = Instant::now();
-        let left_producer =
-            scope.spawn(move || produce_batches(reader1, &left_tx, super::BATCH_SIZE / 2));
-        let right_producer =
-            scope.spawn(move || produce_batches(reader2, &right_tx, super::BATCH_SIZE / 2));
 
         let pseudoalign_start = Instant::now();
         for _ in 0..threads {
             let rx = work_rx.clone();
             let sampler = &sampler;
             let key_pool = Arc::clone(&key_pool);
-            handles.push(
-                scope.spawn(move || -> Result<(EcCounts, super::utils::SharedEcKeys)> {
-                    let _cache_budget = super::core::MatchCacheBudgetScope::enter(cache_entries)?;
-                    let mut pairs = super::core::ScopedEcPairs::new(index, threads);
-                    let mut acc = EcCounts::new(options.bias);
-                    let mut acc_map = EcCountMap::shared(key_pool);
-                    // A worker that stops early must not leave others waiting.
-                    let _abort = AbortOnDrop(sampler);
-                    while let Ok((sequence, chunks)) = rx.recv() {
-                        // Record this buffer's observations first and wait for
-                        // its budget afterwards, when earlier buffers are done.
-                        let recording = options.fragment_length_samples != 0 && !sampler.finished();
-                        let local_sampler = if recording {
-                            super::paired::FragmentLengthSampler::recording()
-                        } else {
-                            super::paired::FragmentLengthSampler::new(0)
-                        };
-                        for chunk in chunks {
-                            super::paired::pseudoalign_paired_bifrost_batch_into(
-                                index,
-                                &chunk.left,
-                                &chunk.right,
-                                chunk.reads,
-                                strand,
-                                options,
-                                &mut acc,
-                                &mut acc_map,
-                                (options.fragment_length_samples != 0).then_some(&local_sampler),
-                                &mut pairs,
-                            )?;
-                        }
-                        let observed = local_sampler.take_recorded();
-                        let budget = if recording {
-                            sampler.budget(sequence)
-                        } else {
-                            0
-                        };
-                        let kept = budget.min(observed.len());
-                        super::paired::add_fragment_lengths(&mut acc, &observed[..kept]);
-                        sampler.complete(sequence, kept);
+            handles.push(scope.spawn(move || -> WorkerResult {
+                let _cache_budget = match &shared_matches {
+                    Some(table) => super::core::MatchCacheBudgetScope::enter_shared(
+                        Arc::clone(table),
+                        kmer_filter.clone(),
+                    )?,
+                    None => super::core::MatchCacheBudgetScope::enter(cache_entries)?,
+                };
+                let mut pairs = super::core::ScopedEcPairs::new(index, threads);
+                let mut acc = EcCounts::new(options.bias);
+                let mut acc_map = EcCountMap::shared(key_pool);
+                // A worker that stops early must not leave others waiting.
+                let _abort = AbortOnDrop(sampler);
+                while let Ok((sequence, chunks)) = rx.recv() {
+                    // Record this buffer's observations first and wait for
+                    // its budget afterwards, when earlier buffers are done.
+                    let recording = options.fragment_length_samples != 0 && !sampler.finished();
+                    let local_sampler = if recording {
+                        super::paired::FragmentLengthSampler::recording()
+                    } else {
+                        super::paired::FragmentLengthSampler::new(0)
+                    };
+                    for chunk in chunks {
+                        super::paired::pseudoalign_paired_bifrost_batch_into(
+                            index,
+                            &chunk.left,
+                            &chunk.right,
+                            chunk.reads,
+                            strand,
+                            options,
+                            &mut acc,
+                            &mut acc_map,
+                            (options.fragment_length_samples != 0).then_some(&local_sampler),
+                            &mut pairs,
+                        )?;
                     }
-                    std::mem::forget(_abort);
-                    Ok((acc, acc_map.into_shared_keys()))
-                }),
-            );
-        }
-
-        let mut batch_builder = PairedBatchBuilder::default();
-        loop {
-            let left = left_rx.recv().ok();
-            let right = right_rx.recv().ok();
-            match (left, right) {
-                (Some(left_batch), Some(right_batch)) => {
-                    let limit = if options.fragment_length_samples != 0 && !sampler.finished() {
-                        PAIRED_SAMPLING_BUFFER_BYTES
+                    let observed = local_sampler.take_recorded();
+                    let budget = if recording {
+                        sampler.budget(sequence)
                     } else {
                         0
                     };
-                    match batch_builder.push(left_batch, right_batch, limit) {
-                        Ok(batches) => {
-                            for batch in batches {
-                                sequence += 1;
-                                if work_tx.send((sequence, batch)).is_err() {
-                                    final_error =
-                                        Some(Error::InvalidFormat("worker queue closed".into()));
-                                    break;
-                                }
-                            }
-                            if final_error.is_some() {
-                                break;
-                            }
-                        }
-                        Err(err) => {
-                            final_error = Some(err);
-                            break;
+                    let kept = budget.min(observed.len());
+                    super::paired::add_fragment_lengths(&mut acc, &observed[..kept]);
+                    sampler.complete(sequence, kept);
+                }
+                std::mem::forget(_abort);
+                Ok((acc, acc_map.into_shared_keys()))
+            }));
+        }
+        drop(work_rx);
+
+        let mut batch_builder = PairedBatchBuilder::default();
+        'input: loop {
+            let (left, right) = match next() {
+                Ok(Some(pair)) => pair,
+                Ok(None) => break,
+                Err(err) => {
+                    final_error = Some(err);
+                    break;
+                }
+            };
+            let limit = if options.fragment_length_samples != 0 && !sampler.finished() {
+                PAIRED_SAMPLING_BUFFER_BYTES
+            } else {
+                0
+            };
+            match batch_builder.push(left, right, limit) {
+                Ok(batches) => {
+                    for batch in batches {
+                        sequence += 1;
+                        if work_tx.send((sequence, batch)).is_err() {
+                            final_error = Some(Error::InvalidFormat("worker queue closed".into()));
+                            break 'input;
                         }
                     }
                 }
-                (None, None) => break,
-                (None, Some(_)) | (Some(_), None) => {
-                    final_error = Some(Error::InvalidFormat("paired FASTQ length mismatch".into()));
+                Err(err) => {
+                    final_error = Some(err);
                     break;
                 }
             }
@@ -533,52 +684,9 @@ pub fn pseudoalign_paired_bifrost_with_options_threaded<
             final_error = Some(Error::InvalidFormat("worker queue closed".into()));
         }
         drop(work_tx);
-        // Release blocked senders before joining producers after an input error.
-        drop(left_rx);
-        drop(right_rx);
-
-        for producer in [left_producer, right_producer] {
-            match producer.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    if final_error.is_none() {
-                        final_error = Some(err);
-                    }
-                }
-                Err(_) => {
-                    if final_error.is_none() {
-                        final_error = Some(Error::InvalidFormat("producer thread panicked".into()));
-                    }
-                }
-            }
-        }
-        timing::add_duration(Stage::FastqReadDecompress, read_start.elapsed());
 
         key_pool.clear();
-        for handle in handles {
-            match handle.join() {
-                Ok(Ok((counts, keys))) => {
-                    let merge_start = Instant::now();
-                    super::utils::merge_shared_ec_counts(
-                        &mut merged,
-                        &mut merged_map,
-                        counts,
-                        keys,
-                    );
-                    timing::add_duration(Stage::EcMerge, merge_start.elapsed());
-                }
-                Ok(Err(err)) => {
-                    if final_error.is_none() {
-                        final_error = Some(err);
-                    }
-                }
-                Err(_) => {
-                    if final_error.is_none() {
-                        final_error = Some(Error::InvalidFormat("worker thread panicked".into()));
-                    }
-                }
-            }
-        }
+        join_workers(handles, &mut merged, &mut merged_map, &mut final_error);
         timing::add_duration(Stage::Pseudoalign, pseudoalign_start.elapsed());
     });
 

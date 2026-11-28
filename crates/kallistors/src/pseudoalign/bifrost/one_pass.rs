@@ -3,6 +3,7 @@ use super::{
     BitmapPositions, BooPhf, EncodedUnitigs, LOAD_BATCH_POSITIONS, LOAD_MIN_PAR_CHUNK, MinzOffsets,
     MinzPositionIndex, UnitigBlockState, advance_unitig_state,
 };
+use crate::index::bifrost::MphfBatchKeys;
 use crate::pseudoalign::fingerprints::{self, DISABLED};
 use crate::timing::{self, Stage};
 use rayon::prelude::*;
@@ -14,10 +15,30 @@ const ORD_LIMIT: usize = 1 << ORD_BITS;
 const ORD_MASK: u64 = (1 << ORD_BITS) - 1;
 const UID_LIMIT: usize = (1 << 21) - 1;
 const UID_MASK: u64 = UID_LIMIT as u64;
-const MULTI_TAG: u64 = UID_MASK << 42;
+/// Without KM positions or special minimizers the KM bit (code bit 37) is
+/// never set, so the wide layout spends it on a 22nd unitig-ID bit. The
+/// all-ones ID still tags multi-position buckets.
+const WIDE_UID_LIMIT: usize = (1 << 22) - 1;
+
+#[inline(always)]
+const fn uid_mask<const W: bool>() -> u64 {
+    if W { WIDE_UID_LIMIT as u64 } else { UID_MASK }
+}
+#[inline(always)]
+const fn multi_tag<const W: bool>() -> u64 {
+    uid_mask::<W>() << 42
+}
+/// Whether this input can use the 22-bit unitig-ID layout.
+fn wide_layout(ctx: &Context<'_>, km: &[BitmapPositions], special: usize) -> bool {
+    special == 0
+        && ctx.encoded.km_bases.metadata.is_empty()
+        && km.iter().all(|bitmap| bitmap.len() == 0)
+}
 const LOCAL_BITS: u32 = 20;
 const LOCAL_MASK: u64 = (1 << LOCAL_BITS) - 1;
 const LOOKUP_KEY_MASK: u64 = (1 << 46) - 1;
+/// MPHF probes per batch during one-pass ordinary lookup.
+const ONE_PASS_LANES: usize = 16;
 
 pub(super) struct Context<'a> {
     pub(super) encoded: &'a EncodedUnitigs,
@@ -39,7 +60,12 @@ pub(super) fn eligible(
         && ordinary.len() <= 1
         && km.len() <= 1
         && ctx.buckets < ORD_LIMIT
-        && ctx.encoded.unitig_bases.metadata.len() < UID_LIMIT
+        && ctx.encoded.unitig_bases.metadata.len()
+            < if wide_layout(ctx, km, special) {
+                WIDE_UID_LIMIT
+            } else {
+                UID_LIMIT
+            }
         && ctx.encoded.km_bases.metadata.len() < UID_LIMIT
         && (0..ctx.encoded.unitig_bases.metadata.len()).all(|i| {
             ctx.encoded
@@ -121,21 +147,31 @@ impl rdst::RadixKey for Event {
         ((self.key << 4) >> (level * 8)) as u8
     }
 }
-fn position_code(position: u64) -> Option<u64> {
+fn position_code<const W: bool>(position: u64) -> Option<u64> {
     let uid = position >> 32;
     let rel = position & 0x7fff_ffff;
-    (uid < UID_MASK && rel < (1 << 16))
-        .then_some((uid << 16) | rel | (((position >> 31) & 1) << 37))
+    if W {
+        // No KM bit: positions with bit 31 set take the raw overflow path.
+        let rel = position & 0xffff_ffff;
+        (uid < uid_mask::<W>() && rel < (1 << 16)).then_some((uid << 16) | rel)
+    } else {
+        (uid < UID_MASK && rel < (1 << 16))
+            .then_some((uid << 16) | rel | (((position >> 31) & 1) << 37))
+    }
 }
-fn decode_position(code: u64) -> u64 {
-    ((code >> 16 & UID_MASK) << 32) | (code & 0xffff) | ((code >> 37 & 1) << 31)
+fn decode_position<const W: bool>(code: u64) -> u64 {
+    if W {
+        ((code >> 16 & uid_mask::<W>()) << 32) | (code & 0xffff)
+    } else {
+        ((code >> 16 & UID_MASK) << 32) | (code & 0xffff) | ((code >> 37 & 1) << 31)
+    }
 }
 
-struct Builder {
+struct Builder<const W: bool> {
     states: Vec<u64>,
     events: Vec<Event>,
 }
-impl Builder {
+impl<const W: bool> Builder<W> {
     fn new(buckets: usize, input: usize) -> Self {
         Self {
             states: vec![0; buckets],
@@ -144,7 +180,7 @@ impl Builder {
     }
     #[inline]
     fn record_code(&mut self, bucket: usize, code: u64, ordinal: u32) {
-        record_code_state(
+        record_code_state::<W>(
             &mut self.states[bucket],
             &mut self.events,
             bucket,
@@ -153,7 +189,7 @@ impl Builder {
         );
     }
     fn record_existing(&mut self, bucket: usize, old: u64, current: Event) {
-        record_existing_state(
+        record_existing_state::<W>(
             &mut self.states[bucket],
             &mut self.events,
             bucket,
@@ -162,14 +198,14 @@ impl Builder {
         );
     }
     fn record_raw(&mut self, bucket: usize, position: u64, ordinal: u32) {
-        if let Some(code) = position_code(position) {
+        if let Some(code) = position_code::<W>(position) {
             self.record_code(bucket, code, ordinal);
             return;
         }
         let old = self.states[bucket];
         let current = Event::new(bucket, ordinal, position);
         if old == 0 {
-            self.states[bucket] = MULTI_TAG | 1;
+            self.states[bucket] = multi_tag::<W>() | 1;
             self.events.push(current);
         } else {
             self.record_existing(bucket, old, current);
@@ -183,8 +219,8 @@ impl Builder {
             self.states.par_iter_mut().for_each(|state| {
                 if *state == 0 {
                     *state = 1 << 63;
-                } else if *state & MULTI_TAG != MULTI_TAG {
-                    *state = decode_position(*state >> ORD_BITS);
+                } else if *state & multi_tag::<W>() != multi_tag::<W>() {
+                    *state = decode_position::<W>(*state >> ORD_BITS);
                 }
             })
         });
@@ -228,7 +264,7 @@ impl Builder {
     }
 }
 #[inline]
-fn record_code_state(
+fn record_code_state<const W: bool>(
     state: &mut u64,
     events: &mut Vec<Event>,
     bucket: usize,
@@ -240,37 +276,37 @@ fn record_code_state(
         *state = (code << ORD_BITS) | (u64::from(ordinal) + 1);
         return;
     }
-    record_existing_state(
+    record_existing_state::<W>(
         state,
         events,
         bucket,
         old,
-        Event::new(bucket, ordinal, decode_position(code)),
+        Event::new(bucket, ordinal, decode_position::<W>(code)),
     );
 }
-fn record_existing_state(
+fn record_existing_state<const W: bool>(
     state: &mut u64,
     events: &mut Vec<Event>,
     bucket: usize,
     old: u64,
     current: Event,
 ) {
-    if old & MULTI_TAG == MULTI_TAG {
+    if old & multi_tag::<W>() == multi_tag::<W>() {
         *state = old + 1;
     } else {
         events.push(Event::new(
             bucket,
             ((old & ORD_MASK) - 1) as u32,
-            decode_position(old >> ORD_BITS),
+            decode_position::<W>(old >> ORD_BITS),
         ));
-        *state = MULTI_TAG | 2;
+        *state = multi_tag::<W>() | 2;
     }
     events.push(current);
 }
 
-fn merge_ordinary_chunks(
+fn merge_ordinary_chunks<const W: bool>(
     pool: &rayon::ThreadPool,
-    builder: &mut Builder,
+    builder: &mut Builder<W>,
     fingerprints: &[AtomicU16],
     chunks: &[Vec<LookupRecord>],
     base: u32,
@@ -297,7 +333,7 @@ fn merge_ordinary_chunks(
                     for &record in &chunk[lo..hi] {
                         let bucket = record.bucket();
                         fingerprints::observe_serial(&fingerprints[bucket], record.fingerprint());
-                        record_code_state(
+                        record_code_state::<W>(
                             &mut states[bucket - first],
                             &mut events,
                             bucket,
@@ -315,9 +351,9 @@ fn merge_ordinary_chunks(
     }
 }
 
-fn ordinary_batch(
+fn ordinary_batch<const W: bool>(
     ctx: &Context<'_>,
-    builder: &mut Builder,
+    builder: &mut Builder<W>,
     fingerprints: &[AtomicU16],
     positions: &[u64],
     base: u32,
@@ -330,20 +366,37 @@ fn ordinary_batch(
             .enumerate()
             .map(|(chunk, positions)| {
                 let mut records = Vec::with_capacity(positions.len());
-                for (i, &position) in positions.iter().enumerate() {
-                    if let Some(bytes) = ctx.encoded.unitig_bases.minimizer_at(
-                        (position >> 32) as usize,
-                        position as u32 as usize,
-                        23,
-                    ) && let Some(bucket) = ctx.mphf.lookup(&bytes)
+                // Batched MPHF probes keep several independent rank-word misses
+                // in flight; results and record order match per-key lookup.
+                let mut keys = MphfBatchKeys::<ONE_PASS_LANES>::new();
+                for (group, positions) in positions.chunks(ONE_PASS_LANES).enumerate() {
+                    keys.clear();
+                    for (lane, &position) in positions.iter().enumerate() {
+                        keys.set(
+                            lane,
+                            ctx.encoded.unitig_bases.minimizer_at(
+                                (position >> 32) as usize,
+                                position as u32 as usize,
+                                23,
+                            ),
+                        );
+                    }
+                    let buckets = ctx.mphf.lookup_batch(&keys);
+                    for (lane, (bucket, bytes)) in buckets.into_iter().zip(keys.iter()).enumerate()
                     {
-                        let code = ((position >> 32) << 16) | (position & 0xffff);
-                        records.push(LookupRecord::new(
-                            bucket as u32,
-                            (chunk * chunk_len + i) as u32,
-                            code,
-                            fingerprints::word_fingerprint(u64::from_le_bytes(bytes)),
-                        ));
+                        if lane >= positions.len() {
+                            break;
+                        }
+                        if let (Some(bucket), Some(bytes)) = (bucket, bytes) {
+                            let position = positions[lane];
+                            let code = ((position >> 32) << 16) | (position & 0xffff);
+                            records.push(LookupRecord::new(
+                                bucket as u32,
+                                (chunk * chunk_len + group * ONE_PASS_LANES + lane) as u32,
+                                code,
+                                fingerprints::word_fingerprint(u64::from_le_bytes(bytes)),
+                            ));
+                        }
                     }
                 }
                 records
@@ -369,13 +422,15 @@ fn ordinary_batch(
         }
     }
 }
-fn km_batch(
+fn km_batch<const W: bool>(
     ctx: &Context<'_>,
-    builder: &mut Builder,
+    builder: &mut Builder<W>,
     fingerprints: &[AtomicU16],
     positions: &[u32],
     base: u32,
 ) {
+    // The wide layout is selected only without KM positions; KM codes need bit 37.
+    debug_assert!(!W);
     let chunk_len =
         (positions.len() / (ctx.pool.current_num_threads() * 4).max(1)).max(LOAD_MIN_PAR_CHUNK);
     let chunks: Vec<Vec<LookupRecord>> = ctx.pool.install(|| {
@@ -431,6 +486,19 @@ pub(super) fn build(
     specials: Vec<(u64, u64)>,
 ) -> (MinzPositionIndex, Vec<AtomicU16>) {
     debug_assert!(eligible(&ctx, &ordinary, &km, specials.len()));
+    if wide_layout(&ctx, &km, specials.len()) {
+        build_layout::<true>(ctx, ordinary, km, specials)
+    } else {
+        build_layout::<false>(ctx, ordinary, km, specials)
+    }
+}
+
+fn build_layout<const W: bool>(
+    ctx: Context<'_>,
+    ordinary: Vec<BitmapPositions>,
+    km: Vec<BitmapPositions>,
+    specials: Vec<(u64, u64)>,
+) -> (MinzPositionIndex, Vec<AtomicU16>) {
     let _count = timing::scoped(Stage::MinimizerCountPass);
     let input: usize = ordinary
         .iter()
@@ -438,7 +506,7 @@ pub(super) fn build(
         .map(BitmapPositions::len)
         .sum::<usize>()
         + specials.len();
-    let mut builder = Builder::new(ctx.buckets, input);
+    let mut builder = Builder::<W>::new(ctx.buckets, input);
     let fingerprints: Vec<_> = (0..ctx.buckets).map(|_| AtomicU16::new(0)).collect();
     let mut ordinal = 0u32;
     let mut batch = Vec::with_capacity(LOAD_BATCH_POSITIONS);
@@ -565,6 +633,36 @@ mod tests {
             );
             assert_eq!(record.fingerprint(), fingerprint);
         }
+        builder_layout_preserves_positions::<false>();
+        builder_layout_preserves_positions::<true>();
+    }
+
+    #[test]
+    fn wide_layout_round_trips_unitig_ids_beyond_21_bits() {
+        for uid in [
+            0u64,
+            1,
+            (1 << 21) - 2,
+            (1 << 21) - 1,
+            1 << 21,
+            2_586_192,
+            (1 << 22) - 2,
+        ] {
+            for rel in [0u64, 1, 65535] {
+                let position = (uid << 32) | rel;
+                let code = position_code::<true>(position).expect("wide code");
+                assert_eq!(decode_position::<true>(code), position);
+                assert_ne!(code << ORD_BITS & multi_tag::<true>(), multi_tag::<true>());
+            }
+        }
+        // The all-ones ID is reserved for multi-position buckets, and KM-flagged
+        // positions are never encoded inline by the wide layout.
+        assert!(position_code::<true>(((1u64 << 22) - 1) << 32).is_none());
+        assert!(position_code::<true>(0x8000_0001).is_none());
+        assert!(position_code::<false>(1u64 << 21 << 32).is_none());
+    }
+
+    fn builder_layout_preserves_positions<const W: bool>() {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(2)
             .build()
@@ -581,7 +679,7 @@ mod tests {
             (4, (2 << 32) | 2),
         ];
         for len in [0, 1, cases.len()] {
-            let mut builder = Builder::new(5, len);
+            let mut builder = Builder::<W>::new(5, len);
             let mut expected = vec![Vec::new(); 5];
             for (ordinal, &(bucket, position)) in cases[..len].iter().enumerate().rev() {
                 builder.record_raw(bucket, position, ordinal as u32);
@@ -605,8 +703,8 @@ mod tests {
                 .num_threads(workers)
                 .build()
                 .unwrap();
-            let mut serial = Builder::new(17, 500);
-            let mut parallel = Builder::new(17, 500);
+            let mut serial = Builder::<W>::new(17, 500);
+            let mut parallel = Builder::<W>::new(17, 500);
             let serial_fp: Vec<_> = (0..17).map(|_| AtomicU16::new(0)).collect();
             let parallel_fp: Vec<_> = (0..17).map(|_| AtomicU16::new(0)).collect();
             serial.record_raw(4, u64::MAX, 0);
@@ -644,7 +742,7 @@ mod tests {
                         );
                     }
                 }
-                merge_ordinary_chunks(&pool, &mut parallel, &parallel_fp, &chunks, base);
+                merge_ordinary_chunks::<W>(&pool, &mut parallel, &parallel_fp, &chunks, base);
             }
             let serial = serial.finish(&pool);
             let parallel = parallel.finish(&pool);

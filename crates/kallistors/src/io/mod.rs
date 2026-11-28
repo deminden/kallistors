@@ -10,6 +10,10 @@ use crate::error::Error;
 
 const FASTQ_IO_BUFFER_BYTES: usize = 1 << 20;
 
+mod parallel_gz;
+#[cfg(feature = "readkit")]
+pub mod readkit;
+
 /// A FASTQ record (raw bytes, no validation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FastqRecord {
@@ -112,6 +116,28 @@ impl PackedSeqBatch {
         }
     }
 
+    /// A batch over sequences already laid out in one buffer, such as a
+    /// readkit sequence column, without copying them. `spans[i]` is the byte
+    /// range of sequence `i` in `storage`.
+    pub fn from_parts(
+        storage: Vec<u8>,
+        spans: impl IntoIterator<Item = std::ops::Range<u32>>,
+    ) -> Result<Self> {
+        let len = storage.len();
+        let records = spans
+            .into_iter()
+            .map(|span| {
+                if span.start > span.end || span.end as usize > len {
+                    return Err(Error::InvalidFormat(format!(
+                        "sequence span {span:?} outside a {len}-byte buffer"
+                    )));
+                }
+                Ok(PackedSeqRecord { seq: span.into() })
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self { storage, records })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
@@ -151,6 +177,8 @@ fn span_as_usize(span: PackedSpan) -> Range<usize> {
 
 pub enum FastqInput {
     Gzip(Box<BufReader<flate2::bufread::MultiGzDecoder<BufReader<File>>>>),
+    /// Gzip members with recorded sizes, inflated on several threads.
+    ParallelGzip(Box<parallel_gz::ParallelGzReader>),
     Plain(BufReader<File>),
     Stdin(BufReader<Stdin>),
 }
@@ -159,6 +187,7 @@ impl Read for FastqInput {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Self::Gzip(reader) => reader.read(buf),
+            Self::ParallelGzip(reader) => reader.read(buf),
             Self::Plain(reader) => reader.read(buf),
             Self::Stdin(reader) => reader.read(buf),
         }
@@ -171,6 +200,7 @@ impl BufRead for FastqInput {
     fn read_until(&mut self, byte: u8, out: &mut Vec<u8>) -> std::io::Result<usize> {
         match self {
             Self::Gzip(reader) => reader.read_until(byte, out),
+            Self::ParallelGzip(reader) => reader.read_until(byte, out),
             Self::Plain(reader) => reader.read_until(byte, out),
             Self::Stdin(reader) => reader.read_until(byte, out),
         }
@@ -178,6 +208,7 @@ impl BufRead for FastqInput {
     fn skip_until(&mut self, byte: u8) -> std::io::Result<usize> {
         match self {
             Self::Gzip(reader) => reader.skip_until(byte),
+            Self::ParallelGzip(reader) => reader.skip_until(byte),
             Self::Plain(reader) => reader.skip_until(byte),
             Self::Stdin(reader) => reader.skip_until(byte),
         }
@@ -185,6 +216,7 @@ impl BufRead for FastqInput {
     fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
         match self {
             Self::Gzip(reader) => reader.fill_buf(),
+            Self::ParallelGzip(reader) => reader.fill_buf(),
             Self::Plain(reader) => reader.fill_buf(),
             Self::Stdin(reader) => reader.fill_buf(),
         }
@@ -193,6 +225,7 @@ impl BufRead for FastqInput {
     fn consume(&mut self, amt: usize) {
         match self {
             Self::Gzip(reader) => reader.consume(amt),
+            Self::ParallelGzip(reader) => reader.consume(amt),
             Self::Plain(reader) => reader.consume(amt),
             Self::Stdin(reader) => reader.consume(amt),
         }
@@ -208,7 +241,14 @@ pub fn open_fastq_reader(path: &Path) -> Result<FastqReader<FastqInput>> {
     }
     let file = File::open(path).map_err(|_| Error::MissingFile(path.to_path_buf()))?;
     let reader = if path.extension().and_then(|s| s.to_str()) == Some("gz") {
-        let file = BufReader::with_capacity(FASTQ_IO_BUFFER_BYTES, file);
+        let mut file = BufReader::with_capacity(FASTQ_IO_BUFFER_BYTES, file);
+        if parallel_gz::has_sized_members(&mut file)?
+            && std::env::var_os("KALLISTORS_SEQUENTIAL_GZIP").is_none()
+        {
+            return Ok(FastqReader::new(FastqInput::ParallelGzip(Box::new(
+                parallel_gz::ParallelGzReader::new(file),
+            ))));
+        }
         // Consume our compressed buffer directly; the Read adapter would add
         // another buffer and copy between it and this one.
         // A concatenation of lane files is multiple gzip members. Decode all

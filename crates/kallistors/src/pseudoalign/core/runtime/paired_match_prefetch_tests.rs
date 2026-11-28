@@ -22,7 +22,7 @@ fn hints_do_not_insert_evict_or_change_exact_match_answers() {
         b"NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN".as_slice(),
         b"acgtacgtacgtacgtacgtacgtacgtacg".as_slice(),
     ] {
-        cache.prefetch_initial_match_words(sequence, sequence);
+        cache.prefetch_match_word_ends(sequence);
     }
     let got = cache.match_get(key, 15).flatten().unwrap();
     assert_eq!(

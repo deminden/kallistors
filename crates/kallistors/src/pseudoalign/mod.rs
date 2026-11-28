@@ -17,6 +17,8 @@ use crate::{Error, Result};
 mod bias;
 mod cache_budget;
 pub use cache_budget::{MatchCacheAllocation, MatchCacheSize};
+#[cfg(feature = "readkit")]
+mod batches;
 mod bifrost;
 mod core;
 mod debug;
@@ -31,6 +33,8 @@ mod paired_counting;
 mod single;
 mod threaded;
 mod utils;
+#[cfg(feature = "readkit")]
+pub use batches::{pseudoalign_paired_batches_threaded, pseudoalign_single_end_batches_threaded};
 use bias::bias_hexamer_for_match;
 pub use bifrost::{
     BifrostIndex, build_bifrost_index, build_bifrost_index_positional_packed_threaded,
